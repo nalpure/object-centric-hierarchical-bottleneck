@@ -1,0 +1,26 @@
+{
+    "single_frame": {
+        "data_path": "data/balls_2frame_train.h5",
+        "ckpt_path": "slot_attention/checkpoints/3-body/",
+        "resolution": [50,50],
+        "num_slots": 3,
+        "num_iterations": 3,
+        "slots_dim": 64,
+        "small_arch": true,
+        "batch_size": 12,
+        "learning_rate": 0.0004,
+        "num_epochs": 1
+    },
+    "two_frames": {
+        "data_path":  "data/balls_2frame_train.h5",
+        "ckpt_path": "slot_attention/checkpoints/3-body/",
+        "resolution": [50,50],
+        "num_slots": 6,
+        "num_iterations": 6,
+        "slots_dim": 64,
+        "small_arch": true,
+        "batch_size": 12,
+        "learning_rate": 0.0004,
+        "num_epochs": 1
+    }
+}
