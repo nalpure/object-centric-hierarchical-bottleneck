@@ -22,5 +22,17 @@
         "batch_size": 12,
         "learning_rate": 0.0004,
         "num_epochs": 1
+    },
+    "single_frame_spriteworld": {
+        "data_path": "data/spriteworld.h5",
+        "ckpt_path": "slot_attention/checkpoints/spriteworld/",
+        "resolution": [64,64],
+        "num_slots": 3,
+        "num_iterations": 3,
+        "slots_dim": 64,
+        "small_arch": true,
+        "batch_size": 12,
+        "learning_rate": 0.0004,
+        "num_epochs": 1
     }
 }
