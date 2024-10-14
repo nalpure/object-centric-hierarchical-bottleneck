@@ -39,7 +39,7 @@ num_output_figs = 3 # must be <= number samples per batch
 output_dir = 'data/slot_evaluation'
 criterion = torch.nn.MSELoss()
 
-epoch = 0 # TODO automize for multiple epochs
+epoch = 999 # TODO automize for multiple epochs
 full_ckpt_path = args["ckpt_path"]+args["ckpt_name"]+"_"+str(epoch)+"ep.ckpt"
 
 
