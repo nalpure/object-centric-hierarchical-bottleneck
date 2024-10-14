@@ -1,2 +1,6 @@
 /data
 */__pycache__
+/env
+*/checkpoints
+*.pyc
+requirements.txt
