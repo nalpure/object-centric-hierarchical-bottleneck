@@ -120,16 +120,17 @@ else:
 steps = args["data_size"] // args["batch_size"]
 
 model.train()
+current_step = 0
 for epoch in range(epoch, args["num_epochs"]):
     total_loss = 0
-    for i, sample in enumerate(tqdm(train_dataloader, position=0)):
-        if i < args["warmup_steps"]:
-            learning_rate = args["learning_rate"] * (i / args["warmup_steps"])
+    for sample in tqdm(train_dataloader, position=0):
+        if current_step < args["warmup_steps"]:
+            learning_rate = args["learning_rate"] * (current_step / args["warmup_steps"])
         else:
             learning_rate = args["learning_rate"]
 
         learning_rate = learning_rate * (args["decay_rate"] ** (
-            i / args["decay_steps"]))
+            current_step / args["decay_steps"]))
 
         optimizer.param_groups[0]['lr'] = learning_rate
 
@@ -154,6 +155,7 @@ for epoch in range(epoch, args["num_epochs"]):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        current_step += 1
 
     total_loss /= len(train_dataloader)
 

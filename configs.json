@@ -2,19 +2,27 @@
     "single_frame": {
         "data_path": "data/balls_2frame_train.h5",
         "ckpt_path": "slot_attention/checkpoints/3-body/",
-        "resolution": [50,50],
+        "resolution": [
+            50,
+            50
+        ],
         "num_slots": 3,
         "num_iterations": 3,
         "slots_dim": 64,
         "small_arch": true,
-        "batch_size": 12,
+        "batch_size": 64,
         "learning_rate": 0.0004,
-        "num_epochs": 1
+        "num_epochs": 100,
+        "warmup_steps": 314,
+        "decay_steps": 3140
     },
     "two_frames": {
-        "data_path":  "data/balls_2frame_train.h5",
+        "data_path": "data/balls_2frame_train.h5",
         "ckpt_path": "slot_attention/checkpoints/3-body/",
-        "resolution": [50,50],
+        "resolution": [
+            50,
+            50
+        ],
         "num_slots": 6,
         "num_iterations": 6,
         "slots_dim": 64,
@@ -26,7 +34,10 @@
     "single_frame_spriteworld": {
         "data_path": "data/spriteworld.h5",
         "ckpt_path": "slot_attention/checkpoints/spriteworld/",
-        "resolution": [64,64],
+        "resolution": [
+            64,
+            64
+        ],
         "num_slots": 3,
         "num_iterations": 3,
         "slots_dim": 64,
