@@ -12,9 +12,9 @@
         "small_arch": true,
         "batch_size": 64,
         "learning_rate": 0.0004,
-        "num_epochs": 100,
-        "warmup_steps": 314,
-        "decay_steps": 3140
+        "num_epochs": 1000,
+        "warmup_steps": 3140,
+        "decay_steps": 31400
     },
     "two_frames": {
         "data_path": "data/balls_2frame_train.h5",
