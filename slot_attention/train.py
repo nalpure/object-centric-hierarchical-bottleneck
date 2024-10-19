@@ -27,7 +27,7 @@ def parse_arguments():
     parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where to save models')
     parser.add_argument('--ckpt_name', default='model', type=str, help='where to save models')
     parser.add_argument('--seed', default=0, type=int, help='random seed')
-    parser.add_argument('--data_path', default='spriteworld/spriteworld/data', type=str, help='Path to the data')
+    parser.add_argument('--data_path', default='spriteworld/spriteworld/data', type=str, help='Path to the training data')
     parser.add_argument('--resolution', default=[35, 35], type=list)
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
@@ -43,6 +43,7 @@ def parse_arguments():
     parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
     parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
     parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
+    parser.add_argument('--validation_path', default=None, type=str, help='Optional: Path to the validation dataset if hyperparameter tuning is desired')
 
     args = parser.parse_args()
     return vars(args)
@@ -215,7 +216,7 @@ def optuna_objective(trial, args, param_grid, train_dataloader, val_dataloader):
 
     model = initialize_model(args)
     optimizer = initialize_optimizer(model, args)
-    model, loss_list = train(args, model, optimizer, train_dataloader)
+    model, loss_list = train(args, model, optimizer, train_dataloader, verbose=False)
     model.eval()
 
     val_loss = model_loss(model, val_dataloader)
@@ -228,7 +229,7 @@ def optuna_objective(trial, args, param_grid, train_dataloader, val_dataloader):
         "model_state_dict": model.state_dict(),
     }, f"{args['ckpt_path']}{id_string}.ckpt")
 
-    print("Loss list:", loss_list)
+    print(f"Loss: {loss_list[-1]} (id: {id_string})")
     plot_loss_vs_epoch(loss_list, f"{id_string}.png")
 
     return val_loss
@@ -246,11 +247,11 @@ def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.
     study = optuna.create_study(direction='minimize', sampler=sampler)
 
     train_dataloader = load_data(args['data_path'], args)
-    val_dataloader = load_data('data/balls_2frame_eval.h5', args)
+    val_dataloader = load_data(args['validation_path'], args)
 
     # Open the CSV file to save results dynamically
     with open(results_save_path, mode='w', newline='') as csvfile:
-        fieldnames = ['trial_number', 'value'] + list(param_grid.keys())
+        fieldnames = ['seed', 'trial_number', 'value'] + list(param_grid.keys())
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -263,6 +264,7 @@ def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.
 
             trial = study.trials[-1]  # Get the last trial
             trial_values = {
+                'seed': args["seed"],
                 'trial_number': trial.number,
                 'value': trial.value,
             }
@@ -322,7 +324,7 @@ def main():
     if not exists(args["ckpt_path"]):
         makedirs(args["ckpt_path"])
 
-    if run_grid_search:
+    if args['validation_path']:
         grid_search(args)
     else:
         model = initialize_model(args)
