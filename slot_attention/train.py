@@ -275,40 +275,6 @@ def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.
             # Write the trial results to the CSV file
             writer.writerow(trial_values)
 
-    
-    if len(param_grid) == 2:
-        generate_heatmap('LR', 'DR', param_grid, study)
-
-
-def generate_heatmap(param1_name, param2_name, param_grid, study, save_path='data/grid_analysis/grid_search_results.png'):
-    param1_vals = param_grid[param1_name]
-    param2_vals = param_grid[param2_name]
-
-    # Create a 2D matrix for the loss values, rows: learning rates, columns: decay rates
-    losses_matrix = np.zeros((len(param1_vals), len(param2_vals)))
-
-    # Fill in the matrix with trial values (losses)
-    for trial in study.trials:
-        lr_idx = param1_vals.index(trial.params[param1_name])
-        decay_idx = param2_vals.index(trial.params[param2_name])
-        losses_matrix[lr_idx, decay_idx] = trial.value  # Fill the matrix with loss
-
-    # Plot the heatmap
-    plt.figure(figsize=(10, 6))
-    plt.imshow(losses_matrix, cmap='viridis', interpolation='nearest')
-
-    plt.colorbar(label='Loss (Objective Value)')
-    plt.xticks(np.arange(len(param1_vals)), labels=[v for v in param1_vals], rotation=45)
-    plt.yticks(np.arange(len(param2_vals)), labels=[v for v in param2_vals])
-
-    plt.xlabel(param1_name)
-    plt.ylabel(param2_name)
-    plt.title('Grid Search Results (Loss)')
-
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-
 
 def main():
     run_grid_search = True
