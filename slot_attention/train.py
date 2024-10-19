@@ -314,7 +314,10 @@ def main():
     args = parse_arguments()
     args = load_configuration(args)
 
-
+    # enforcing deterministic results
+    torch.manual_seed(args["seed"])
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args["seed"])
 
     if not exists(args["ckpt_path"]):
         makedirs(args["ckpt_path"])
