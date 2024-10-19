@@ -32,18 +32,19 @@ if args["config"] is not None:
             exit(f"{key} is not a valid parameter")
 
 # TODO remove this in the future or make it hyperparameter
-num_frames = 1
+stacked_frames = 1
 channels_per_frame = 3
 
 num_output_figs = 3 # must be <= number samples per batch
 output_dir = 'data/slot_evaluation'
 criterion = torch.nn.MSELoss()
 
-epoch = 999 # TODO automize for multiple epochs
+epoch = 849 # TODO automize for multiple epochs
 full_ckpt_path = args["ckpt_path"]+args["ckpt_name"]+"_"+str(epoch)+"ep.ckpt"
 
 
 def load_model(checkpoint_path):
+    print("Loading model:", checkpoint_path)
     model = SlotAttentionAutoEncoder(resolution=args["resolution"],
                                      num_slots=args["num_slots"], 
                                      num_iterations=args["num_iterations"], 
@@ -60,10 +61,9 @@ def load_model(checkpoint_path):
 
 
 def get_reconstructions(model, validation_path):
-    print("Loading dataset...")
+    print("Loading validation dataset:", validation_path)
     validation_dataset = StateTransitionsDataset(hdf5_file=validation_path)
     validate_dataloader = data.DataLoader(validation_dataset, batch_size=args["batch_size"], shuffle=True, num_workers=2)
-    print("Finished loading dataset.")
     all_obss = []
     all_recss = []
 
@@ -72,7 +72,7 @@ def get_reconstructions(model, validation_path):
             # samples consists of 3 lists for observations, actions, next observations.
             # obs and next_obs have shape (num_steps, num_channels, frame_height, frame_width)
             obss, actions, next_obss = batch
-            obss = obss[:,:num_frames*channels_per_frame,:,:]
+            obss = obss[:,:stacked_frames*channels_per_frame,:,:]
             obss = obss.to(device)
             recon_combined, recons, masks, slots = model(obss)
 
@@ -154,6 +154,7 @@ def display_images(obss, recss, criterion):
 
 model = load_model(full_ckpt_path)
 validation_path=args['data_path']  # TODO change to actual validation data
+#'data/balls_2frame_eval.h5'
 all_obss, all_recss = get_reconstructions(model, validation_path)
 
 all_losses = []
