@@ -43,7 +43,7 @@ def parse_arguments():
     parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
     parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
     parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
-    parser.add_argument('--validation_path', default=None, type=str, help='Optional: Path to the validation dataset if hyperparameter tuning is desired')
+    parser.add_argument('--grid_search', action='store_true', help='if true hyperparameter optimization is done on the data')
 
     args = parser.parse_args()
     return vars(args)
@@ -137,7 +137,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
             # Discard not needed channels TODO: needed?
             obs = obs[:, :stacked_frames * channels_per_frame, :, :]
             # add noise to observation TODO: needed?
-            obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1) 
+            #obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1) #TODO is this helpful?
             obs = obs.to(device)
 
             recon_combined, recons, masks, slots = model(obs)
@@ -269,7 +269,7 @@ def optuna_objective(trial, args, param_grid, full_dataset, results_writer):
 def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.csv'):
     # Define the hyperparameter grid
     param_grid = {
-        'LR': [0.0003, 0.0005],  # learning rate
+        'LR': [0.0003, 0.0007, 0.005],  # learning rate
         'DR': [0.5, 0.7],        # decay rate
         'DS': [31400, 100000],   # decay steps
         'BS': [64, 512]          # batch size
@@ -310,7 +310,7 @@ def main():
     if not exists(args["ckpt_path"]):
         makedirs(args["ckpt_path"])
 
-    if args['validation_path']:
+    if args['grid_search']:
         grid_search(args)
     else:
         model = initialize_model(args)

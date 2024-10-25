@@ -1,6 +1,6 @@
 {
     "single_frame": {
-        "data_path": "data/balls_2frame_train_seed3.h5",
+        "data_path": "data/balls_2frame_eval_seed10.h5",
         "ckpt_path": "slot_attention/checkpoints/3-body/",
         "resolution": [
             50,
@@ -12,13 +12,13 @@
         "small_arch": true,
         "batch_size": 64,
         "learning_rate": 0.0004,
-        "num_epochs": 1,
+        "num_epochs": 5,
         "warmup_steps": 3140,
-        "decay_steps": 31400
+        "decay_steps": 31400,
+        "validation_path": "data/balls_2frame_10.h5"
     },
     "grid_search_s1": {
         "data_path": "data/balls_2frame_train_seed1.h5",
-        "validation_path": "data/balls_2frame_eval_seed10.h5",
         "ckpt_path": "slot_attention/checkpoints/3-body/",
         "resolution": [
             50,
@@ -29,40 +29,7 @@
         "slots_dim": 64,
         "small_arch": true,
         "num_epochs": 600,
-        "warmup_steps": 3140,
-        "seed": 1
-    },
-    "grid_search_s2": {
-        "data_path": "data/balls_2frame_train_seed2.h5",
-        "validation_path": "data/balls_2frame_eval_seed11.h5",
-        "ckpt_path": "slot_attention/checkpoints/3-body/",
-        "resolution": [
-            50,
-            50
-        ],
-        "num_slots": 4,
-        "num_iterations": 3,
-        "slots_dim": 64,
-        "small_arch": true,
-        "num_epochs": 600,
-        "warmup_steps": 3140,
-        "seed": 2
-    },
-    "grid_search_s3": {
-        "data_path": "data/balls_2frame_train_seed3.h5",
-        "validation_path": "data/balls_2frame_eval_seed12.h5",
-        "ckpt_path": "slot_attention/checkpoints/3-body/",
-        "resolution": [
-            50,
-            50
-        ],
-        "num_slots": 4,
-        "num_iterations": 3,
-        "slots_dim": 64,
-        "small_arch": true,
-        "num_epochs": 600,
-        "warmup_steps": 3140,
-        "seed": 3
+        "grid_search": true  
     },
     "two_frames": {
         "data_path": "data/balls_2frame_train.h5",
