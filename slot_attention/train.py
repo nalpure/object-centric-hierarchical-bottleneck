@@ -14,7 +14,6 @@ import optuna
 import matplotlib.pyplot as plt
 import numpy as np
 import csv
-from sklearn.model_selection import KFold
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print("Running on", device)
@@ -27,7 +26,9 @@ def parse_arguments():
     parser.add_argument('--init_ckpt', default=None, type=str, help='initial weights to start training')
     parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where to save models')
     parser.add_argument('--seed', default=0, type=int, help='random seed')
-    parser.add_argument('--data_path', default='spriteworld/spriteworld/data', type=str, help='Path to the training data')
+    parser.add_argument('--train_path', default='spriteworld/spriteworld/training_data', type=str, help='Path to the training data')
+    parser.add_argument('--val_path', default=None, type=str, help='Optional: Path to the validation data. If specified, hyperparameter optimization will be executed.')
+    parser.add_argument('--test_path', default='spriteworld/spriteworld/test_data', type=str, help='Path to the training data')
     parser.add_argument('--resolution', default=[35, 35], type=list)
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
@@ -43,7 +44,6 @@ def parse_arguments():
     parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
     parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
     parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
-    parser.add_argument('--grid_search', action='store_true', help='if true hyperparameter optimization is done on the data')
 
     args = parser.parse_args()
     return vars(args)
@@ -129,7 +129,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
     model.train()
     start = time.time()
     
-    for epoch in tqdm(range(args["num_epochs"]), desc=f"Training {model_name}"):
+    for epoch in tqdm(range(args["num_epochs"]), desc=f"Training {model_name}", disable=None):
         epoch_loss = 0
         
         for batch in train_dataloader:
@@ -161,7 +161,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
         loss_list.append(epoch_loss)
 
         if verbose:
-            print(f"Epoch: {epoch}, Loss: {epoch_loss}, Time: {datetime.timedelta(seconds=time.time() - start)}")
+            print(f"Epoch: {epoch}, Training loss: {epoch_loss}, Time: {datetime.timedelta(seconds=time.time() - start)}")
 
         # Save the model and optimizer state every few epochs
         if epoch in checkpoint_intervals:
@@ -210,7 +210,7 @@ def model_loss(model, dataloader, criterion=torch.nn.MSELoss(), stacked_frames=1
     return total_loss.item()
 
 
-def optuna_objective(trial, args, param_grid, full_dataset, results_writer):
+def optuna_objective(trial, args, param_grid, train_data, val_data, csvfile, results_writer, num_splits=5):
     """Objective function for Optuna to evaluate each hyperparameter combination."""
     
     # Set hyperparameters for the trial
@@ -222,33 +222,35 @@ def optuna_objective(trial, args, param_grid, full_dataset, results_writer):
     for param in param_grid.keys():
         id_string += f"{param}{args[param]}_"
 
-    # Initialize KFold for deterministic splits based on the seed
-    kf = KFold(n_splits=10, shuffle=True, random_state=args['seed'])
-    
-    subset_losses = []  # Collect validation losses for all splits
+    # Split each dataset into num_splits even subsets
+    train_indices = np.array_split(np.arange(len(train_data)), num_splits)
+    val_indices = np.array_split(np.arange(len(val_data)), num_splits)
+
+    subset_losses = []
 
     # Run training and evaluation for each data subset
-    for split_num, (train_idx, val_idx) in enumerate(kf.split(full_dataset)):
-        # Create train and validation subsets
-        train_subset = torch.utils.data.Subset(full_dataset, train_idx)
-        val_subset = torch.utils.data.Subset(full_dataset, val_idx)
+    for split_num, (train_idx, val_idx) in enumerate(zip(train_indices, val_indices)):
+        train_subset = data.Subset(train_data, train_idx)
+        val_subset = data.Subset(val_data, val_idx)
         
-        # Create dataloaders for each subset
-        train_dataloader = torch.utils.data.DataLoader(train_subset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"])
-        val_dataloader = torch.utils.data.DataLoader(val_subset, batch_size=args["batch_size"], shuffle=False, num_workers=args["num_workers"])
+        train_dataloader = torch.utils.data.DataLoader(
+            train_subset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"]
+        )
+        val_dataloader = torch.utils.data.DataLoader(
+            val_subset, batch_size=args["batch_size"], shuffle=False, num_workers=args["num_workers"]
+        )
         
-        # Initialize model and optimizer
         model = initialize_model(args)
         optimizer = initialize_optimizer(model, args)
         
-        # Train model on this subset
-        model, tr_loss_list = train(args, model, optimizer, train_dataloader, num_checkpoints=1, model_name=f"{id_string}split{split_num}", verbose=False)
+        model, tr_loss_list = train(
+            args, model, optimizer, train_dataloader, num_checkpoints=1, model_name=f"{id_string}split{split_num}", verbose=False
+        )
         
         # Evaluate model on validation subset
         model.eval()
         val_loss = model_loss(model, val_dataloader)
-        print(val_loss)
-        print(type(val_loss))
+        print(f"Validation Loss for split {split_num}: {val_loss}")
         subset_losses.append(val_loss)
         
         # Write individual subset loss to CSV
@@ -256,6 +258,7 @@ def optuna_objective(trial, args, param_grid, full_dataset, results_writer):
         for param in param_grid.keys():
             row[param] = args[param]
         results_writer.writerow(row)
+        csvfile.flush()     # Force the buffer to write to disk
     
     # Return average validation loss across all splits
     avg_val_loss = sum(subset_losses) / len(subset_losses)
@@ -269,10 +272,10 @@ def optuna_objective(trial, args, param_grid, full_dataset, results_writer):
 def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.csv'):
     # Define the hyperparameter grid
     param_grid = {
-        'LR': [0.0003, 0.0007, 0.005],  # learning rate
-        'DR': [0.5, 0.7],        # decay rate
-        'DS': [31400, 100000],   # decay steps
-        'BS': [64, 512]          # batch size
+        'LR': [0.0005],  # learning rate
+        'DR': [0.5],        # decay rate
+        'DS': [31400],   # decay steps
+        'BS': [64]          # batch size
     }
 
     # Set up the Optuna study
@@ -280,7 +283,8 @@ def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.
     study = optuna.create_study(direction='minimize', sampler=sampler)
 
     # Load the full dataset (without batch processing)
-    full_dataset = StateTransitionsDataset(hdf5_file=args['data_path'])
+    train_data = StateTransitionsDataset(hdf5_file=args['train_path'])
+    val_data = StateTransitionsDataset(hdf5_file=args['val_path'])
 
     file_exists = exists(results_save_path)
 
@@ -293,7 +297,7 @@ def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.
             writer.writeheader()
 
         # Run the grid search optimization
-        study.optimize(lambda trial: optuna_objective(trial, args, param_grid, full_dataset, writer), n_trials=len(sampler._all_grids))
+        study.optimize(lambda trial: optuna_objective(trial, args, param_grid, train_data, val_data, csvfile, writer), n_trials=len(sampler._all_grids))
 
     print("Completed grid search. Results saved in:", results_save_path)
 
@@ -310,12 +314,12 @@ def main():
     if not exists(args["ckpt_path"]):
         makedirs(args["ckpt_path"])
 
-    if args['grid_search']:
+    if args['val_path']:
         grid_search(args)
     else:
         model = initialize_model(args)
         optimizer = initialize_optimizer(model, args)
-        train_dataloader = load_data(args["data_path"], args)
+        train_dataloader = load_data(args["train_path"], args)
         train(args, model, optimizer, train_dataloader, num_checkpoints=1)
 
 
