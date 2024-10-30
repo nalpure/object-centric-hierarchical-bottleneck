@@ -4,19 +4,17 @@ from torch.utils import data
 from tqdm import tqdm
 import numpy as np
 import torch
-import json
 from slot_attention.slot_attention import SlotAttentionAutoEncoder
 import os
 import matplotlib.pyplot as plt
+import json
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--config', default=None, type=str, help='name of the configuration to use' )
 parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where the models were saved' )
-parser.add_argument('--ckpt_name', default='model', type=str, help='where the models were saved' )
 
 args = parser.parse_args()
 args = vars(args)
@@ -36,11 +34,10 @@ stacked_frames = 1
 channels_per_frame = 3
 
 num_output_figs = 3 # must be <= number samples per batch
-output_dir = 'data/slot_evaluation'
+output_dir = 'data/'
 criterion = torch.nn.MSELoss()
 
-epoch = 849 # TODO automize for multiple epochs
-full_ckpt_path = args["ckpt_path"]+args["ckpt_name"]+"_"+str(epoch)+"ep.ckpt"
+full_ckpt_path = args['ckpt_path']+'LR0.0005_DR0.5_DS31400_BS64_split6_ep599.ckpt'
 
 
 def load_model(checkpoint_path):
@@ -142,7 +139,7 @@ def display_images(obss, recss, criterion):
 
         # Compute and add the title (loss between obs and recon)
         loss = criterion(obss[sample_idx], recss[sample_idx]).item()  # Calculate loss for the current sample
-        fig.suptitle(f'Loss: {loss:.4f}', fontsize=16, fontweight='bold')
+        fig.suptitle(f'Loss: {loss:.8f}', fontsize=16, fontweight='bold')
 
         # Create the output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -153,21 +150,12 @@ def display_images(obss, recss, criterion):
 
 
 model = load_model(full_ckpt_path)
-validation_path=args['data_path']  # TODO change to actual validation data
-#'data/balls_2frame_eval.h5'
-all_obss, all_recss = get_reconstructions(model, validation_path)
+all_obss, all_recss = get_reconstructions(model, args['test_path'])
 
-all_losses = []
-for obss, recss in zip(all_obss, all_recss):
-    for obs, rec in zip(obss, recss):
-        all_losses.append(criterion(obs, rec))
+loss_list = np.array([criterion(obs, rec).item() for obs, rec in zip(all_obss, all_recss)])
 
-avg_loss = sum(all_losses) / len(all_losses)
-
-print(f"Epoch #{epoch}:")
-print(f"Average loss over all samples: {avg_loss:.4f}")
-print(f"Min loss: {min(all_losses):.4f}")
-print(f"Max loss: {max(all_losses):.4f}")
-print()
+print(f"Mean loss: {np.mean(loss_list):.8f}")
+print(f"Min loss: {np.min(loss_list):.8f}")
+print(f"Max loss: {np.max(loss_list):.8f}")
 
 display_images(all_obss[0][:num_output_figs], all_recss[0][:num_output_figs], criterion)
