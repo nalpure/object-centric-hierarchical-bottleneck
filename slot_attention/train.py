@@ -10,10 +10,10 @@ from os import makedirs
 from os.path import exists
 import json
 from utils import StateTransitionsDataset
-import optuna
+
 import matplotlib.pyplot as plt
 import numpy as np
-import csv
+
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print("Running on", device)
@@ -60,6 +60,7 @@ def load_configuration(args):
                 args[key] = value
             else:
                 raise Warning(f"{key} is not a valid parameter")
+
     return args
 
 
@@ -110,6 +111,12 @@ def initialize_optimizer(model, args):
     return optimizer
 
 
+def set_seed(args):
+    torch.manual_seed(args["seed"])
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args["seed"])
+
+
 def load_data(data_path, args):
     """Load dataset and create dataloaders."""
     dataset = StateTransitionsDataset(hdf5_file=data_path)
@@ -117,19 +124,23 @@ def load_data(data_path, args):
     return dataloader
 
 
-def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), stacked_frames=1, channels_per_frame=3, num_checkpoints=1, model_name='model', verbose=True):
+def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), stacked_frames=2, channels_per_frame=3, num_checkpoints=1, model_name='model', verbose=True):
     """Main training loop. Saves model for each checkpoint. Returns trained model and the loss for each epoch."""
+
+    if not exists(args["ckpt_path"]):
+        makedirs(args["ckpt_path"])
 
     # Calculate checkpoints. Last epoch always has checkpoint (except if no checkpoints).
     num_checkpoints = min(num_checkpoints, args["num_epochs"])
-    checkpoint_intervals = [int((args["num_epochs"] / num_checkpoints) * i) - 1 for i in range(1, num_checkpoints+1)]
+    checkpoint_intervals = [int((args["num_epochs"] / num_checkpoints) * i) for i in range(1, num_checkpoints+1)]
 
     loss_list = []
     current_step = 0
     model.train()
     start = time.time()
     
-    for epoch in tqdm(range(args["num_epochs"]), desc=f"Training {model_name}", disable=None):
+    for epoch in range(1, args["num_epochs"] + 1):
+        
         epoch_loss = 0
         
         for batch in train_dataloader:
@@ -161,7 +172,10 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
         loss_list.append(epoch_loss)
 
         if verbose:
-            print(f"Epoch: {epoch}, Training loss: {epoch_loss}, Time: {datetime.timedelta(seconds=time.time() - start)}")
+            elapsed_time = datetime.timedelta(seconds=time.time() - start)
+            avg_time = elapsed_time / epoch
+            remaining_time = (args['num_epochs'] - epoch) * avg_time
+            print(f"Epoch: {epoch}, Training loss: {epoch_loss}, Elapsed time: {elapsed_time}, Remaining Time: {remaining_time}")
 
         # Save the model and optimizer state every few epochs
         if epoch in checkpoint_intervals:
@@ -174,153 +188,19 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
     return model, loss_list
 
 
-def plot_loss_vs_epoch(loss_list, fig_name, dir_path="data/grid_analysis/"):
-    if not exists(dir_path):
-        makedirs(dir_path)
-    
-    plt.figure(figsize=(8, 6))  # Set figure size
-    plt.plot(range(1, len(loss_list) + 1), loss_list, marker='o', linestyle='-', color='b')
-    
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-
-    # Set x-ticks to be whole numbers only, no commas
-    plt.xticks(range(1, len(loss_list) + 1))
-
-    plt.savefig(dir_path + fig_name)
-    plt.close()
-
-
-def model_loss(model, dataloader, criterion=torch.nn.MSELoss(), stacked_frames=1, channels_per_frame=3):
-    "Returns the average total loss of the specified model applied on the data of specified dataloader."
-    loss_list = []
-
-    with torch.no_grad():
-        for batch in dataloader:
-            # samples consists of 3 lists for observations, actions, next observations.
-            # obs and next_obs have shape (num_steps, num_channels, frame_height, frame_width)
-            obs, action, next_obs = batch
-            obs = obs[:,:stacked_frames*channels_per_frame,:,:]
-            obs = obs.to(device)
-            recon_combined, recons, masks, slots = model(obs)
-            loss = criterion(obs, recon_combined)
-            loss_list.append(loss)
-        
-    total_loss = sum(loss_list) / len(loss_list)
-    return total_loss.item()
-
-
-def optuna_objective(trial, args, param_grid, train_data, val_data, csvfile, results_writer, num_splits=5):
-    """Objective function for Optuna to evaluate each hyperparameter combination."""
-    
-    # Set hyperparameters for the trial
-    for param in param_grid.keys():
-        args[param] = trial.suggest_categorical(param, param_grid[param])
-
-    # Create unique ID for this trial based on seed and hyperparameters
-    id_string = ""
-    for param in param_grid.keys():
-        id_string += f"{param}{args[param]}_"
-
-    # Split each dataset into num_splits even subsets
-    train_indices = np.array_split(np.arange(len(train_data)), num_splits)
-    val_indices = np.array_split(np.arange(len(val_data)), num_splits)
-
-    subset_losses = []
-
-    # Run training and evaluation for each data subset
-    for split_num, (train_idx, val_idx) in enumerate(zip(train_indices, val_indices)):
-        train_subset = data.Subset(train_data, train_idx)
-        val_subset = data.Subset(val_data, val_idx)
-        
-        train_dataloader = torch.utils.data.DataLoader(
-            train_subset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"]
-        )
-        val_dataloader = torch.utils.data.DataLoader(
-            val_subset, batch_size=args["batch_size"], shuffle=False, num_workers=args["num_workers"]
-        )
-        
-        model = initialize_model(args)
-        optimizer = initialize_optimizer(model, args)
-        
-        model, tr_loss_list = train(
-            args, model, optimizer, train_dataloader, num_checkpoints=1, model_name=f"{id_string}split{split_num}", verbose=False
-        )
-        
-        # Evaluate model on validation subset
-        model.eval()
-        val_loss = model_loss(model, val_dataloader)
-        print(f"Validation Loss for split {split_num}: {val_loss}")
-        subset_losses.append(val_loss)
-        
-        # Write individual subset loss to CSV
-        row = {'value': val_loss, 'split_num': split_num}
-        for param in param_grid.keys():
-            row[param] = args[param]
-        results_writer.writerow(row)
-        csvfile.flush()     # Force the buffer to write to disk
-    
-    # Return average validation loss across all splits
-    avg_val_loss = sum(subset_losses) / len(subset_losses)
-    
-    print(f"Average Validation Loss for {id_string}: {avg_val_loss}")
-    plot_loss_vs_epoch(tr_loss_list, f"{id_string}.png")
-
-    return avg_val_loss
-
-
-def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.csv'):
-    # Define the hyperparameter grid
-    param_grid = {
-        'LR': [0.0005],  # learning rate
-        'DR': [0.5],        # decay rate
-        'DS': [31400],   # decay steps
-        'BS': [64]          # batch size
-    }
-
-    # Set up the Optuna study
-    sampler = optuna.samplers.GridSampler(search_space=param_grid)
-    study = optuna.create_study(direction='minimize', sampler=sampler)
-
-    # Load the full dataset (without batch processing)
-    train_data = StateTransitionsDataset(hdf5_file=args['train_path'])
-    val_data = StateTransitionsDataset(hdf5_file=args['val_path'])
-
-    file_exists = exists(results_save_path)
-
-    # Open the CSV file to save results dynamically
-    with open(results_save_path, mode='a', newline='') as csvfile:
-        fieldnames = ['value', 'split_num'] + list(param_grid.keys())
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        
-        if not file_exists:
-            writer.writeheader()
-
-        # Run the grid search optimization
-        study.optimize(lambda trial: optuna_objective(trial, args, param_grid, train_data, val_data, csvfile, writer), n_trials=len(sampler._all_grids))
-
-    print("Completed grid search. Results saved in:", results_save_path)
-
-
 def main():
     args = parse_arguments()
     args = load_configuration(args)
 
-    # enforcing deterministic results
-    torch.manual_seed(args["seed"])
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args["seed"])
-
-    if not exists(args["ckpt_path"]):
-        makedirs(args["ckpt_path"])
-
     if args['val_path']:
-        grid_search(args)
-    else:
-        model = initialize_model(args)
-        optimizer = initialize_optimizer(model, args)
-        train_dataloader = load_data(args["train_path"], args)
-        train(args, model, optimizer, train_dataloader, num_checkpoints=1)
+        raise Warning('A validation path was specify but will not be used.')
+
+    set_seed(args)
+
+    model = initialize_model(args)
+    optimizer = initialize_optimizer(model, args)
+    train_dataloader = load_data(args["train_path"], args)
+    train(args, model, optimizer, train_dataloader, num_checkpoints=10)
 
 
 if __name__ == "__main__":
