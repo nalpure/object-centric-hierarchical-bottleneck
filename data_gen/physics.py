@@ -1,9 +1,12 @@
 from envs import physics_sim
 import numpy as np
+from numpy.random import randint
 import argparse
-
 from utils import save_list_dict_h5py
 
+
+NUM_STACKED_FRAMES = 10
+RANDOM_STACKING = False
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--fname', type=str,
@@ -38,14 +41,16 @@ physics_sim.generate_3_body_problem_dataset(
 # e.g. data['train_x] shape: (num_episodes, num_steps, x_shape, y_shape, num_channels)
 data = np.load(args.fname + '.npz')
 
-# combine consecutive frames in the channel dimension (hence also loss of one step)
-train_x = np.concatenate(
-    (data['train_x'][:, :-1], data['train_x'][:, 1:]), axis=-1)
+replay_buffer = []
+
+# create array with shifted training data
+shifted_data = [data['train_x'][:, i : i + data['train_x'].shape[1] - NUM_STACKED_FRAMES] for i in range(NUM_STACKED_FRAMES)]
+
+# concatenate the differently shifted data arrays in the channel dimension in order to obtain consecutive frames
+train_x = np.concatenate(shifted_data, axis=-1)
 
 # normalize and rearrange: (num_episodes, num_steps, num_channels, x_shape, y_shape)
 train_x = np.transpose(train_x, (0, 1, 4, 2, 3)) / 255.
-
-replay_buffer = []
 
 for idx in range(data['train_x'].shape[0]):
     # create sample dictionary
