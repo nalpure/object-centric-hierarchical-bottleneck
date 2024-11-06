@@ -10,45 +10,44 @@ import matplotlib.pyplot as plt
 import json
 
 
-STACKED_FRAMES = 10
-CHANNELS_PER_FRAME = 3
-RANDOMIZE_FRAME_ORDER = False
-
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 parser = argparse.ArgumentParser()
+criterion = torch.nn.MSELoss()
 
 parser.add_argument('--config', default=None, type=str, help='name of the configuration to use' )
-parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where the models were saved' )
+parser.add_argument('--ckpt_path', default='checkpoints/3-body/', type=str, help='where the models were saved' )
+parser.add_argument('--ckpt_name', default='model_ep600.ckpt', type=str, help="Name of the checkpoint to load the model from")
+parser.add_argument('--output_dir', default='data/')
+parser.add_argument('--num_output_figs', default=3, type=int, help='desired number of output figures')
+parser.add_argument('--randomize_frame_order', default=False, type=bool, help='If true, reorders the frames in each frame stack randomly.')
 
 args = parser.parse_args()
 args = vars(args)
 
 if args["config"] is not None:
-    args["ckpt_name"] = args["config"]
     with open("configs.json", "r") as config_file:
         configs = json.load(config_file)[args["config"]]
     for key, value in configs.items():
         try:
             args[key] = value
         except KeyError:
-            exit(f"{key} is not a valid parameter")
+            Warning(f"{key} is not a valid parameter")
 
+if args['num_output_figs'] > args['batch_size']:
+    raise ValueError("Number of output figures exceeds batch size.")
 
-num_output_figs = 3 # must be <= number samples per batch
-output_dir = 'data/'
-criterion = torch.nn.MSELoss()
-
-full_ckpt_path = args['ckpt_path']+'1frame_ep600.ckpt'
+model_path = args['ckpt_path'] + args['ckpt_name']
 
 
 def load_model(checkpoint_path):
     print("Loading model:", checkpoint_path)
     model = SlotAttentionAutoEncoder(resolution=args["resolution"],
                                      num_slots=args["num_slots"], 
+                                     num_channels=args["stacked_frames"] * args["channels_per_frame"],
                                      num_iterations=args["num_iterations"], 
                                      slots_dim=args["slots_dim"], 
                                      encdec_dim=32 if args["small_arch"] else 64, 
-                                     small_arch=args["small_arch"])  # TODO num_frames as input parameter
+                                     small_arch=args["small_arch"])
     
     model.load_state_dict(torch.load(checkpoint_path)['model_state_dict'])
     model.to(device)
@@ -72,23 +71,23 @@ def get_reconstructions(model, test_path):
             # samples consists of 3 lists for observations, actions, next observations.
             # obs and next_obs have shape (num_steps, num_channels, frame_height, frame_width)
             obs, action, next_obs = batch
-            obs = obs[:,:STACKED_FRAMES*CHANNELS_PER_FRAME,:,:]
+            obs = obs[:,:args['stacked_frames']*args['channels_per_frame'],:,:]
 
-            if RANDOMIZE_FRAME_ORDER:
+            if args['randomize_frame_order']:
                 # Reshape to separate the frames in each stack
-                obs = obs.view(args['batch_size'], STACKED_FRAMES, CHANNELS_PER_FRAME, args['resolution'][0], args['resolution'][1])
+                obs = obs.view(args['batch_size'], args['stacked_frames'], args['channels_per_frame'], args['resolution'][0], args['resolution'][1])
 
                 # Randomize the order of frames for each sample in the batch independently
                 randomized_obs = []
                 for i in range(args['batch_size']):
-                    indices = torch.randperm(STACKED_FRAMES)  # Generate a random permutation for each sample
+                    indices = torch.randperm(args['stacked_frames'])  # Generate a random permutation for each sample
                     randomized_obs.append(obs[i, indices, :, :, :])  # Apply the random order to each sample individually
 
                 # Stack the randomized samples back into a single tensor
                 obs = torch.stack(randomized_obs)
 
                 # Reshape back to original shape
-                obs = obs.view(args['batch_size'], STACKED_FRAMES * CHANNELS_PER_FRAME, args['resolution'][0], args['resolution'][1])
+                obs = obs.view(args['batch_size'], args['stacked_frames'] * args['channels_per_frame'], args['resolution'][0], args['resolution'][1])
 
             obs = obs.to(device)
             recon_combined, recons, masks, slots = model(obs)
@@ -117,13 +116,13 @@ def plot_obs_with_combined_recons(all_obs, all_recons, criterion):
     # Iterate over each sample
     for sample_idx in range(all_obs.shape[0]):
         # Create a figure with 3 rows and 'imgs_per_sample' columns
-        fig, axes = plt.subplots(3, STACKED_FRAMES, figsize=(4 * STACKED_FRAMES, 12))
+        fig, axes = plt.subplots(3, args['stacked_frames'], figsize=(4 * args['stacked_frames'], 12))
 
         # If there's only one image per sample, axes will be a 1D array
-        if STACKED_FRAMES == 1:
+        if args['stacked_frames'] == 1:
             axes = np.expand_dims(axes, axis=1)  # Make it 2D for consistent indexing
 
-        for img_idx in range(STACKED_FRAMES):
+        for img_idx in range(args['stacked_frames']):
             # Get the start and end indices for the current RGB image
             start_idx = img_idx * 3
             end_idx = (img_idx + 1) * 3
@@ -161,10 +160,10 @@ def plot_obs_with_combined_recons(all_obs, all_recons, criterion):
         fig.suptitle(f'Loss: {loss:.8f}', fontsize=16, fontweight='bold')
 
         # Create the output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(args['output_dir'], exist_ok=True)
 
         # Save the figure
-        plt.savefig(os.path.join(output_dir, f'comparison_sample_{sample_idx}.png'))
+        plt.savefig(os.path.join(args['output_dir'], f'comparison_sample_{sample_idx}.png'))
         plt.close()
 
 
@@ -188,20 +187,20 @@ def plot_observations_with_masks(all_obs, all_masks):
         num_slots = masks.shape[0]
         
         # Calculate the number of frames and reshape observation to split frames
-        frames = observation.reshape(STACKED_FRAMES, CHANNELS_PER_FRAME, *observation.shape[1:])  # Shape: (STACKED_FRAMES, CHANNELS_PER_FRAME, height, width)
+        frames = observation.reshape(args['stacked_frames'], args['channels_per_frame'], *observation.shape[1:])  # Shape: (STACKED_FRAMES, CHANNELS_PER_FRAME, height, width)
         
         # Create a figure with stacked frames in the first row and masks in the second
-        fig, axes = plt.subplots(2, max(STACKED_FRAMES, num_slots), figsize=(4 * max(STACKED_FRAMES, num_slots), 8))
+        fig, axes = plt.subplots(2, max(args['stacked_frames'], num_slots), figsize=(4 * max(args['stacked_frames'], num_slots), 8))
         
         # Plot each frame in the first row
-        for i in range(STACKED_FRAMES):
+        for i in range(args['stacked_frames']):
             frame = frames[i].transpose(1, 2, 0)  # Move channels to the last dimension for RGB plotting
             axes[0, i].imshow(frame)
             axes[0, i].axis('off')
             axes[0, i].set_title(f"Frame {i + 1}")
         
         # Fill any remaining empty spaces in the first row if STACKED_FRAMES < num_slots
-        for i in range(STACKED_FRAMES, max(STACKED_FRAMES, num_slots)):
+        for i in range(args['stacked_frames'], max(args['stacked_frames'], num_slots)):
             axes[0, i].axis('off')
         
         # Plot each mask in the second row
@@ -212,12 +211,12 @@ def plot_observations_with_masks(all_obs, all_masks):
             axes[1, i].set_title(f"Mask {i + 1}")
         
         # Fill any remaining empty spaces in the second row if num_slots < STACKED_FRAMES
-        for i in range(num_slots, max(STACKED_FRAMES, num_slots)):
+        for i in range(num_slots, max(args['stacked_frames'], num_slots)):
             axes[1, i].axis('off')
         
         # Save the plot with a unique name for each observation
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f"observation_with_masks_{idx}.png"))
+        plt.savefig(os.path.join(args['output_dir'], f"observation_with_masks_{idx}.png"))
         plt.close(fig)
 
 
@@ -239,15 +238,15 @@ def plot_observations_and_reconstructions(all_obs, recons):
 
     # Loop through each observation and corresponding reconstruction
     for i in range(num_samples):
-        fig, axes = plt.subplots(num_slots + 1, STACKED_FRAMES, figsize=(4 * STACKED_FRAMES, 4 * (num_slots + 1)))
+        fig, axes = plt.subplots(num_slots + 1, args['stacked_frames'], figsize=(4 * args['stacked_frames'], 4 * (num_slots + 1)))
 
         # If there's only one image per sample, axes will be a 1D array
-        if STACKED_FRAMES == 1:
+        if args['stacked_frames'] == 1:
             axes = np.expand_dims(axes, axis=1)  # Make it 2D for consistent indexing
 
         # Plot observed frames in the first row
-        obs_frames = all_obs[i].view(STACKED_FRAMES, CHANNELS_PER_FRAME, height, width)
-        for j in range(STACKED_FRAMES):
+        obs_frames = all_obs[i].view(args['stacked_frames'], args['channels_per_frame'], height, width)
+        for j in range(args['stacked_frames']):
             frame = obs_frames[j].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C) format for plotting
             axes[0, j].imshow(frame)
             axes[0, j].set_title(f't={j}', fontsize=12, fontweight='bold')
@@ -257,8 +256,8 @@ def plot_observations_and_reconstructions(all_obs, recons):
 
         # Plot reconstructed frames for each slot in subsequent rows
         for slot in range(num_slots):
-            recon_frames = recons[i, slot].view(STACKED_FRAMES, CHANNELS_PER_FRAME, height, width)
-            for j in range(STACKED_FRAMES):
+            recon_frames = recons[i, slot].view(args['stacked_frames'], args['channels_per_frame'], height, width)
+            for j in range(args['stacked_frames']):
                 recon_frame = recon_frames[j].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C) format
                 axes[slot + 1, j].imshow(recon_frame)
                 axes[slot + 1, j].axis('off')
@@ -272,11 +271,11 @@ def plot_observations_and_reconstructions(all_obs, recons):
 
         # Save the figure for the current observation and reconstruction
         plt.tight_layout(pad=4)
-        plt.savefig(os.path.join(output_dir, f"obs_recon_{i}.png"))
+        plt.savefig(os.path.join(args['output_dir'], f"obs_recon_{i}.png"))
         plt.close(fig)
 
 
-model = load_model(full_ckpt_path)
+model = load_model(model_path)
 all_obs, all_recons, all_masks, all_recon_combined = get_reconstructions(model, args['test_path'])
 
 loss_list = np.array([criterion(obs, rec).item() for obs, rec in zip(all_obs, all_recon_combined)])
@@ -286,6 +285,6 @@ print(f"Min loss: {np.min(loss_list):.8f}")
 print(f"Max loss: {np.max(loss_list):.8f}")
 print(f"Standard deviation: {np.std(loss_list):.8f}")
 
-plot_obs_with_combined_recons(all_obs[0][:num_output_figs], all_recon_combined[0][:num_output_figs], criterion)
-plot_observations_with_masks(all_obs[0][:num_output_figs], all_masks[0][:num_output_figs])
-plot_observations_and_reconstructions(all_obs[0][:num_output_figs], all_recons[0][:num_output_figs])
+plot_obs_with_combined_recons(all_obs[0][:args['num_output_figs']], all_recon_combined[0][:args['num_output_figs']], criterion)
+plot_observations_with_masks(all_obs[0][:args['num_output_figs']], all_masks[0][:args['num_output_figs']])
+plot_observations_and_reconstructions(all_obs[0][:args['num_output_figs']], all_recons[0][:args['num_output_figs']])

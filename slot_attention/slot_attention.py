@@ -96,7 +96,7 @@ class SoftPositionEmbed(nn.Module):
         resolution: Tuple of integers specifying width and height of grid.
         """
         super().__init__()
-        self.embedding = nn.Linear(4, hidden_size, bias=True) # TODO 4 or 7 (I guess no need to change?)
+        self.embedding = nn.Linear(4, hidden_size, bias=True)
         self.grid = build_grid(resolution).to("cuda")
 
     def forward(self, inputs):
@@ -104,9 +104,9 @@ class SoftPositionEmbed(nn.Module):
         return inputs + grid
 
 class Encoder(nn.Module):
-    def __init__(self, hid_dim, resolution):
+    def __init__(self, hid_dim, resolution, num_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(3, hid_dim, 5, padding = 2) #TODO 3 or 6
+        self.conv1 = nn.Conv2d(num_channels, hid_dim, 5, padding = 2) #TODO 3 or 6
         self.conv2 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv3 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv4 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
@@ -127,7 +127,7 @@ class Encoder(nn.Module):
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, hid_dim, slots_dim, resolution, small_arch):
+    def __init__(self, hid_dim, slots_dim, resolution, small_arch, num_channels):
         super().__init__()
         if not small_arch:
             self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
@@ -135,13 +135,13 @@ class Decoder(nn.Module):
             self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
             self.conv4 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
             self.conv5 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv6 = nn.ConvTranspose2d(hid_dim, 4, 3, stride=(1, 1), padding=1) # TODO 4 or 7
+            self.conv6 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1) # TODO 4 or 7
             self.decoder_initial_size = (8, 8)
         else:
             self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, stride=(1, 1), padding=2)
             self.conv2 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
             self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv4 = nn.ConvTranspose2d(hid_dim, 4, 3, stride=(1, 1), padding=1) # TODO 4 or 7
+            self.conv4 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1) # TODO 4 or 7
             self.decoder_initial_size = resolution
         self.decoder_pos = SoftPositionEmbed(slots_dim, self.decoder_initial_size)
         self.resolution = resolution
@@ -168,7 +168,7 @@ class Decoder(nn.Module):
 
 """Slot Attention-based auto-encoder for object discovery."""
 class SlotAttentionAutoEncoder(nn.Module):
-    def __init__(self, resolution, num_slots, num_iterations, slots_dim, encdec_dim, small_arch):
+    def __init__(self, resolution, num_slots, num_channels, num_iterations, slots_dim, encdec_dim, small_arch):
         """Builds the Slot Attention-based auto-encoder.
         Args:
         resolution: Tuple of integers specifying width and height of input image.
@@ -182,9 +182,10 @@ class SlotAttentionAutoEncoder(nn.Module):
         self.num_slots = num_slots
         self.num_iterations = num_iterations
         self.small_arch = small_arch
+        self.num_channels = num_channels
 
-        self.encoder_cnn = Encoder(self.encdec_dim, self.resolution)
-        self.decoder_cnn = Decoder(self.encdec_dim, self.slots_dim, self.resolution, small_arch)
+        self.encoder_cnn = Encoder(self.encdec_dim, self.resolution, self.num_channels)
+        self.decoder_cnn = Decoder(self.encdec_dim, self.slots_dim, self.resolution, small_arch, self.num_channels)
 
         self.fc1 = nn.Linear(encdec_dim, encdec_dim)
         self.fc2 = nn.Linear(encdec_dim, encdec_dim)
@@ -224,7 +225,7 @@ class SlotAttentionAutoEncoder(nn.Module):
         # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
 
         # Undo combination of slot and batch dimension; split alpha masks.
-        recons, masks = x.reshape(image.shape[0], -1, x.shape[1], x.shape[2], x.shape[3]).split([3,1], dim=-1) # TODO 3 or 6
+        recons, masks = x.reshape(image.shape[0], -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,1], dim=-1) # TODO 3 or 6
         # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
         # `masks` has shape: [batch_size, num_slots, width, height, 1].
 

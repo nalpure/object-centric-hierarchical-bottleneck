@@ -1,6 +1,5 @@
 import argparse
 from slot_attention.slot_attention import SlotAttentionAutoEncoder
-from tqdm import tqdm
 import time
 import datetime
 import torch.optim as optim
@@ -11,9 +10,8 @@ from os.path import exists
 import json
 from utils import StateTransitionsDataset
 
-import matplotlib.pyplot as plt
-import numpy as np
 
+TRAINING_NOISE = False
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print("Running on", device)
@@ -44,6 +42,8 @@ def parse_arguments():
     parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
     parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
     parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
+    parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
+    parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 
     args = parser.parse_args()
     return vars(args)
@@ -52,7 +52,6 @@ def parse_arguments():
 def load_configuration(args):
     """Load configuration from a JSON file if provided."""
     if args["config"] is not None:
-        args["ckpt_name"] = args["config"]
         with open("configs.json", "r") as config_file:
             configs = json.load(config_file)[args["config"]]
         for key, value in configs.items():
@@ -79,6 +78,7 @@ def initialize_model(args):
     model = SlotAttentionAutoEncoder(
         tuple(args["resolution"]),
         args["num_slots"],
+        args["stacked_frames"] * args["channels_per_frame"],
         args["num_iterations"],
         args["slots_dim"],
         32 if args["small_arch"] else 64,
@@ -124,7 +124,7 @@ def load_data(data_path, args):
     return dataloader
 
 
-def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), stacked_frames=2, channels_per_frame=3, num_checkpoints=1, model_name='model', verbose=True):
+def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), num_checkpoints=1, model_name='model', verbose=True):
     """Main training loop. Saves model for each checkpoint. Returns trained model and the loss for each epoch."""
 
     if not exists(args["ckpt_path"]):
@@ -146,9 +146,11 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
         for batch in train_dataloader:
             obs, action, next_obs = batch # e.g. obs is list of observations in this batch
             # Discard not needed channels TODO: needed?
-            obs = obs[:, :stacked_frames * channels_per_frame, :, :]
-            # add noise to observation TODO: needed?
-            #obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1) #TODO is this helpful?
+            obs = obs[:, :args['stacked_frames'] * args['channels_per_frame'], :, :]
+            
+            if TRAINING_NOISE:
+                obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1) #TODO is this helpful?
+            
             obs = obs.to(device)
 
             recon_combined, recons, masks, slots = model(obs)
@@ -200,7 +202,7 @@ def main():
     model = initialize_model(args)
     optimizer = initialize_optimizer(model, args)
     train_dataloader = load_data(args["train_path"], args)
-    train(args, model, optimizer, train_dataloader, num_checkpoints=10)
+    train(args, model, optimizer, train_dataloader, num_checkpoints=1, model_name="4slots")
 
 
 if __name__ == "__main__":
