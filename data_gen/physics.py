@@ -1,6 +1,5 @@
 from envs import physics_sim
 import numpy as np
-from numpy.random import randint
 import argparse
 from utils import save_list_dict_h5py
 
@@ -21,12 +20,13 @@ parser.add_argument('--random_stacking', action='store_true', default=False,
                     help='instead of stacking  nm ,.')
 
 args = parser.parse_args()
+args = vars(args)
 
-np.random.seed(args.seed)
+np.random.seed(args['seed'])
 
 physics_sim.generate_3_body_problem_dataset(
-    dest=args.fname + '.npz',
-    train_set_size=args.num_episodes,
+    dest=args['fname'] + '.npz',
+    train_set_size=args['num_episodes'],
     valid_set_size=2,
     test_set_size=2,
     seq_len=12,
@@ -35,12 +35,12 @@ physics_sim.generate_3_body_problem_dataset(
     vx0_max=0.5,
     vy0_max=0.5,
     color=True,
-    seed=args.seed
+    seed=args['seed']
 )
 
 # data dictionary, keys: train_x, valid_x, test_x
 # e.g. data['train_x] shape: (num_episodes, num_steps, x_shape, y_shape, num_channels)
-data = np.load(args.fname + '.npz')
+data = np.load(args['fname'] + '.npz')
 
 replay_buffer = []
 
@@ -66,4 +66,4 @@ for idx in range(data['train_x'].shape[0]):
 
     replay_buffer.append(sample)
 
-save_list_dict_h5py(replay_buffer, args.fname)
+save_list_dict_h5py(replay_buffer, args['fname'])
