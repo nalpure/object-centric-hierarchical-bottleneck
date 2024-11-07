@@ -5,9 +5,6 @@ import argparse
 from utils import save_list_dict_h5py
 
 
-NUM_STACKED_FRAMES = 10
-RANDOM_STACKING = False
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--fname', type=str,
                     default='data',
@@ -18,6 +15,10 @@ parser.add_argument('--seed', type=int, default=0,
                     help='Random seed.')
 parser.add_argument('--eval', action='store_true', default=False,
                     help='Create evaluation set.')
+parser.add_argument('--stacked_frames', default=1, type=int, 
+                    help='number of frames stacked in each sample')
+parser.add_argument('--random_stacking', action='store_true', default=False,
+                    help='instead of stacking  nm ,.')
 
 args = parser.parse_args()
 
@@ -44,7 +45,7 @@ data = np.load(args.fname + '.npz')
 replay_buffer = []
 
 # create array with shifted training data
-shifted_data = [data['train_x'][:, i : i + data['train_x'].shape[1] - NUM_STACKED_FRAMES] for i in range(NUM_STACKED_FRAMES)]
+shifted_data = [data['train_x'][:, i : i + data['train_x'].shape[1] - args['stacked_frames']] for i in range(args['stacked_frames'])]
 
 # concatenate the differently shifted data arrays in the channel dimension in order to obtain consecutive frames
 train_x = np.concatenate(shifted_data, axis=-1)
