@@ -133,10 +133,14 @@ def get_act_fn(act_fn):
 
 def to_one_hot(indices, max_index):
     """Get one-hot encoding of index tensors."""
-    zeros = torch.zeros(
-        indices.size()[0], max_index, dtype=torch.float32,
-        device=indices.device)
-    return zeros.scatter_(1, indices.unsqueeze(1), 1)
+    zeros = torch.zeros(indices.size()[0], max_index, dtype=torch.float32, device=indices.device)
+    
+    if max_index == 0:
+        return zeros
+ 
+    one_hot = zeros.scatter_(1, indices.unsqueeze(1), 1)
+    return one_hot
+
 
 
 def to_float(np_array):
@@ -212,7 +216,7 @@ class PathDataset(data.Dataset):
                 buffer
         """
         self.experience_buffer = load_list_dict_h5py(hdf5_file)
-        self.experience_buffer = [el for el in self.experience_buffer if el['next_obs'] != []]
+        self.experience_buffer = [el for el in self.experience_buffer if el['next_obs'].size > 0]
         self.path_length = path_length
 
     def __len__(self):

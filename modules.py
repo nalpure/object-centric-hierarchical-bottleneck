@@ -32,7 +32,7 @@ class CSWM(nn.Module):
             device=device)
 
         self.ignore_action = ignore_action
-        
+
         self.pos_loss = 0
         self.neg_loss = 0
 
@@ -53,7 +53,7 @@ class CSWM(nn.Module):
         batch_size = state.size(0)
         perm = np.random.permutation(batch_size)
         neg_state = state[perm]
-        self.pos_loss = self.energy(state, action, next_state, no_trans=self.ignore_action)
+        self.pos_loss = self.energy(state, action, next_state)
         zeros = torch.zeros_like(self.pos_loss)
         
         self.pos_loss = self.pos_loss.mean()
@@ -294,14 +294,17 @@ class TransitionGNN(torch.nn.Module):
         edge_index = self._get_edge_list_fully_connected(batch_size, num_nodes - 1)
         row, col = edge_index
 
-        if not self.ignore_action or self.embodied:
-
-            if self.copy_action or self.embodied:
-                action_vec = utils.to_one_hot(action, self.action_dim)
-                action_vec = action_vec.repeat(1, self.num_objects).view(-1, self.action_dim)
-            else:
-                action_vec = utils.to_one_hot(action, self.action_dim * num_nodes)
-                action_vec = action_vec.view(-1, self.action_dim)
+        if self.ignore_action:
+            action_vec = torch.zeros(flat_states.shape[0], 0, dtype=torch.int64, device=self.device)
+        
+        elif self.copy_action or self.embodied:  
+            action_vec = utils.to_one_hot(action, self.action_dim)
+            action_vec = action_vec.repeat(1, self.num_objects)
+            action_vec = action_vec.view(-1, self.action_dim)
+        
+        else:
+            action_vec = utils.to_one_hot(action, self.action_dim * num_nodes)
+            action_vec = action_vec.view(-1, self.action_dim)
 
         if not self.embodied:
             # Attach action to each state

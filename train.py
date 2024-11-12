@@ -63,7 +63,9 @@ if args["config"] is not None:
         except KeyError:
             exit(f"{key} is not a valid parameter")
 
-print(args)
+    for k,v in args.items():
+        print(f'{k}: {v}')
+    print()
 
 now = datetime.datetime.now()
 timestamp = now.isoformat()
@@ -86,12 +88,12 @@ print("Finished loading dataset.")
 
 use_wandb = args["wandb_project"] is not None and args["wandb_entity"] is not None
 
-if args["OC-config"] is not None:
+if args["OC_config"] is not None:
 
     loss_name = "transition_loss"
 
     with open("configs.json", "r") as config_file:
-        OC_configs = json.load(config_file)[args["OC-config"]]
+        OC_configs = json.load(config_file)[args["OC_config"]]
         config_file.close()
     
     model = modules.SlotSWM(
@@ -152,11 +154,10 @@ for epoch in range(args["epochs"]):
         obs = obs[:,:3,:,:]
         next_obs = next_obs[:,:3,:,:]
 
-        print(obs.shape)
-        print(next_obs.shape)
-        print(action.shape)
+        if args['ignore_action']:
+            action = torch.zeros(obs.shape[0], 3, dtype=torch.int64, device=device)
 
-        loss = model.contrastive_loss(obs, action[0], next_obs)
+        loss = model.contrastive_loss(obs, action, next_obs)
         
         if use_wandb: wandb.log({loss_name: loss}, step=step)
         
