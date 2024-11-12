@@ -10,14 +10,14 @@ parser.add_argument('--fname', type=str,
                     help='File name / path.')
 parser.add_argument('--num-episodes', type=int, default=1000,
                     help='Number of episodes to generate.')
+parser.add_argument('--episode-length', default=12, type=int, 
+                    help='number of steps to be calculated for each episode')
 parser.add_argument('--seed', type=int, default=0,
                     help='Random seed.')
 parser.add_argument('--eval', action='store_true', default=False,
                     help='Create evaluation set.')
-parser.add_argument('--stacked_frames', default=1, type=int, 
+parser.add_argument('--stacked-frames', default=1, type=int, 
                     help='number of frames stacked in each sample')
-parser.add_argument('--random_stacking', action='store_true', default=False,
-                    help='instead of stacking  nm ,.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -29,7 +29,7 @@ physics_sim.generate_3_body_problem_dataset(
     train_set_size=args['num_episodes'],
     valid_set_size=2,
     test_set_size=2,
-    seq_len=12,
+    seq_len=args['episode_length'],
     img_size=[50, 50],
     dt=2.0,
     vx0_max=0.5,
@@ -61,9 +61,9 @@ for idx in range(data['train_x'].shape[0]):
     sample = {
         'obs': train_x[idx, :-1],
         'next_obs': train_x[idx, 1:],
-        'action': np.zeros((train_x.shape[1] - 1), dtype=np.int64)
+        'action': np.zeros((train_x.shape[1] - 1, args['stacked_frames']), dtype=np.int64)
     }
 
     replay_buffer.append(sample)
 
-save_list_dict_h5py(replay_buffer, args['fname'])
+save_list_dict_h5py(replay_buffer, args['fname'] + '.h5')

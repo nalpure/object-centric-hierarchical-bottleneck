@@ -207,6 +207,7 @@ def generate_3_body_problem_dataset(dest,
                         test_x=sequences[train_set_size + valid_set_size:])
     print("Saved to file %s" % dest)
 
+    """    
     # Save 10 samples
     result = gallery(np.concatenate(sequences[:10] / 255),
                      ncols=sequences.shape[1])
@@ -219,3 +220,4 @@ def generate_3_body_problem_dataset(dest,
     ax.get_yaxis().set_visible(False)
     fig.tight_layout()
     fig.savefig(dest.split(".")[0] + "_samples.png")
+    """
