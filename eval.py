@@ -6,8 +6,8 @@ import json
 from torch.utils import data
 import numpy as np
 import matplotlib.pyplot as plt
-
 import modules
+from datetime import datetime
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--save-folder', type=str,
@@ -38,12 +38,14 @@ def main():
     topk = [1,2,3]
     args, eval_loader, model = setup_configuration(parser)
 
-    with torch.no_grad():    
+    with torch.no_grad():
+        print('Calculating predictions for {} batches of size {} (total: {} samples)'.format(
+            len(eval_loader), args['batch_size'], len(eval_loader) * args['batch_size']))    
         true_obs, true_next_state, true_next_obs, pred_next_states, pred_next_obs = get_predictions(args, eval_loader, model)
         hits_at, mrr = get_scores(pred_next_states, true_next_state, topk)
 
     print('Processed {} batches of size {}'.format(
-    len(eval_loader), args["batch_size"]))
+        len(eval_loader), args['batch_size']))
 
     for k in topk:
         print('Hits @ {}: {}'.format(k, hits_at[k]))
@@ -54,7 +56,7 @@ def main():
     print(args)
 
     # TODO read from configuration file
-    stacked_frames = 1
+    stacked_frames = 5
     channels_per_frame = 3
 
     plot_samples(true_obs[0][:num_output_figs], true_next_obs[0][:num_output_figs], pred_next_obs[0][:num_output_figs], stacked_frames, channels_per_frame)
@@ -67,17 +69,18 @@ def get_predictions(args, eval_loader, model):
     true_obs = []
     true_next_obs = []
     pred_next_obs = []
+    start = datetime.now()
 
-    for data_batch in eval_loader:
-        data_batch = [[t.to(device) for t in tensor] for tensor in data_batch]
+    for batch_idx, data_batch in enumerate(eval_loader):
+        data_batch = [[t.to(device) for t in tensor] for tensor in data_batch]         
         (obs, next_obs), actions = data_batch
 
         if args['ignore_action']:
             actions = torch.zeros(args['num_steps'], obs.shape[0], 2, dtype=torch.float64, device=device)
         
         #TODO make dynamic
-        obs = obs[:,:3,:,:]
-        next_obs = next_obs[:,:3,:,:]
+        #obs = obs[:,:3,:,:]
+        #next_obs = next_obs[:,:3,:,:]
 
         state = model(obs.to(device))
         next_state = model(next_obs.to(device))
@@ -89,10 +92,14 @@ def get_predictions(args, eval_loader, model):
         pred_next_states.append(pred_state)
         true_next_state.append(next_state)
 
+        if batch_idx == 0 or (batch_idx + 1) % 50:
+            utils.log_progress(batch_idx + 1, len(eval_loader), start)
+
         if len(true_obs) < args['num_output_figs']:
-            recon_combined, recons, masks, slots = model.obj_encoder(obs)
             true_obs.append(obs)
             true_next_obs.append(next_obs)
+
+            recon_combined, recons, masks, slots = model.obj_encoder.decode(pred_state)
             pred_next_obs.append(recon_combined)
     
     return true_obs, true_next_state, true_next_obs, pred_next_states, pred_next_obs
@@ -150,10 +157,6 @@ def get_scores(pred_states, next_states, topk):
     return hits_at, mrr
 
 
-import os
-import torch
-import matplotlib.pyplot as plt
-
 def plot_samples(true_obs, true_next_obs, pred_next_obs, stacked_frames, channels_per_frame, output_dir="data"):
     # Ensure the output directory exists
     if not os.path.exists(output_dir):
@@ -208,7 +211,7 @@ def plot_samples(true_obs, true_next_obs, pred_next_obs, stacked_frames, channel
                 ax.set_yticks([])
 
         # Save the figure for the current sample
-        fig_path = os.path.join(output_dir, f"sample_{i}.png")
+        fig_path = os.path.join(output_dir, f"GNN_sample_{i}.png")
         plt.savefig(fig_path)
         plt.close(fig)
 
@@ -264,7 +267,7 @@ def setup_configuration(parser):
         embodied=args["embodied"],
         device=device).to(device)
 
-    model.load_state_dict(torch.load(f"checkpoints/{args['config']}/model_1.pt", map_location=device)['model_state_dict'])
+    model.load_state_dict(torch.load(f"checkpoints/{args['config']}/model_{args['experiment']}.pt", map_location=device)['model_state_dict'])
     model.eval()
     return args, eval_loader, model
 

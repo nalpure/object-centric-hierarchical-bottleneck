@@ -252,6 +252,34 @@ class SlotAttentionAutoEncoder(nn.Module):
         # Slot Attention module.
         # `slots` has shape: [batch_size, num_slots, slot_size].
         return self.slot_attention(x)
+    
+    def decode(self, slots):
+        # `slots` has shape: [batch_size, num_slots, slot_size].
+
+        # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
+        slots = slots.reshape((-1, slots.shape[-1])).unsqueeze(1).unsqueeze(2)
+        if not self.small_arch:
+            slots = slots.repeat((1, 8, 8, 1))
+        else:
+            slots = slots.repeat((1, self.resolution[0], self.resolution[1], 1))
+        
+        # `slots` has shape: [batch_size*num_slots, width_init, height_init, slot_size].
+        x = self.decoder_cnn(slots)
+        # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
+
+        # Undo combination of slot and batch dimension; split alpha masks.
+        recons, masks = x.reshape(slots.shape[0], -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,1], dim=-1) # TODO 3 or 6
+        # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
+        # `masks` has shape: [batch_size, num_slots, width, height, 1].
+
+        # Normalize alpha masks over slots.
+        masks = nn.Softmax(dim=1)(masks)  # + 1e-8
+        
+        recon_combined = torch.sum(recons * masks, dim=1)  # Recombine image.
+        recon_combined = recon_combined.permute(0,3,1,2)
+        # `recon_combined` has shape: [batch_size, num_channels, width, height].
+
+        return recon_combined, recons, masks, slots
 
 
 class SlotAttentionEncoder(nn.Module):
