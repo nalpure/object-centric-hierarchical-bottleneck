@@ -150,7 +150,7 @@ class SlotSWM(CSWM):
         num_slots: Number of slots in Slot Attention.
         num_iterations: Number of iterations in Slot Attention.
     """
-    def __init__(self, args, hidden_dim, action_dim, num_channels=3, sigma=0.5, init_weights=None,
+    def __init__(self, args, hidden_dim, action_dim, sigma=0.5, init_weights=None,
                 ignore_action=False, copy_action=False, embodied=False, device="cpu"):
         super(SlotSWM, self).__init__(args["slots_dim"], hidden_dim, action_dim, args["num_slots"] , 
             1, sigma, ignore_action, copy_action, embodied, device)

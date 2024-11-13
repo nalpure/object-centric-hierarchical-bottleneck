@@ -10,6 +10,7 @@ import optuna
 import csv
 
 from slot_attention.train import *
+from utils import log_progress
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -110,6 +111,7 @@ def optuna_objective(trial, args, param_grid, train_data, val_data, csvfile, res
     val_indices = np.array_split(np.arange(len(val_data)), num_splits)
 
     subset_losses = []
+    start = datetime.now()
 
     # Run training and evaluation for each data subset
     for split_num, (train_idx, val_idx) in enumerate(zip(train_indices, val_indices)):
@@ -127,17 +129,20 @@ def optuna_objective(trial, args, param_grid, train_data, val_data, csvfile, res
         optimizer = initialize_optimizer(model, args)
         
         model, tr_loss_list = train(
-            args, model, optimizer, train_dataloader, num_checkpoints=1, model_name=f"{id_string}split{split_num}", verbose=False
+            args, model, optimizer, train_dataloader, num_checkpoints=1, model_name=f"{id_string}split{split_num}"
         )
         
         # Evaluate model on validation subset
         model.eval()
         val_loss = model_loss(model, val_dataloader)
-        print(f"Validation Loss for split {split_num}: {val_loss}")
+        print()
+        print(f"Training of split {split_num + 1} finished.")
+        log_progress(split_num + 1, num_splits, start, additional_msg=f'Validation loss: {val_loss}')
+        print()
         subset_losses.append(val_loss)
         
         # Write individual subset loss to CSV
-        row = {'value': val_loss, 'split_num': split_num}
+        row = {'value': val_loss, 'split_num': split_num + 1}
         for param in param_grid.keys():
             row[param] = args[param]
         results_writer.writerow(row)

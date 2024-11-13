@@ -1,6 +1,9 @@
 """Utility functions."""
 
+from datetime import datetime
+from datetime import timedelta
 import os
+import random
 import h5py
 import numpy as np
 
@@ -168,6 +171,39 @@ def load_model(model, optimizer, path):
     model.train()
     return iteration
 
+def log_progress(current_step, total_steps, start_time, additional_msg=''):
+    elapsed_time = (datetime.now() - start_time).total_seconds()
+    progress_fraction = current_step / total_steps
+    estimated_total_time = elapsed_time / progress_fraction if progress_fraction > 0 else 0
+    remaining_time = estimated_total_time - elapsed_time
+    remaining_timedelta = timedelta(seconds=int(remaining_time))
+    remaining_time_str = str(remaining_timedelta)
+    estimated_end_time = datetime.now() + timedelta(seconds=remaining_time)
+
+    msg = (
+        f"{current_step}/{total_steps} - "
+        f"Elapsed: {timedelta(seconds=int(elapsed_time))} - "
+        f"Remaining: {remaining_time_str} - "
+        f"Estimated End Time: {estimated_end_time.strftime('%H:%M:%S')}"
+    )
+
+
+    if additional_msg:
+        msg += f"\
+            {additional_msg}"
+
+    print(msg)
+
+
+def set_seed(seed):
+    random.seed()
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
 
 class StateTransitionsDataset(data.Dataset):

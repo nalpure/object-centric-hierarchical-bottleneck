@@ -2,14 +2,14 @@ import argparse
 import json
 import torch
 import utils
-import datetime
+from datetime import datetime
 import os
-import time
 import wandb
 
 from torch.utils import data
 
 import modules
+from utils import log_progress, set_seed
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=512,
@@ -18,6 +18,8 @@ parser.add_argument('--epochs', type=int, default=200,
                     help='Number of training epochs.')
 parser.add_argument('--learning_rate', type=float, default=5e-4,
                     help='Learning rate.')
+parser.add_argument('--seed', default=0, type=int, 
+                    help='random seed')
 parser.add_argument('--sigma', type=float, default=0.5,
                     help='Energy scale.')
 parser.add_argument('--hidden-dim', type=int, default=512,
@@ -67,9 +69,6 @@ if args["config"] is not None:
         print(f'{k}: {v}')
     print()
 
-now = datetime.datetime.now()
-timestamp = now.isoformat()
-
 exp_name = args["config"]
 
 save_folder = '{}/{}/'.format(args["save_folder"], exp_name)
@@ -89,6 +88,11 @@ print("Finished loading dataset.")
 use_wandb = args["wandb_project"] is not None and args["wandb_entity"] is not None
 
 if args["OC_config"] is not None:
+
+    if args['init_ckpt']:
+        print("Loading autoencoder checkpoint from:", args['init_ckpt'])
+    else:
+        print("Set up model for end-to-end training.")
 
     loss_name = "transition_loss"
 
@@ -136,23 +140,24 @@ if use_wandb:
     wandb.config = logs
     wandb.watch(model)
 
+set_seed(args['seed'])
+
 # Train model.
 print('Starting model training...')
 step = 0
 best_loss = 1e9
-start = time.time()
+start = datetime.now()
 model.train()
 
-for epoch in range(args["epochs"]):
+for epoch in range(1, args["epochs"] + 1):
     train_loss = 0
 
     for batch_idx, data_batch in enumerate(train_loader):
         data_batch = [tensor.to(device) for tensor in data_batch]
         obs, action, next_obs = data_batch
-        
         #TODO make dynamic
-        obs = obs[:,:3,:,:]
-        next_obs = next_obs[:,:3,:,:]
+        #obs = obs[:,:3,:,:]
+        #next_obs = next_obs[:,:3,:,:]
 
         if args['ignore_action']:
             action = torch.zeros(obs.shape[0], 3, dtype=torch.int64, device=device)
@@ -166,7 +171,8 @@ for epoch in range(args["epochs"]):
         train_loss += loss.item()
         optimizer.step()
 
-        if batch_idx % args["log_interval"] == 0:
+      
+        if batch_idx > 0 and batch_idx % args["log_interval"] == 0:
             print(
                 'Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                     epoch, batch_idx * len(data_batch[0]),
@@ -177,10 +183,11 @@ for epoch in range(args["epochs"]):
         step += 1
 
     avg_loss = train_loss / len(train_loader)
-    print('====> Epoch: {} Average loss: {:.6f}'.format(epoch, avg_loss))
+    log_progress(epoch, args['epochs'], start, additional_msg=f'Average loss: {avg_loss:.6f}')
+    print()
 
     if avg_loss < best_loss:
         best_loss = avg_loss
         model.save(epoch, optimizer, model_file)
 
-print(f"training time({args['epochs']} epochs): {time.time() - start}s")
+print(f"training time({args['epochs']} epochs): {(datetime.now() - start).total_seconds()}s")

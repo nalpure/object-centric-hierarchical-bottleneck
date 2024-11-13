@@ -7,11 +7,13 @@ https://github.com/seuqaj114/paig/blob/master/nn/datasets/generators.py
 """
 
 
+from datetime import datetime
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from itertools import combinations
-from tqdm import tqdm
+from utils import log_progress
 
 
 def rgb2gray(rgb):
@@ -196,9 +198,17 @@ def generate_3_body_problem_dataset(dest,
 
         return seq
 
+    total_steps = train_set_size + valid_set_size + test_set_size
     sequences = []
-    for _ in tqdm(range(train_set_size + valid_set_size + test_set_size), desc="Letting balls float"):
+    start_time = datetime.now()
+
+    for i in range(1, total_steps + 1):
         sequences.append(generate_sequence())
+    
+        if i == 1 or i % 100 == 0:
+            log_progress(i, total_steps, start_time)
+
+    print("Process completed.")
     sequences = np.array(sequences, dtype=np.uint8)
 
     np.savez_compressed(dest,
@@ -221,3 +231,5 @@ def generate_3_body_problem_dataset(dest,
     fig.tight_layout()
     fig.savefig(dest.split(".")[0] + "_samples.png")
     """
+
+
