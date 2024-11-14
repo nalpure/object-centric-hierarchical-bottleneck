@@ -171,8 +171,8 @@ def grid_search(args, results_save_path='data/grid_analysis/grid_search_results.
     study = optuna.create_study(direction='minimize', sampler=sampler)
 
     # Load the full dataset (without batch processing)
-    train_data = StateTransitionsDataset(hdf5_file=args['train_path'])
-    val_data = StateTransitionsDataset(hdf5_file=args['val_path'])
+    train_data = StateTransitionsDataset(hdf5_file=args['train_path'], hdf5_format=args['hdf5_format'])
+    val_data = StateTransitionsDataset(hdf5_file=args['val_path'], hdf5_format=args['hdf5_format'])
 
     file_exists = os.path.exists(results_save_path)
 
@@ -195,7 +195,6 @@ def main():
     output_path = 'data/grid_analysis/grid_search_heatmap.png'
 
     args = parse_arguments()
-    args = load_configuration(args)
 
     if args['val_path'] is None:
         raise ValueError("Specify a validation dataset.")

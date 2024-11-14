@@ -18,6 +18,8 @@ parser.add_argument('--num-steps', type=int, default=1,
 parser.add_argument('--dataset', type=str,
                     default='data/spriteworld_test_0.h5',
                     help='Dataset string.')
+parser.add_argument('--hdf5_format', default='CHW', type=str, 
+                    help='format of train, val and test data frames')
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='Disable CUDA training.')
 parser.add_argument('--OC-config', type=str,
@@ -232,9 +234,8 @@ def setup_configuration(parser):
             except KeyError:
                 exit(f"{key} is not a valid parameter")
 
-    dataset = args["dataset"]
-
-    dataset = utils.PathDataset(hdf5_file=dataset, path_length=args["num_steps"])
+    print(f"Loading state transitions dataset \'{args['dataset']}\'...")
+    dataset = utils.PathDataset(hdf5_file=args["dataset"], path_length=args["num_steps"])
     eval_loader = data.DataLoader(dataset, batch_size=args['batch_size'], shuffle=False, num_workers=2, drop_last=True)
 
     if args["OC_config"] is not None:

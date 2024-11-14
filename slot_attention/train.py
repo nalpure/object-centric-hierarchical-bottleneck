@@ -1,7 +1,5 @@
 import argparse
 from slot_attention.slot_attention import SlotAttentionAutoEncoder
-import random
-import datetime
 import torch.optim as optim
 import torch
 from torch.utils import data
@@ -21,17 +19,22 @@ print("Running on", device)
 
 def main():
     args = parse_arguments()
-    args = load_configuration(args)
 
     if args['val_path']:
         raise Warning('A validation path was specified but will not be used.')
 
     set_seed(args['seed'])
-
     model = initialize_model(args)
+
+    if args["wandb_project"] and args["wandb_entity"]:
+        setup_wandb(args, model)
+
     optimizer = initialize_optimizer(model, args)
+    
     print("Loading training data...")
-    train_dataloader = load_data(args["train_path"], args)
+    dataset = StateTransitionsDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+    train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"])
+    
     train(args, model, optimizer, train_dataloader)
 
 
@@ -82,7 +85,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
         loss_list.append(epoch_loss)
 
         if epoch == 1 or epoch % 50:
-            log_progress(epoch, args['num_epochs'], start, additional_msg=f'Training loss: {epoch_loss}')
+            log_progress(epoch, args['num_epochs'], start, additional_msg=f'Training loss: {epoch_loss:6f}')
 
         # Save the model and optimizer state every few epochs
         if epoch_loss < best_loss:
@@ -100,21 +103,13 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
     return model, loss_list
 
 
-def load_data(data_path, args):
-    """Load dataset and create dataloaders."""
-    dataset = StateTransitionsDataset(hdf5_file=data_path)
-    dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"])
-    return dataloader
-
-
 def setup_wandb(args, model):
     """Initialize Weights & Biases if required."""
-    if args["wandb_project"] and args["wandb_entity"]:
-        import wandb
-        wandb.init(project=args["wandb_project"], entity=args["wandb_entity"])
-        wandb.run.name = args["config"]
-        wandb.config.update(args)
-        wandb.watch(model)
+    import wandb
+    wandb.init(project=args["wandb_project"], entity=args["wandb_entity"])
+    wandb.run.name = args["config"]
+    wandb.config.update(args)
+    wandb.watch(model)
 
 
 def initialize_model(args):
@@ -155,23 +150,8 @@ def initialize_optimizer(model, args):
     return optimizer
 
 
-def load_configuration(args):
-    """Load configuration from a JSON file if provided."""
-    if args["config"] is not None:
-        args["ckpt_name"] = args["config"]
-        with open("configs.json", "r") as config_file:
-            configs = json.load(config_file)[args["config"]]
-        for key, value in configs.items():
-            if key in args:
-                args[key] = value
-            else:
-                raise Warning(f"{key} is not a valid parameter")
-
-    return args
-
-
 def parse_arguments():
-    """Parse command line arguments."""
+    """Parse command line arguments and load configuration."""
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
@@ -181,6 +161,7 @@ def parse_arguments():
     parser.add_argument('--train_path', default='spriteworld/spriteworld/training_data', type=str, help='Path to the training data')
     parser.add_argument('--val_path', default=None, type=str, help='Optional: Path to the validation data. If specified, hyperparameter optimization will be executed.')
     parser.add_argument('--test_path', default='spriteworld/spriteworld/test_data', type=str, help='Path to the training data')
+    parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
     parser.add_argument('--resolution', default=[35, 35], type=list)
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
@@ -200,7 +181,19 @@ def parse_arguments():
     parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 
     args = parser.parse_args()
-    return vars(args)
+    
+    if args["config"] is not None:
+        args["ckpt_name"] = args["config"]
+        with open("configs.json", "r") as config_file:
+            configs = json.load(config_file)[args["config"]]
+        for key, value in configs.items():
+            if key in args:
+                args[key] = value
+            else:
+                raise Warning(f"{key} is not a valid parameter")
+
+    return args
+
 
 if __name__ == "__main__":
     main()

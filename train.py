@@ -36,6 +36,8 @@ parser.add_argument('--log-interval', type=int, default=20,
 parser.add_argument('--dataset', type=str,
                     default='data/spriteworld_train.h5',
                     help='Path to replay buffer.')
+parser.add_argument('--hdf5_format', default='CHW', type=str, 
+                    help='format of train, val and test data frames')
 parser.add_argument('--embodied', action='store_true')
 parser.add_argument('--config', type=str, default=None,
                     help='Experiment name.')
@@ -79,8 +81,8 @@ model_file = os.path.join(save_folder, f'model_{exp}.pt')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-print("Loading state transitions dataset", args['dataset'])
-dataset = utils.StateTransitionsDataset(hdf5_file=args["dataset"])
+print(f"Loading state transitions dataset \'{args['dataset']}\'...")
+dataset = utils.StateTransitionsDataset(hdf5_file=args["dataset"], hdf5_format=args["hdf5_format"])
 print("Loading data...")
 train_loader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True)
 print("Finished loading dataset.")
@@ -172,7 +174,7 @@ for epoch in range(1, args["epochs"] + 1):
         optimizer.step()
 
       
-        if batch_idx > 0 and batch_idx % args["log_interval"] == 0:
+        if args["log_interval"] > 0 and batch_idx % args["log_interval"] == 0:
             print(
                 'Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                     epoch, batch_idx * len(data_batch[0]),
@@ -183,11 +185,12 @@ for epoch in range(1, args["epochs"] + 1):
         step += 1
 
     avg_loss = train_loss / len(train_loader)
-    log_progress(epoch, args['epochs'], start, additional_msg=f'Average loss: {avg_loss:.6f}')
-    print()
 
     if avg_loss < best_loss:
         best_loss = avg_loss
         model.save(epoch, optimizer, model_file)
+
+    if epoch == 1 or epoch % 10 == 0:
+        log_progress(epoch, args['epochs'], start, additional_msg=f'Training loss: {avg_loss:.6f}')
 
 print(f"training time({args['epochs']} epochs): {(datetime.now() - start).total_seconds()}s")

@@ -145,7 +145,6 @@ def to_one_hot(indices, max_index):
     return one_hot
 
 
-
 def to_float(np_array):
     """Convert numpy array to float32."""
     return np.array(np_array, dtype=np.float32)
@@ -159,6 +158,7 @@ def unsorted_segment_sum(tensor, segment_ids, num_segments):
     result.scatter_add_(0, segment_ids, tensor)
     return result
 
+
 def load_model(model, optimizer, path):
     """
     loads a model from a given path
@@ -170,6 +170,17 @@ def load_model(model, optimizer, path):
     optimizer.load_state_dict(checkpoint['optim_state_dict'])
     model.train()
     return iteration
+
+
+def convert_image_format(obs, hdf5_format, output_format):
+    if hdf5_format == 'CHW' and output_format == 'HWC':
+        obs = np.transpose(obs, (1, 2, 0))  # Convert CHW to HWC
+    elif hdf5_format == 'HWC' and output_format == 'CHW':
+        obs = np.transpose(obs, (2, 0, 1))  # Convert HWC to CHW
+    elif hdf5_format != output_format:
+        raise ValueError(f'Expected \'CHW\' or \'HWC\' as hdf5-format and output-format, received \'{hdf5_format}\ and \'{output_format}\'.')
+    return obs
+
 
 def log_progress(current_step, total_steps, start_time, additional_msg=''):
     elapsed_time = (datetime.now() - start_time).total_seconds()
@@ -187,11 +198,7 @@ def log_progress(current_step, total_steps, start_time, additional_msg=''):
         f"Estimated End Time: {estimated_end_time.strftime('%H:%M:%S')}"
     )
 
-
-    if additional_msg:
-        msg += f"\
-            {additional_msg}"
-
+    if additional_msg: msg += f" - {additional_msg}"
     print(msg)
 
 
@@ -209,13 +216,15 @@ def set_seed(seed):
 class StateTransitionsDataset(data.Dataset):
     """Create dataset of (o_t, a_t, o_{t+1}) transitions from replay buffer."""
 
-    def __init__(self, hdf5_file):
+    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
         """
         Args:
             hdf5_file (string): Path to the hdf5 file that contains experience
                 buffer
         """
         self.experience_buffer = load_list_dict_h5py(hdf5_file)
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
 
         # Build table for conversion between linear idx -> episode/step idx
         self.idx2episode = list()
@@ -233,19 +242,20 @@ class StateTransitionsDataset(data.Dataset):
 
     def __getitem__(self, idx):
         ep, step = self.idx2episode[idx]
-
         obs = to_float(self.experience_buffer[ep]['obs'][step])
+        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
         action = self.experience_buffer[ep]['action'][step]
         next_obs = to_float(self.experience_buffer[ep]['next_obs'][step])
 
         return obs, action, next_obs
 
 
+
 class PathDataset(data.Dataset):
     """Create dataset of {(o_t, a_t)}_{t=1:N} paths from replay buffer.
     """
 
-    def __init__(self, hdf5_file, path_length=5):
+    def __init__(self, hdf5_file, hdf5_format='CHW', output_format='CHW', path_length=5):
         """
         Args:
             hdf5_file (string): Path to the hdf5 file that contains experience
@@ -253,6 +263,8 @@ class PathDataset(data.Dataset):
         """
         self.experience_buffer = load_list_dict_h5py(hdf5_file)
         self.experience_buffer = [el for el in self.experience_buffer if el['next_obs'].size > 0]
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
         self.path_length = path_length
 
     def __len__(self):
@@ -265,10 +277,12 @@ class PathDataset(data.Dataset):
         path_length = self.path_length if l >= self.path_length else l
         for i in range(path_length):
             obs = to_float(self.experience_buffer[idx]['obs'][i])
+            obs = convert_image_format(obs, self.hdf5_format, self.output_format)
             action = self.experience_buffer[idx]['action'][i]
             observations.append(obs)
             actions.append(action)
         obs = to_float(self.experience_buffer[idx]['next_obs'][self.path_length - 1])
+        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
         observations.append(obs)
         
         return observations, actions

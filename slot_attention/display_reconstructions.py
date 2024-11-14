@@ -15,8 +15,8 @@ parser = argparse.ArgumentParser()
 criterion = torch.nn.MSELoss()
 
 parser.add_argument('--config', default=None, type=str, help='name of the configuration to use' )
+parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
 parser.add_argument('--ckpt_path', default='checkpoints/3-body/', type=str, help='where the models were saved' )
-parser.add_argument('--ckpt_name', default='model_ep600.ckpt', type=str, help="Name of the checkpoint to load the model from")
 parser.add_argument('--output_dir', default='data/')
 parser.add_argument('--num_output_figs', default=3, type=int, help='desired number of output figures')
 parser.add_argument('--randomize_frame_order', default=False, type=bool, help='If true, reorders the frames in each frame stack randomly.')
@@ -25,6 +25,7 @@ args = parser.parse_args()
 args = vars(args)
 
 if args["config"] is not None:
+    args["ckpt_name"] = args["config"]
     with open("configs.json", "r") as config_file:
         configs = json.load(config_file)[args["config"]]
     for key, value in configs.items():
@@ -35,8 +36,6 @@ if args["config"] is not None:
 
 if args['num_output_figs'] > args['batch_size']:
     raise ValueError("Number of output figures exceeds batch size.")
-
-model_path = args['ckpt_path'] + args['ckpt_name']
 
 
 def load_model(checkpoint_path):
@@ -59,7 +58,7 @@ def load_model(checkpoint_path):
 
 def get_reconstructions(model, test_path):
     print("Loading test dataset:", test_path)
-    test_dataset = StateTransitionsDataset(hdf5_file=test_path)
+    test_dataset = (hdf5_file=test_path, hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=False, drop_last=True)
     all_obs = []
     all_recons = []
@@ -275,7 +274,7 @@ def plot_observations_and_reconstructions(all_obs, recons):
         plt.close(fig)
 
 
-model = load_model(model_path)
+model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}.ckpt')
 all_obs, all_recons, all_masks, all_recon_combined = get_reconstructions(model, args['test_path'])
 
 loss_list = np.array([criterion(obs, rec).item() for obs, rec in zip(all_obs, all_recon_combined)])
