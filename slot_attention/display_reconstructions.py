@@ -58,7 +58,7 @@ def load_model(checkpoint_path):
 
 def get_reconstructions(model, test_path):
     print("Loading test dataset:", test_path)
-    test_dataset = (hdf5_file=test_path, hdf5_format=args["hdf5_format"])
+    test_dataset = StateTransitionsDataset(hdf5_file=test_path, hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=False, drop_last=True)
     all_obs = []
     all_recons = []
