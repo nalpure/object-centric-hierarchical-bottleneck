@@ -75,6 +75,13 @@ for idx in range(data['train_x'].shape[0]):
 
     replay_buffer.append(sample)
 
+print()
+print(f'Created {len(replay_buffer)} episodes, each with the following data:')
+print(f'--- Observations {replay_buffer[0]["obs"].shape}')
+print(f'--- Next observations {replay_buffer[0]["next_obs"].shape}')
+print(f'--- Actions {replay_buffer[0]["action"].shape}')
+print()
+
 save_list_dict_h5py(replay_buffer, args['fname'] + '.h5')
 print("Saved to file", args['fname'] + '.h5')
 
