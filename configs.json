@@ -1,17 +1,17 @@
 {
-    "3-body": {
-        "train_path": "data/10f_5000ep_s1.h5",
-        "test_path": "data/10f_1000ep_s2.h5",
+    "5frame": {
+        "train_path": "data/5F_1000ep_s1.h5",
+        "test_path": "data/5F_200ep_s2.h5",
         "ckpt_path": "slot_attention/checkpoints/3-body/",
-        "stacked_frames": 1,
+        "stacked_frames": 5,
         "channels_per_frame": 3,
         "resolution": [
             50,
             50
         ],
-        "num_slots": 4,
+        "num_slots": 3,
         "num_iterations": 3,
-        "slots_dim": 64,
+        "slots_dim": 8,
         "small_arch": true,
         "batch_size": 64,
         "learning_rate": 0.0004,
@@ -20,11 +20,44 @@
         "decay_steps": 31400,
         "seed": 1
     },
-    "grid_search": {
-        "train_path": "data/balls_2frame_train_10000.h5",
-        "val_path": "data/balls_2frame_val_2000.h5",
-        "test_path": "data/balls_2frame_eval_seed10.h5",
-        "ckpt_path": "slot_attention/checkpoints/3-body/",
+    "5frameEndToEnd": {
+        "train_path": "data/5F_1000ep_s1.h5",
+        "test_path": "data/5F_200ep_s2.h5",
+        "ckpt_path": "slot_attention/checkpoints/spriteworld/",
+        "stacked_frames": 5,
+        "channels_per_frame": 3,
+        "resolution": [
+            50,
+            50
+        ],
+        "num_slots": 3,
+        "num_iterations": 3,
+        "slots_dim": 16,
+        "small_arch": true
+    },
+    "spriteworld": {
+        "train_path": "data/spriteworld/spriteworld_train.h5",
+        "test_path": "data/spriteworld/spriteworld_test_1.h5",
+        "ckpt_path": "slot_attention/checkpoints/spriteworld/",
+        "hdf5_format": "HWC",
+        "stacked_frames": 1,
+        "channels_per_frame": 3,
+        "resolution": [
+            64,
+            64
+        ],
+        "num_slots": 6,
+        "num_iterations": 3,
+        "slots_dim": 64,
+        "small_arch": true,
+        "batch_size": 256,
+        "learning_rate": 0.0005,
+        "num_epochs": 600,
+        "warmup_steps": 3140,
+        "decay_steps": 31400
+    },
+    "1frameSmall": {
+        "train_path": "data/1F_10ep_s1.h5",
         "stacked_frames": 1,
         "channels_per_frame": 3,
         "resolution": [
@@ -33,9 +66,13 @@
         ],
         "num_slots": 3,
         "num_iterations": 3,
-        "slots_dim": 64,
+        "slots_dim": 8,
         "small_arch": true,
         "batch_size": 64,
-        "num_epochs": 600
+        "learning_rate": 0.0004,
+        "num_epochs": 600,
+        "warmup_steps": 3140,
+        "decay_steps": 31400,
+        "seed": 1
     }
 }

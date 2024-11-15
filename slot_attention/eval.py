@@ -1,5 +1,5 @@
 import argparse
-from utils import StateTransitionsDataset
+from utils import StateTransitionsDataset, set_seed
 from torch.utils import data
 from tqdm import tqdm
 import numpy as np
@@ -15,6 +15,7 @@ parser = argparse.ArgumentParser()
 criterion = torch.nn.MSELoss()
 
 parser.add_argument('--config', default=None, type=str, help='name of the configuration to use' )
+parser.add_argument('--seed', default=0, type=int, help='random seed')
 parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
 parser.add_argument('--ckpt_path', default='checkpoints/3-body/', type=str, help='where the models were saved' )
 parser.add_argument('--output_dir', default='data/')
@@ -59,14 +60,14 @@ def load_model(checkpoint_path):
 def get_reconstructions(model, test_path):
     print("Loading test dataset:", test_path)
     test_dataset = StateTransitionsDataset(hdf5_file=test_path, hdf5_format=args["hdf5_format"])
-    test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=False, drop_last=True)
+    test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
     all_obs = []
     all_recons = []
     all_masks = []
     all_recon_combined = []
 
     with torch.no_grad():
-        for batch in tqdm(test_dataloader, desc="Processing test data"):
+        for batch_idx, batch in enumerate(test_dataloader):
             # samples consists of 3 lists for observations, actions, next observations.
             # obs and next_obs have shape (num_steps, num_channels, frame_height, frame_width)
             obs, action, next_obs = batch
@@ -136,6 +137,11 @@ def plot_obs_with_combined_recons(all_obs, all_recons, criterion):
 
             diff_img = np.abs(obs_img - recon_img)
 
+            # Clip image values to valid range [0,1]
+            obs_img = np.clip(obs_img, 0.0, 1.0)
+            recon_img = np.clip(recon_img, 0.0, 1.0)
+            diff_img = np.clip(diff_img, 0.0, 1.0)
+
             # Display the original observation
             axes[0, img_idx].imshow(obs_img)
             axes[0, img_idx].set_title(f't={img_idx}', fontsize=12, fontweight='bold')
@@ -194,6 +200,7 @@ def plot_observations_with_masks(all_obs, all_masks):
         # Plot each frame in the first row
         for i in range(args['stacked_frames']):
             frame = frames[i].transpose(1, 2, 0)  # Move channels to the last dimension for RGB plotting
+            frame = np.clip(frame, 0.0, 1.0)
             axes[0, i].imshow(frame)
             axes[0, i].axis('off')
             axes[0, i].set_title(f"Frame {i + 1}")
@@ -247,6 +254,7 @@ def plot_observations_and_reconstructions(all_obs, recons):
         obs_frames = all_obs[i].view(args['stacked_frames'], args['channels_per_frame'], height, width)
         for j in range(args['stacked_frames']):
             frame = obs_frames[j].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C) format for plotting
+            frame = np.clip(frame, 0.0, 1.0)
             axes[0, j].imshow(frame)
             axes[0, j].set_title(f't={j}', fontsize=12, fontweight='bold')
             axes[0, j].axis('off')
@@ -258,6 +266,7 @@ def plot_observations_and_reconstructions(all_obs, recons):
             recon_frames = recons[i, slot].view(args['stacked_frames'], args['channels_per_frame'], height, width)
             for j in range(args['stacked_frames']):
                 recon_frame = recon_frames[j].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C) format
+                recon_frame = np.clip(recon_frame, 0.0, 1.0)
                 axes[slot + 1, j].imshow(recon_frame)
                 axes[slot + 1, j].axis('off')
                 if j == 0:
@@ -274,15 +283,20 @@ def plot_observations_and_reconstructions(all_obs, recons):
         plt.close(fig)
 
 
+set_seed(args["seed"])
+
 model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}.ckpt')
 all_obs, all_recons, all_masks, all_recon_combined = get_reconstructions(model, args['test_path'])
 
 loss_list = np.array([criterion(obs, rec).item() for obs, rec in zip(all_obs, all_recon_combined)])
 
-print(f"Mean loss: {np.mean(loss_list):.8f}")
-print(f"Min loss: {np.min(loss_list):.8f}")
-print(f"Max loss: {np.max(loss_list):.8f}")
-print(f"Standard deviation: {np.std(loss_list):.8f}")
+for i, loss in enumerate(loss_list):
+    print(f'Loss batch #{i}: {loss:6f}')
+
+print()
+print(f"Mean loss: {np.mean(loss_list):.6f}")
+print(f"Min loss: {np.min(loss_list):.6f}")
+print(f"Max loss: {np.max(loss_list):.6f}")
 
 plot_obs_with_combined_recons(all_obs[0][:args['num_output_figs']], all_recon_combined[0][:args['num_output_figs']], criterion)
 plot_observations_with_masks(all_obs[0][:args['num_output_figs']], all_masks[0][:args['num_output_figs']])

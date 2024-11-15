@@ -84,7 +84,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
         epoch_loss /= len(train_dataloader)
         loss_list.append(epoch_loss)
 
-        if epoch == 1 or epoch % 50:
+        if epoch == 1 or epoch % 10 == 0:
             log_progress(epoch, args['num_epochs'], start, additional_msg=f'Training loss: {epoch_loss:6f}')
 
         # Save the model and optimizer state every few epochs
@@ -181,6 +181,7 @@ def parse_arguments():
     parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 
     args = parser.parse_args()
+    args = vars(args)
     
     if args["config"] is not None:
         args["ckpt_name"] = args["config"]

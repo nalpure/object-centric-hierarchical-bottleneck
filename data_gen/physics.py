@@ -15,8 +15,6 @@ parser.add_argument('--samples-per-episode', default=10, type=int,
                     help='number of samples with should be saved for each episode')
 parser.add_argument('--seed', type=int, default=0,
                     help='Random seed.')
-parser.add_argument('--eval', action='store_true', default=False,
-                    help='Create evaluation set.')
 parser.add_argument('--stacked-frames', default=1, type=int, 
                     help='number of frames stacked in each sample')
 
