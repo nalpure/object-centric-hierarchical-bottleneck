@@ -106,7 +106,7 @@ class SoftPositionEmbed(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, hid_dim, resolution, num_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(num_channels, hid_dim, 5, padding = 2) #TODO 3 or 6
+        self.conv1 = nn.Conv2d(num_channels, hid_dim, 5, padding = 2)
         self.conv2 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv3 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv4 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
@@ -135,13 +135,13 @@ class Decoder(nn.Module):
             self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
             self.conv4 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
             self.conv5 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv6 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1) # TODO 4 or 7
+            self.conv6 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1)
             self.decoder_initial_size = (8, 8)
         else:
             self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, stride=(1, 1), padding=2)
             self.conv2 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
             self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv4 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1) # TODO 4 or 7
+            self.conv4 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1)
             self.decoder_initial_size = resolution
         self.decoder_pos = SoftPositionEmbed(slots_dim, self.decoder_initial_size)
         self.resolution = resolution
@@ -199,44 +199,7 @@ class SlotAttentionAutoEncoder(nn.Module):
             hidden_dim = 128)
 
     def forward(self, image):
-        # `image` has shape: [batch_size, num_channels, width, height].
-
-        # Convolutional encoder with position embedding.
-        x = self.encoder_cnn(image)  # CNN Backbone.
-        x = nn.LayerNorm(x.shape[1:]).to(image.device)(x)
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.fc2(x)  # Feedforward network on set.
-        # `x` has shape: [batch_size, width*height, input_size].
-
-        # Slot Attention module.
-        slots = self.slot_attention(x)
-        # `slots` has shape: [batch_size, num_slots, slot_size].
-
-        # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
-        slots = slots.reshape((-1, slots.shape[-1])).unsqueeze(1).unsqueeze(2)
-        if not self.small_arch:
-            slots = slots.repeat((1, 8, 8, 1))
-        else:
-            slots = slots.repeat((1, self.resolution[0], self.resolution[1], 1))
-        
-        # `slots` has shape: [batch_size*num_slots, width_init, height_init, slot_size].
-        x = self.decoder_cnn(slots)
-        # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
-
-        # Undo combination of slot and batch dimension; split alpha masks.
-        recons, masks = x.reshape(image.shape[0], -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,1], dim=-1) # TODO 3 or 6
-        # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
-        # `masks` has shape: [batch_size, num_slots, width, height, 1].
-
-        # Normalize alpha masks over slots.
-        masks = nn.Softmax(dim=1)(masks)  # + 1e-8
-        
-        recon_combined = torch.sum(recons * masks, dim=1)  # Recombine image.
-        recon_combined = recon_combined.permute(0,3,1,2)
-        # `recon_combined` has shape: [batch_size, num_channels, width, height].
-
-        return recon_combined, recons, masks, slots
+        return self.decode(self.encode(image))
 
     def encode(self, image):
         # `image` has shape: [batch_size, num_channels, width, height].
@@ -255,6 +218,7 @@ class SlotAttentionAutoEncoder(nn.Module):
     
     def decode(self, slots):
         # `slots` has shape: [batch_size, num_slots, slot_size].
+        batch_size = slots.shape[0]
 
         # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
         slots = slots.reshape((-1, slots.shape[-1])).unsqueeze(1).unsqueeze(2)
@@ -268,7 +232,7 @@ class SlotAttentionAutoEncoder(nn.Module):
         # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
 
         # Undo combination of slot and batch dimension; split alpha masks.
-        recons, masks = x.reshape(slots.shape[0], -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,1], dim=-1) # TODO 3 or 6
+        recons, masks = x.reshape(batch_size, -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,1], dim=-1)
         # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
         # `masks` has shape: [batch_size, num_slots, width, height, 1].
 

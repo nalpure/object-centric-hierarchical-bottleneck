@@ -8,7 +8,6 @@ https://github.com/seuqaj114/paig/blob/master/nn/datasets/generators.py
 
 
 from datetime import datetime
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
