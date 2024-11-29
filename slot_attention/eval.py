@@ -18,7 +18,7 @@ parser.add_argument('--config', default=None, type=str, help='name of the config
 parser.add_argument('--seed', default=0, type=int, help='random seed')
 parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
 parser.add_argument('--ckpt_path', default='checkpoints/3-body/', type=str, help='where the models were saved' )
-parser.add_argument('--output_dir', default='data/')
+parser.add_argument('--output_dir', default='data/figures/')
 parser.add_argument('--num_output_figs', default=3, type=int, help='desired number of output figures')
 parser.add_argument('--randomize_frame_order', default=False, type=bool, help='If true, reorders the frames in each frame stack randomly.')
 
@@ -57,7 +57,7 @@ def load_model(checkpoint_path):
     return model
 
 
-def get_reconstructions(model, test_path):
+def get_reconstructions(model, test_path, max_samples=10000):
     print("Loading test dataset:", test_path)
     test_dataset = StateTransitionsDataset(hdf5_file=test_path, hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
@@ -65,9 +65,19 @@ def get_reconstructions(model, test_path):
     all_recons = []
     all_masks = []
     all_recon_combined = []
+    
+    print('Calculating reconstructions for {} batches of size {} (total: {} samples)'.format(
+        len(test_dataloader), args['batch_size'], len(test_dataloader) * args['batch_size']))
+    
+    if len(test_dataloader) * args['batch_size'] > max_samples:
+        print(f'Limiting test datasize to {max_samples} samples') 
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_dataloader):
+
+            if batch_idx * args['batch_size'] > max_samples:
+                break
+
             # samples consists of 3 lists for observations, actions, next observations.
             # obs and next_obs have shape (num_steps, num_channels, frame_height, frame_width)
             obs, action, next_obs = batch
@@ -168,7 +178,7 @@ def plot_obs_with_combined_recons(all_obs, all_recons, criterion):
         os.makedirs(args['output_dir'], exist_ok=True)
 
         # Save the figure
-        plt.savefig(os.path.join(args['output_dir'], f'comparison_sample_{sample_idx}.png'))
+        plt.savefig(os.path.join(args['output_dir'], f'reconstruction_{sample_idx}.png'))
         plt.close()
 
 
@@ -184,10 +194,10 @@ def plot_observations_with_masks(all_obs, all_masks):
     """   
     num_samples = all_obs.shape[0]
     
-    for idx in range(num_samples):
+    for sample_idx in range(num_samples):
         # Select the current observation and corresponding masks
-        observation = all_obs[idx].cpu().numpy()  # Shape: (num_channels, height, width)
-        masks = all_masks[idx].cpu().numpy()      # Shape: (num_slots, height, width, 1)
+        observation = all_obs[sample_idx].cpu().numpy()  # Shape: (num_channels, height, width)
+        masks = all_masks[sample_idx].cpu().numpy()      # Shape: (num_slots, height, width, 1)
         
         num_slots = masks.shape[0]
         
@@ -222,7 +232,7 @@ def plot_observations_with_masks(all_obs, all_masks):
         
         # Save the plot with a unique name for each observation
         plt.tight_layout()
-        plt.savefig(os.path.join(args['output_dir'], f"observation_with_masks_{idx}.png"))
+        plt.savefig(os.path.join(args['output_dir'], f"slot_masks_{sample_idx}.png"))
         plt.close(fig)
 
 
@@ -279,7 +289,7 @@ def plot_observations_and_reconstructions(all_obs, recons):
 
         # Save the figure for the current observation and reconstruction
         plt.tight_layout(pad=4)
-        plt.savefig(os.path.join(args['output_dir'], f"obs_recon_{i}.png"))
+        plt.savefig(os.path.join(args['output_dir'], f"slot_recons_{i}.png"))
         plt.close(fig)
 
 
@@ -294,9 +304,7 @@ for i, loss in enumerate(loss_list):
     print(f'Loss batch #{i}: {loss:6f}')
 
 print()
-print(f"Mean loss: {np.mean(loss_list):.6f}")
-print(f"Min loss: {np.min(loss_list):.6f}")
-print(f"Max loss: {np.max(loss_list):.6f}")
+print(f"Mean batch loss: {np.mean(loss_list):.6f}")
 
 plot_obs_with_combined_recons(all_obs[0][:args['num_output_figs']], all_recon_combined[0][:args['num_output_figs']], criterion)
 plot_observations_with_masks(all_obs[0][:args['num_output_figs']], all_masks[0][:args['num_output_figs']])
