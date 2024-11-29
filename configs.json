@@ -37,7 +37,12 @@
     },
     "spriteworld": {
         "train_path": "data/spriteworld/spriteworld_train.h5",
-        "test_path": "data/spriteworld/spriteworld_test_1.h5",
+        "val_paths": [
+            "data/spriteworld/spriteworld_test_0.h5",
+            "data/spriteworld/spriteworld_test_1.h5",
+            "data/spriteworld/spriteworld_test_2.h5"
+        ],
+        "test_path": "data/spriteworld/spriteworld_test0.h5",
         "ckpt_path": "slot_attention/checkpoints/spriteworld/",
         "hdf5_format": "HWC",
         "stacked_frames": 1,
@@ -50,14 +55,20 @@
         "num_iterations": 3,
         "slots_dim": 64,
         "small_arch": true,
-        "batch_size": 256,
+        "batch_size": 64,
         "learning_rate": 0.0005,
         "num_epochs": 600,
-        "warmup_steps": 3140,
-        "decay_steps": 31400
+        "warmup_steps": 10000,
+        "decay_steps": 100000
     },
-    "1frameSmall": {
-        "train_path": "data/1F_10ep_s1.h5",
+    "1frame": {
+        "train_path": "data/1F_20ep_s1.h5",
+        "val_paths": [
+            "data/1F_10ep_s1.h5",
+            "data/1F_20ep_s1.h5"
+        ],
+        "test_path": "data/1F_10ep_s1.h5",
+        "ckpt_path": "slot_attention/checkpoints/test/",
         "stacked_frames": 1,
         "channels_per_frame": 3,
         "resolution": [
@@ -66,11 +77,11 @@
         ],
         "num_slots": 3,
         "num_iterations": 3,
-        "slots_dim": 8,
+        "slots_dim": 3,
         "small_arch": true,
         "batch_size": 64,
-        "learning_rate": 0.0004,
-        "num_epochs": 600,
+        "learning_rate": 0.0005,
+        "num_epochs": 6,
         "warmup_steps": 3140,
         "decay_steps": 31400,
         "seed": 1

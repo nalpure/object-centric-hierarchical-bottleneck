@@ -20,7 +20,7 @@ print("Running on", device)
 def main():
     args = parse_arguments()
 
-    if args['val_path']:
+    if args['val_paths']:
         raise Warning('A validation path was specified but will not be used.')
 
     set_seed(args['seed'])
@@ -38,12 +38,15 @@ def main():
     train(args, model, optimizer, train_dataloader)
 
 
-def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()):
+def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verbose=True):
     """Main training loop. Saves model for each checkpoint. Returns trained model and the loss for each epoch."""
 
     if not exists(args["ckpt_path"]):
         makedirs(args["ckpt_path"])
     ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
+
+    if verbose:
+        print(f"Training slot attention on {len(train_dataloader)} batches, each of size {args['batch_size']}. Last batch might be smaller.")
 
     loss_list = []
     current_step = 0
@@ -84,7 +87,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
         epoch_loss /= len(train_dataloader)
         loss_list.append(epoch_loss)
 
-        if epoch == 1 or epoch % 10 == 0:
+        if verbose and (epoch == 1 or epoch % 10 == 0):
             log_progress(epoch, args['num_epochs'], start, additional_msg=f'Training loss: {epoch_loss:6f}')
 
         # Save the model and optimizer state every few epochs
@@ -97,8 +100,9 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
                 "epoch": (epoch, current_step)
             }, ckpt_path)
 
-    print()
-    print(f'Best epoch was #{epoch} with a loss of {best_loss:.6f}. Saved at \'{ckpt_path}\'.')
+    if verbose:
+        print()
+        print(f'Best epoch was #{best_epoch} with a loss of {best_loss:.6f}. Saved at \'{ckpt_path}\'.')
 
     return model, loss_list
 
@@ -159,7 +163,7 @@ def parse_arguments():
     parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where to save models')
     parser.add_argument('--seed', default=0, type=int, help='random seed')
     parser.add_argument('--train_path', default='spriteworld/spriteworld/training_data', type=str, help='Path to the training data')
-    parser.add_argument('--val_path', default=None, type=str, help='Optional: Path to the validation data. If specified, hyperparameter optimization will be executed.')
+    parser.add_argument('--val_paths', default=None, type=list, help='Optional: List of paths to validation data. Only needed for hyerparameter optimization.')
     parser.add_argument('--test_path', default='spriteworld/spriteworld/test_data', type=str, help='Path to the training data')
     parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
     parser.add_argument('--resolution', default=[35, 35], type=list)
