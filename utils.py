@@ -239,6 +239,63 @@ def set_seed(seed):
         torch.cuda.manual_seed(seed)
 
 
+class BaseDataset(data.Dataset):
+    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
+        self.experience_buffer = load_list_dict_h5py(hdf5_file)
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
+
+        # Build table for conversion between linear idx -> episode/step idx
+        self.idx2episode = list()
+        step = 0
+        for ep in range(len(self.experience_buffer)):
+            some_key = self.experience_buffer[ep].keys()[0] # take any key ...
+            num_steps = len(self.experience_buffer[ep][some_key]) # ... to determine number of steps
+            idx_tuple = [(ep, idx) for idx in range(num_steps)]
+            self.idx2episode.extend(idx_tuple)
+            step += num_steps
+
+        self.num_steps = step
+
+    def __len__(self):
+        return self.num_steps
+
+    def get_episode_step(self, idx):
+        return self.idx2episode[idx]
+    
+
+class StateTransitionsDataset(BaseDataset):
+    """Create dataset of (o_t, a_t, o_{t+1}) transitions from replay buffer."""
+
+    def __getitem__(self, idx):
+        ep, step = self.get_episode_step(idx)
+        
+        obs = to_float(self.experience_buffer[ep]['obs'][step])
+        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
+        action = self.experience_buffer[ep]['action'][step]
+        next_obs = to_float(self.experience_buffer[ep]['next_obs'][step])
+        next_obs = convert_image_format(next_obs, self.hdf5_format, self.output_format)
+
+        return obs, action, next_obs
+
+
+class PerturbedObservationsDataset(BaseDataset):
+    """Create dataset of (o_t, o'_t, magnitude, idx) from replay buffer."""
+
+    def __getitem__(self, idx):
+        ep, step = self.get_episode_step(idx)
+        obs = to_float(self.experience_buffer[ep]['observation'][step])
+        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
+        perturbed = to_float(self.experience_buffer[ep]['perturbed'][step])
+        perturbed = convert_image_format(perturbed, self.hdf5_format, self.output_format)
+        magnitudes = self.experience_buffer[ep]['magnitudes'][step]
+        indices = self.experience_buffer[ep]['indices'][step]
+        properties = self.experience_buffer[ep]['properties'][step]
+
+        return obs, perturbed, magnitudes, indices, properties
+    
+
+
 class StateTransitionsDataset(data.Dataset):
     """Create dataset of (o_t, a_t, o_{t+1}) transitions from replay buffer."""
 
@@ -253,6 +310,7 @@ class StateTransitionsDataset(data.Dataset):
         self.output_format = output_format
 
         # Build table for conversion between linear idx -> episode/step idx
+        # List of tuples: [(0, 0), (0, 1), ..., (episode_idx - 1, step_idx - 1)]
         self.idx2episode = list()
         step = 0
         for ep in range(len(self.experience_buffer)):
