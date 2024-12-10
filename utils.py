@@ -15,6 +15,32 @@ import matplotlib.pyplot as plt
 
 EPS = 1e-17
 
+# Define the mappings between property names and numerical codes
+STRING_TO_CODE = {
+    "pos_x": 0,
+    "pos_y": 1,
+    "vel_x": 2,
+    "vel_y": 3,
+    "hue": 4,
+}
+
+CODE_TO_STRING = {v: k for k, v in STRING_TO_CODE.items()}
+
+
+def encode(string):
+    """Encode a string into its corresponding numerical code."""
+    if string not in STRING_TO_CODE:
+        raise ValueError(f"String '{string}' is not in the predefined set.")
+    return STRING_TO_CODE[string]
+
+
+def decode(code):
+    """Decode a numerical code back into its corresponding string."""
+    if code not in CODE_TO_STRING:
+        raise ValueError(f"Code '{code}' is not valid.")
+    return CODE_TO_STRING[code]
+
+
 def huber_loss_(targets, predictions, batch):
     """
     Returns the list of indexes of the predicitons corersponding to the target
