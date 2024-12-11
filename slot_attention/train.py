@@ -7,8 +7,9 @@ from os import makedirs
 from os.path import exists
 import json
 from datetime import datetime
+import warnings
 
-from utils import StateTransitionsDataset, log_progress, set_seed
+from utils import ObservationDataset, StateTransitionsDataset, log_progress, set_seed
 
 
 TRAINING_NOISE = False # if true, noise is added to data whilst training
@@ -16,29 +17,68 @@ TRAINING_NOISE = False # if true, noise is added to data whilst training
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print("Running on", device)
 
+parser = argparse.ArgumentParser()
+
+parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
+parser.add_argument('--init_ckpt', default=None, type=str, help='initial weights to start training')
+parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where to save models')
+parser.add_argument('--seed', default=0, type=int, help='random seed')
+parser.add_argument('--train_path', default='spriteworld/spriteworld/training_data', type=str, help='Path to the training data')
+parser.add_argument('--val_paths', default=None, type=list, help='Optional: List of paths to validation data. Only needed for hyerparameter optimization.')
+parser.add_argument('--test_path', default='spriteworld/spriteworld/test_data', type=str, help='Path to the training data')
+parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
+parser.add_argument('--resolution', default=[35, 35], type=list)
+parser.add_argument('--batch_size', default=32, type=int)
+parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
+parser.add_argument('--small_arch', action='store_true', help='if true set the encoder/decoder dim to 32, 64 otherwise')
+parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
+parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
+parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
+parser.add_argument('--learning_rate', default=0.0004, type=float)
+parser.add_argument('--warmup_steps', default=10000, type=int, help='Number of warmup steps for the learning rate.')
+parser.add_argument('--decay_rate', default=0.5, type=float, help='Rate for the learning rate decay.')
+parser.add_argument('--decay_steps', default=100000, type=int, help='Number of steps for the learning rate decay.')
+parser.add_argument('--num_workers', default=0, type=int, help='number of workers for loading data')
+parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
+parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
+parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
+parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
+parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
+parser.add_argument('--disentangle', default=False, action='store_true', help='If true, adds disentanglement loss. Expects training data to include perturbations.')
+
+args = parser.parse_args()
+args = vars(args)
+
+if args["config"] is not None:
+    args["ckpt_name"] = args["config"]
+    with open("configs.json", "r") as config_file:
+        configs = json.load(config_file)[args["config"]]
+    for key, value in configs.items():
+        if key in args:
+            args[key] = value
+        else:
+            warnings.warn(f"{key} is not a valid parameter")
 
 def main():
-    args = parse_arguments()
-
     if args['val_paths']:
-        raise Warning('A validation path was specified but will not be used.')
+        warnings.warn('A validation path was specified but will not be used.')
 
     set_seed(args['seed'])
-    model = initialize_model(args)
+    model = initialize_model()
 
     if args["wandb_project"] and args["wandb_entity"]:
-        setup_wandb(args, model)
+        setup_wandb(model)
 
-    optimizer = initialize_optimizer(model, args)
+    optimizer = initialize_optimizer(model)
     
     print("Loading training data...")
-    dataset = StateTransitionsDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+    dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"])
     
-    train(args, model, optimizer, train_dataloader)
+    train(model, optimizer, train_dataloader)
 
 
-def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verbose=True):
     """Main training loop. Saves model for each checkpoint. Returns trained model and the loss for each epoch."""
 
     if not exists(args["ckpt_path"]):
@@ -48,6 +88,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
     if verbose:
         print(f"Training slot attention on {len(train_dataloader)} batches, each of size {args['batch_size']}. Last batch might be smaller.")
 
+    disentangle = args["disentangle"]
     loss_list = []
     current_step = 0
     best_loss = 1e9
@@ -58,7 +99,11 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
         epoch_loss = 0
         
         for batch in train_dataloader:
-            obs, action, next_obs = batch # e.g. obs is list of observations in this batch
+            if disentangle:
+                obs, perturbed, magnitudes, indices, properties = batch
+            else:
+                obs = batch
+
             # Discard not needed channels TODO: needed?
             obs = obs[:, :args['stacked_frames'] * args['channels_per_frame'], :, :]
             
@@ -107,16 +152,7 @@ def train(args, model, optimizer, train_dataloader, criterion=torch.nn.MSELoss()
     return model, loss_list
 
 
-def setup_wandb(args, model):
-    """Initialize Weights & Biases if required."""
-    import wandb
-    wandb.init(project=args["wandb_project"], entity=args["wandb_entity"])
-    wandb.run.name = args["config"]
-    wandb.config.update(args)
-    wandb.watch(model)
-
-
-def initialize_model(args):
+def initialize_model():
     """Initialize the SlotAttentionAutoEncoder model."""
     model = SlotAttentionAutoEncoder(
         tuple(args["resolution"]),
@@ -139,7 +175,16 @@ def initialize_model(args):
     return model
 
 
-def initialize_optimizer(model, args):
+def setup_wandb(model):
+    """Initialize Weights & Biases if required."""
+    import wandb
+    wandb.init(project=args["wandb_project"], entity=args["wandb_entity"])
+    wandb.run.name = args["config"]
+    wandb.config.update(args)
+    wandb.watch(model)
+
+
+def initialize_optimizer(model):
     """Initialize optimizer with specified learning rate."""
     params = [{'params': model.parameters()}]
     if args["optimizer"] == "adam":
@@ -152,52 +197,6 @@ def initialize_optimizer(model, args):
         raise ValueError("Select a valid optimizer.")
     
     return optimizer
-
-
-def parse_arguments():
-    """Parse command line arguments and load configuration."""
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
-    parser.add_argument('--init_ckpt', default=None, type=str, help='initial weights to start training')
-    parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where to save models')
-    parser.add_argument('--seed', default=0, type=int, help='random seed')
-    parser.add_argument('--train_path', default='spriteworld/spriteworld/training_data', type=str, help='Path to the training data')
-    parser.add_argument('--val_paths', default=None, type=list, help='Optional: List of paths to validation data. Only needed for hyerparameter optimization.')
-    parser.add_argument('--test_path', default='spriteworld/spriteworld/test_data', type=str, help='Path to the training data')
-    parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
-    parser.add_argument('--resolution', default=[35, 35], type=list)
-    parser.add_argument('--batch_size', default=32, type=int)
-    parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
-    parser.add_argument('--small_arch', action='store_true', help='if true set the encoder/decoder dim to 32, 64 otherwise')
-    parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
-    parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
-    parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
-    parser.add_argument('--learning_rate', default=0.0004, type=float)
-    parser.add_argument('--warmup_steps', default=10000, type=int, help='Number of warmup steps for the learning rate.')
-    parser.add_argument('--decay_rate', default=0.5, type=float, help='Rate for the learning rate decay.')
-    parser.add_argument('--decay_steps', default=100000, type=int, help='Number of steps for the learning rate decay.')
-    parser.add_argument('--num_workers', default=0, type=int, help='number of workers for loading data')
-    parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
-    parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
-    parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
-    parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
-    parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
-
-    args = parser.parse_args()
-    args = vars(args)
-    
-    if args["config"] is not None:
-        args["ckpt_name"] = args["config"]
-        with open("configs.json", "r") as config_file:
-            configs = json.load(config_file)[args["config"]]
-        for key, value in configs.items():
-            if key in args:
-                args[key] = value
-            else:
-                raise Warning(f"{key} is not a valid parameter")
-
-    return args
 
 
 if __name__ == "__main__":

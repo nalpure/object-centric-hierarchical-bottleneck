@@ -249,8 +249,7 @@ class BaseDataset(data.Dataset):
         self.idx2episode = list()
         step = 0
         for ep in range(len(self.experience_buffer)):
-            some_key = self.experience_buffer[ep].keys()[0] # take any key ...
-            num_steps = len(self.experience_buffer[ep][some_key]) # ... to determine number of steps
+            num_steps = len(self.experience_buffer[ep]['obs']) # ... to determine number of steps
             idx_tuple = [(ep, idx) for idx in range(num_steps)]
             self.idx2episode.extend(idx_tuple)
             step += num_steps
@@ -262,6 +261,16 @@ class BaseDataset(data.Dataset):
 
     def get_episode_step(self, idx):
         return self.idx2episode[idx]
+    
+
+class ObservationDataset(BaseDataset):
+    """Create dataset of observations from replay buffer."""
+
+    def __getitem__(self, idx):
+        ep, step = self.get_episode_step(idx)
+        obs = to_float(self.experience_buffer[ep]['obs'][step])
+        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
+        return obs
     
 
 class StateTransitionsDataset(BaseDataset):
@@ -280,7 +289,7 @@ class StateTransitionsDataset(BaseDataset):
 
 
 class PerturbedObservationsDataset(BaseDataset):
-    """Create dataset of (o_t, o'_t, magnitude, idx) from replay buffer."""
+    """Create dataset of (o, o', magnitude, index, property) from replay buffer."""
 
     def __getitem__(self, idx):
         ep, step = self.get_episode_step(idx)
