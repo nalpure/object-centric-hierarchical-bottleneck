@@ -1,5 +1,5 @@
 import argparse
-from slot_attention.slot_attention import SlotAttentionAutoEncoder
+from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
 import torch.optim as optim
 import torch
 from torch.utils import data
@@ -44,7 +44,9 @@ parser.add_argument('--wandb_project', default=None, type=str, help='wandb proje
 parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
 parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
 parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
+
 parser.add_argument('--disentangle', default=False, action='store_true', help='If true, adds disentanglement loss. Expects training data to include perturbations.')
+parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -85,15 +87,20 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
         makedirs(args["ckpt_path"])
     ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
 
-    if verbose:
-        print(f"Training slot attention on {len(train_dataloader)} batches, each of size {args['batch_size']}. Last batch might be smaller.")
-
     disentangle = args["disentangle"]
+
+    if verbose:
+        print(f"Batches: {len(train_dataloader)}")
+        print(f"Batch size: {args['batch_size']}")
+        print(f"Disentangle: {disentangle}")
+        if disentangle: print(f"Latent dim: {args['latent_dim']}")
+
     loss_list = []
     current_step = 0
     best_loss = 1e9
     model.train()
     start = datetime.now()
+    print("Training started at", start)
     
     for epoch in range(1, args["num_epochs"] + 1): 
         epoch_loss = 0
@@ -112,7 +119,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
             
             obs = obs.to(device)
 
-            recon_combined, recons, masks, slots = model(obs)
+            recon_combined, _, _, _ = model(obs)
             loss = criterion(recon_combined, obs)
             epoch_loss += loss.item()
 
@@ -154,15 +161,28 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
 
 def initialize_model():
     """Initialize the SlotAttentionAutoEncoder model."""
-    model = SlotAttentionAutoEncoder(
-        tuple(args["resolution"]),
-        args["num_slots"],
-        args["stacked_frames"] * args["channels_per_frame"],
-        args["num_iterations"],
-        args["slots_dim"],
-        32 if args["small_arch"] else 64,
-        args["small_arch"]
-    ).to(device)
+
+    if args["disentangle"]:
+        model = DisentangledSlotAttentionAutoEncoder(
+            tuple(args["resolution"]),
+            args["num_slots"],
+            args["stacked_frames"] * args["channels_per_frame"],
+            args["num_iterations"],
+            args["slots_dim"],
+            32 if args["small_arch"] else 64,
+            args["small_arch"],
+            args["latent_dim"]
+        ).to(device)
+    else:
+        model = SlotAttentionAutoEncoder(
+            tuple(args["resolution"]),
+            args["num_slots"],
+            args["stacked_frames"] * args["channels_per_frame"],
+            args["num_iterations"],
+            args["slots_dim"],
+            32 if args["small_arch"] else 64,
+            args["small_arch"]
+        ).to(device)
 
     model.encoder_cnn.encoder_pos.grid = model.encoder_cnn.encoder_pos.grid.to(device)
     model.decoder_cnn.decoder_pos.grid = model.decoder_cnn.decoder_pos.grid.to(device)

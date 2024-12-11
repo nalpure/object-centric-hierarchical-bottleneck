@@ -174,6 +174,10 @@ class SlotAttentionAutoEncoder(nn.Module):
         resolution: Tuple of integers specifying width and height of input image.
         num_slots: Number of slots in Slot Attention.
         num_iterations: Number of iterations in Slot Attention.
+        slots_dim: Dimensionality of slot features.
+        encdec_dim: Dimensionality of encoder/decoder features.
+        small_arch: Whether to use a small architecture.
+        latent_dim: Dimensionality of latent space (if projection head is used).
         """
         super().__init__()
         self.slots_dim = slots_dim
@@ -214,7 +218,9 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         # Slot Attention module.
         # `slots` has shape: [batch_size, num_slots, slot_size].
-        return self.slot_attention(x)
+        slots = self.slot_attention(x)
+        
+        return slots
     
     def decode(self, slots):
         # `slots` has shape: [batch_size, num_slots, slot_size].
@@ -245,6 +251,22 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         return recon_combined, recons, masks, slots
 
+
+class DisentangledSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
+    def __init__(self, resolution, num_slots, num_channels, num_iterations, slots_dim, encdec_dim, small_arch, latent_dim):
+        super().__init__(resolution, num_slots, num_channels, num_iterations, slots_dim, encdec_dim, small_arch)
+        self.latent_dim = latent_dim
+
+        #TODO: make projection head more elaborate
+        self.projection_head = nn.Linear(self.slots_dim, self.latent_dim)
+
+    def get_latents(self, image):
+        slots = self.encode(image)
+        z = self.projection_head(slots)  # shape: [batch_size, num_slots, latent_dim]
+        return z
+
+
+# TODO: can the following Encoder and Decoder classes be removed?
 
 class SlotAttentionEncoder(nn.Module):
     def __init__(self, resolution, num_slots, num_iterations, slots_dim, encdec_dim):
