@@ -106,21 +106,28 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
         epoch_loss = 0
         
         for batch in train_dataloader:
-            if disentangle:
-                obs, perturbed, magnitudes, indices, properties = batch
-            else:
-                obs = batch
-
-            # Discard not needed channels TODO: needed?
-            obs = obs[:, :args['stacked_frames'] * args['channels_per_frame'], :, :]
+            obs = batch[0].to(device)
             
             if TRAINING_NOISE:
-                obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1) #TODO is this helpful?
-            
-            obs = obs.to(device)
+                obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1)
 
             recon_combined, _, _, _ = model(obs)
-            loss = criterion(recon_combined, obs)
+            recon_loss = criterion(recon_combined, obs)
+            disentanglement_loss = 0
+
+            if disentangle:
+                _, perturbed, magnitudes, indices, properties = batch
+                perturbed = perturbed.to(device)
+                magnitudes = magnitudes.to(device)
+                indices = indices.to(device)
+                properties = properties.to(device)
+
+                z_obs = model.get_latents(obs)              # [B, num_slots, latent_dim]
+                z_perturbed = model.get_latents(perturbed)  # [B, num_slots, latent_dim]
+
+                disentanglement_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
+            
+            loss = recon_loss + disentanglement_loss
             epoch_loss += loss.item()
 
             # Adjust the learning rate based on warmup and decay schedule
@@ -132,7 +139,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
             optimizer.param_groups[0]['lr'] = lr
 
             optimizer.zero_grad()
-            loss.backward()
+            recon_loss.backward()
             optimizer.step()
             current_step += 1
 
@@ -159,10 +166,26 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
     return model, loss_list
 
 
+def disentanglement_loss(z_obs, z_perturbed, magnitudes):
+    """
+    Returns the disentanglement loss.
+    @param z_obs: torch.Tensor, [B, num_slots, latent_dim]
+        Latent representation of the original observation.
+    @param z_perturbed: torch.Tensor, [B, num_slots, latent_dim]
+        Latent representation of the perturbed observation.
+    @param magnitudes: torch.Tensor, [B, num_slots]
+        Magnitudes of the perturbations.
+    """
+    # TODO: Implement disentanglement loss
+
+
 def initialize_model():
     """Initialize the SlotAttentionAutoEncoder model."""
 
     if args["disentangle"]:
+        if args["latent_dim"] is None:
+            raise ValueError("Specify the latent dimensionality when disentangle is true.")
+        
         model = DisentangledSlotAttentionAutoEncoder(
             tuple(args["resolution"]),
             args["num_slots"],
@@ -173,6 +196,7 @@ def initialize_model():
             args["small_arch"],
             args["latent_dim"]
         ).to(device)
+
     else:
         model = SlotAttentionAutoEncoder(
             tuple(args["resolution"]),
