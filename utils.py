@@ -249,7 +249,7 @@ class BaseDataset(data.Dataset):
         self.idx2episode = list()
         step = 0
         for ep in range(len(self.experience_buffer)):
-            num_steps = len(self.experience_buffer[ep]['obs']) # ... to determine number of steps
+            num_steps = len(self.experience_buffer[ep]['obs'])
             idx_tuple = [(ep, idx) for idx in range(num_steps)]
             self.idx2episode.extend(idx_tuple)
             step += num_steps
@@ -265,12 +265,14 @@ class BaseDataset(data.Dataset):
 
 class ObservationDataset(BaseDataset):
     """Create dataset of observations from replay buffer."""
+    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
+        super().__init__(hdf5_file, hdf5_format, output_format)
 
     def __getitem__(self, idx):
         ep, step = self.get_episode_step(idx)
         obs = to_float(self.experience_buffer[ep]['obs'][step])
         obs = convert_image_format(obs, self.hdf5_format, self.output_format)
-        return obs
+        return obs, [0]   # workaround to achieve same output format as other datasets
     
 
 class StateTransitionsDataset(BaseDataset):
@@ -288,12 +290,12 @@ class StateTransitionsDataset(BaseDataset):
         return obs, action, next_obs
 
 
-class PerturbedObservationsDataset(BaseDataset):
+class PerturbationDataset(BaseDataset):
     """Create dataset of (o, o', magnitude, index, property) from replay buffer."""
 
     def __getitem__(self, idx):
         ep, step = self.get_episode_step(idx)
-        obs = to_float(self.experience_buffer[ep]['observation'][step])
+        obs = to_float(self.experience_buffer[ep]['obs'][step])
         obs = convert_image_format(obs, self.hdf5_format, self.output_format)
         perturbed = to_float(self.experience_buffer[ep]['perturbed'][step])
         perturbed = convert_image_format(perturbed, self.hdf5_format, self.output_format)
