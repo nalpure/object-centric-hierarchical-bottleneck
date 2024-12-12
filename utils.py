@@ -265,8 +265,6 @@ class BaseDataset(data.Dataset):
 
 class ObservationDataset(BaseDataset):
     """Create dataset of observations from replay buffer."""
-    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
-        super().__init__(hdf5_file, hdf5_format, output_format)
 
     def __getitem__(self, idx):
         ep, step = self.get_episode_step(idx)
