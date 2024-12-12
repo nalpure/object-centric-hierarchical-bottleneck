@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 import warnings
 
-from utils import ObservationDataset, StateTransitionsDataset, log_progress, set_seed
+from utils import ObservationDataset, PerturbationDataset, StateTransitionsDataset, log_progress, set_seed
 
 
 TRAINING_NOISE = False # if true, noise is added to data whilst training
@@ -74,7 +74,12 @@ def main():
     optimizer = initialize_optimizer(model)
     
     print("Loading training data...")
-    dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+    
+    if args["disentangle"]:
+        dataset = PerturbationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+    else:
+        dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"])
     
     train(model, optimizer, train_dataloader)
@@ -100,7 +105,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
     best_loss = 1e9
     model.train()
     start = datetime.now()
-    print("Training started at", start)
+    print("Training started at", start.ctime())
     
     for epoch in range(1, args["num_epochs"] + 1): 
         epoch_loss = 0
@@ -113,21 +118,20 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
 
             recon_combined, _, _, _ = model(obs)
             recon_loss = criterion(recon_combined, obs)
-            disentanglement_loss = 0
+            disentangle_loss = 0
 
             if disentangle:
                 _, perturbed, magnitudes, indices, properties = batch
                 perturbed = perturbed.to(device)
-                magnitudes = magnitudes.to(device)
-                indices = indices.to(device)
-                properties = properties.to(device)
 
                 z_obs = model.get_latents(obs)              # [B, num_slots, latent_dim]
                 z_perturbed = model.get_latents(perturbed)  # [B, num_slots, latent_dim]
 
-                disentanglement_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
+                # Compute disentanglement loss for each sample in the batch
+                for b in range(z_obs.shape[0]):
+                    disentangle_loss += disentanglement_loss(z_obs[b], z_perturbed[b], magnitudes[b])
             
-            loss = recon_loss + disentanglement_loss
+            loss = recon_loss + disentangle_loss
             epoch_loss += loss.item()
 
             # Adjust the learning rate based on warmup and decay schedule
@@ -166,17 +170,65 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
     return model, loss_list
 
 
-def disentanglement_loss(z_obs, z_perturbed, magnitudes):
+def disentanglement_loss(z_obs, z_perturbed, magnitude):
     """
-    Returns the disentanglement loss.
-    @param z_obs: torch.Tensor, [B, num_slots, latent_dim]
+    Returns the disentanglement loss for a single sample pair.
+    @param z_obs: torch.Tensor, [num_slots, latent_dim]
         Latent representation of the original observation.
-    @param z_perturbed: torch.Tensor, [B, num_slots, latent_dim]
+    @param z_perturbed: torch.Tensor, [num_slots, latent_dim]
         Latent representation of the perturbed observation.
-    @param magnitudes: torch.Tensor, [B, num_slots]
-        Magnitudes of the perturbations.
+    @param magnitude: torch.Tensor, [num_slots]
+        Magnitude of the perturbation.
     """
-    # TODO: Implement disentanglement loss
+    num_slots = z_obs.shape[0]
+    latent_dim = z_obs.shape[1]
+
+    # Variant 1: Original triple loop (already provided)
+    loss1 = 1e9
+    for i in range(num_slots):
+        for j in range(num_slots):
+            for m in range(latent_dim):
+                delta = torch.zeros(latent_dim).to(device)
+                delta[m] = magnitude
+                shortest_dist = torch.norm(z_perturbed[j] - (z_obs[i] + delta), dim=-1)
+                if shortest_dist < loss1:
+                    loss1 = shortest_dist
+
+    # Variant 2: Removing the innermost loop
+    loss2 = 1e9
+    for i in range(num_slots):
+        for j in range(num_slots):
+            eye = torch.eye(latent_dim).to(device)
+            delta = magnitude * eye
+            eucl_distances = torch.norm(z_perturbed[j] - (z_obs[i] + delta), dim=-1)
+            shortest_dist = torch.min(eucl_distances)
+            if shortest_dist < loss2:
+                loss2 = shortest_dist
+
+    # Variant 3: Fully vectorized version
+    z_obs_expanded = z_obs.unsqueeze(1).unsqueeze(2)  # Shape: [num_slots, 1, 1, latent_dim]
+    z_perturbed_expanded = z_perturbed.unsqueeze(0).unsqueeze(2)  # Shape: [1, num_slots, 1, latent_dim]
+    eye = torch.eye(latent_dim).to(device)  # Shape: [latent_dim, latent_dim]
+    delta = magnitude.unsqueeze(0).to(device) * eye  # Shape: [latent_dim, latent_dim]
+
+    # Add delta to z_obs and compute distances
+    z_obs_with_delta = z_obs_expanded + delta.unsqueeze(0)  # Shape: [num_slots, 1, latent_dim, latent_dim]
+    distances = torch.norm(z_perturbed_expanded - z_obs_with_delta, dim=-1)  # Shape: [num_slots, num_slots, latent_dim]
+
+    # Find the minimum distance
+    loss3 = distances.min().float()
+
+    print(type(loss1), type(loss2), type(loss3))    
+    print('Loss1:', loss1.dtype)
+    print('Loss2:', loss2.dtype)
+    print('Loss3:', loss3.dtype)
+
+    # Validate that all losses are the same
+    if not torch.isclose(loss1, loss2) or not torch.isclose(loss1, loss3):
+        raise ValueError("Losses are not equal.")
+
+    return loss3
+
 
 
 def initialize_model():
