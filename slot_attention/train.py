@@ -108,7 +108,8 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
     print("Training started at", start.ctime())
     
     for epoch in range(1, args["num_epochs"] + 1): 
-        epoch_loss = 0
+        epoch_recon_loss = 0
+        epoch_disentangle_loss = 0
         
         for batch in train_dataloader:
             obs = batch[0].to(device)
@@ -118,35 +119,20 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
 
             recon_combined, _, _, _ = model(obs)
             recon_loss = criterion(recon_combined, obs)
-            disentangle_loss = 0
+            epoch_recon_loss += recon_loss.item()
+            total_loss = recon_loss
 
             if disentangle:
-                _, perturbed, magnitudes, indices, properties = batch
+                _, perturbed, magnitudes, _, _ = batch
                 perturbed = perturbed.to(device)
                 magnitudes = magnitudes.to(device)
 
                 z_obs = model.get_latents(obs)              # [B, num_slots, latent_dim]
                 z_perturbed = model.get_latents(perturbed)  # [B, num_slots, latent_dim]
 
-                t1 = datetime.now()
-                # Compute disentanglement loss for each sample in the batch
-                for b in range(z_obs.shape[0]):
-                    disentangle_loss += disentanglement_loss(z_obs[b], z_perturbed[b], magnitudes[b])
-                time_diff1 = datetime.now() - t1
-
-                t2 = datetime.now()
-                loss2 = disentanglement_loss_batch(z_obs, z_perturbed, magnitudes)
-                time_diff2 = datetime.now() - t2
-
-                print("loss1:", disentangle_loss)
-                print("loss2:", loss2)
-                print("Speedup:", time_diff1 / time_diff2)
-
-                if not torch.isclose(disentangle_loss, loss2):
-                    raise ValueError("Batch version of disentanglement_loss is incorrect.")
-            
-            loss = recon_loss + disentangle_loss
-            epoch_loss += loss.item()
+                disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
+                epoch_disentangle_loss += disentangle_loss.item()
+                total_loss += disentangle_loss
 
             # Adjust the learning rate based on warmup and decay schedule
             if current_step < args["warmup_steps"]:
@@ -157,19 +143,25 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
             optimizer.param_groups[0]['lr'] = lr
 
             optimizer.zero_grad()
-            recon_loss.backward()
+            total_loss.backward()
             optimizer.step()
             current_step += 1
 
-        epoch_loss /= len(train_dataloader)
-        loss_list.append(epoch_loss)
+        epoch_recon_loss /= len(train_dataloader)
+        epoch_disentangle_loss /= len(train_dataloader)
+        total_loss = epoch_recon_loss + epoch_disentangle_loss
+        loss_list.append(total_loss)
 
         if verbose and (epoch == 1 or epoch % 10 == 0):
-            log_progress(epoch, args['num_epochs'], start, additional_msg=f'Training loss: {epoch_loss:6f}')
+            if disentangle:
+                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, Disentangle loss: {epoch_disentangle_loss:.6f}, total loss: {total_loss:.6f}'
+            else:
+                additional_msg = f'Loss: {total_loss:.6f}'
+            log_progress(epoch, args['num_epochs'], start, additional_msg)
 
         # Save the model and optimizer state every few epochs
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
+        if total_loss < best_loss:
+            best_loss = total_loss
             best_epoch = epoch
             torch.save({
                 "model_state_dict": model.state_dict(),
@@ -184,35 +176,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
     return model, loss_list
 
 
-def disentanglement_loss(z_obs, z_perturbed, magnitude):
-    """
-    Returns the disentanglement loss for a single sample pair. 
-    Uses matching to calculate: (z_perturbed - (z_obs + delta)).
-    
-    @param z_obs: torch.Tensor, [num_slots, latent_dim]
-        Latent representation of the original observation.
-    @param z_perturbed: torch.Tensor, [num_slots, latent_dim]
-        Latent representation of the perturbed observation.
-    @param magnitude: torch.Tensor, [num_slots]
-        Magnitude of the perturbation.
-    """
-    latent_dim = z_obs.shape[1]
-
-    z_obs_expanded = z_obs.unsqueeze(1).unsqueeze(2)  # Shape: [num_slots, 1, 1, latent_dim]
-    z_perturbed_expanded = z_perturbed.unsqueeze(0).unsqueeze(2)  # Shape: [1, num_slots, 1, latent_dim]
-    eye = torch.eye(latent_dim).to(device)  # Shape: [latent_dim, latent_dim]
-    delta = magnitude.unsqueeze(0).to(device) * eye  # Shape: [latent_dim, latent_dim]
-
-    # Add delta to z_obs and compute distances
-    z_obs_with_delta = z_obs_expanded + delta.unsqueeze(0)  # Shape: [num_slots, 1, latent_dim, latent_dim]
-    distances = torch.norm(z_perturbed_expanded - z_obs_with_delta, dim=-1)  # Shape: [num_slots, num_slots, latent_dim]
-
-    loss = distances.min()
-
-    return loss
-
-
-def disentanglement_loss_batch(z_obs, z_perturbed, magnitudes):
+def disentanglement_loss(z_obs, z_perturbed, magnitudes):
     """
     Returns the disentanglement loss for a batch of sample pairs.
     Uses matching to calculate: (z_perturbed - (z_obs + delta)).
