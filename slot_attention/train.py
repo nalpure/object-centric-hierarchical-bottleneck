@@ -137,7 +137,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
                 z_perturbed = model.get_latents(perturbed)  # [B, num_slots, latent_dim]
 
                 disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
-                disentangle_loss / args["loss_ratio"]
+                disentangle_loss /= args["loss_ratio"]
                 epoch_disentangle_loss += disentangle_loss.item()
                 total_loss += disentangle_loss
 
