@@ -124,7 +124,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
                 obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1)
 
             recon_combined, _, _, _ = model(obs)
-            recon_loss = criterion(recon_combined, obs) * args["loss_ratio"]
+            recon_loss = criterion(recon_combined, obs)
             epoch_recon_loss += recon_loss.item()
             total_loss = recon_loss
 
@@ -137,6 +137,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
                 z_perturbed = model.get_latents(perturbed)  # [B, num_slots, latent_dim]
 
                 disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
+                disentangle_loss / args["loss_ratio"]
                 epoch_disentangle_loss += disentangle_loss.item()
                 total_loss += disentangle_loss
 
@@ -158,7 +159,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
         total_loss = epoch_recon_loss + epoch_disentangle_loss
         loss_list.append(total_loss)
 
-        if verbose and (epoch == 1 or epoch % 10 == 0):
+        if verbose:
             if disentangle:
                 additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, Disentangle loss: {epoch_disentangle_loss:.6f}, total loss: {total_loss:.6f}'
             else:
