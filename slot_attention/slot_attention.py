@@ -251,18 +251,45 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         return recon_combined, recons, masks, slots
 
+class ProjectionHead(nn.Module):
+    """
+    Projection head for projecting slot features to a single latent space property, as described in Mansouri et al. (2023).
+    Tuned for slot dimensionality of 64.
+    """
+    def __init__(self, slots_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(slots_dim, 32, bias=True)
+        self.fc2 = nn.Linear(32, 32, bias=True)
+        self.fc3 = nn.Linear(32, 16, bias=False)
+        self.fc4 = nn.Linear(16, 1, bias=False)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = F.relu(x)
+        x = self.fc3(x)
+        x = F.relu(x)
+        x = self.fc4(x)
+        x = x.squeeze(-1) # shape: [batch_size, num_slots]
+        return x
 
 class DisentangledSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
     def __init__(self, resolution, num_slots, num_channels, num_iterations, slots_dim, encdec_dim, small_arch, latent_dim):
         super().__init__(resolution, num_slots, num_channels, num_iterations, slots_dim, encdec_dim, small_arch)
         self.latent_dim = latent_dim
 
-        #TODO: make projection head more elaborate
-        self.projection_head = nn.Linear(self.slots_dim, self.latent_dim)
+        self.projection_heads = nn.ModuleList(ProjectionHead(slots_dim) for _ in range(latent_dim))
 
     def get_latents(self, image):
-        slots = self.encode(image)
-        z = self.projection_head(slots)  # shape: [batch_size, num_slots, latent_dim]
+        slots = self.encode(image)  # shape: [batch_size, num_slots, slot_size]
+        
+        # apply projection heads
+        batch_size = slots.shape[0]
+        z = torch.empty(batch_size, self.num_slots, self.latent_dim, device=slots.device)  # shape: [batch_size, num_slots, latent_dim]
+        for i, p in enumerate(self.projection_heads):
+            z_i = p(slots) # shape: [batch_size, num_slots]
+            z[:, :, i] = z_i
         return z
 
 
