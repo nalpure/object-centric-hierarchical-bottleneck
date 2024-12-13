@@ -28,9 +28,16 @@ parser.add_argument('--val_paths', default=None, type=list, help='Optional: List
 parser.add_argument('--test_path', default='spriteworld/spriteworld/test_data', type=str, help='Path to the training data')
 parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
 parser.add_argument('--resolution', default=[35, 35], type=list)
-parser.add_argument('--batch_size', default=32, type=int)
-parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
 parser.add_argument('--small_arch', action='store_true', help='if true set the encoder/decoder dim to 32, 64 otherwise')
+parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
+parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
+parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
+parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
+parser.add_argument('--num_workers', default=0, type=int, help='number of workers for loading data')
+
+# Model parameters
+parser.add_argument('--batch_size', default=64, type=int)
+parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
 parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
 parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
 parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
@@ -38,15 +45,12 @@ parser.add_argument('--learning_rate', default=0.0004, type=float)
 parser.add_argument('--warmup_steps', default=10000, type=int, help='Number of warmup steps for the learning rate.')
 parser.add_argument('--decay_rate', default=0.5, type=float, help='Rate for the learning rate decay.')
 parser.add_argument('--decay_steps', default=100000, type=int, help='Number of steps for the learning rate decay.')
-parser.add_argument('--num_workers', default=0, type=int, help='number of workers for loading data')
 parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
-parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
-parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
-parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
-parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 
+# Disentanglement parameters
 parser.add_argument('--disentangle', default=False, action='store_true', help='If true, adds disentanglement loss. Expects training data to include perturbations.')
 parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
+parser.add_argument('--loss_ratio', default=10, type=float, help='Ratio of reconstruction loss to disentanglement loss. Higher values favor reconstruction loss.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -64,6 +68,8 @@ if args["config"] is not None:
 def main():
     if args['val_paths']:
         warnings.warn('A validation path was specified but will not be used.')
+    if not args['disentangle'] and args['latent_dim']:
+        warnings.warn('Latent dimensionality was specified but will not be used.')
 
     set_seed(args['seed'])
     model = initialize_model()
@@ -118,7 +124,7 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
                 obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1)
 
             recon_combined, _, _, _ = model(obs)
-            recon_loss = criterion(recon_combined, obs)
+            recon_loss = criterion(recon_combined, obs) * args["loss_ratio"]
             epoch_recon_loss += recon_loss.item()
             total_loss = recon_loss
 
