@@ -1,10 +1,9 @@
 import argparse
-from utils import StateTransitionsDataset, set_seed
+from utils import ObservationDataset, set_seed
 from torch.utils import data
-from tqdm import tqdm
 import numpy as np
 import torch
-from slot_attention.slot_attention import SlotAttentionAutoEncoder
+from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
 import os
 import matplotlib.pyplot as plt
 import json
@@ -21,6 +20,7 @@ parser.add_argument('--ckpt_path', default='checkpoints/3-body/', type=str, help
 parser.add_argument('--output_dir', default='data/figures/')
 parser.add_argument('--num_output_figs', default=3, type=int, help='desired number of output figures')
 parser.add_argument('--randomize_frame_order', default=False, type=bool, help='If true, reorders the frames in each frame stack randomly.')
+parser.add_argument('--disentangle', default=False, action='store_true', help='If true, adds disentanglement loss. Expects training data to include perturbations.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -41,13 +41,25 @@ if args['num_output_figs'] > args['batch_size']:
 
 def load_model(checkpoint_path):
     print("Loading model:", checkpoint_path)
-    model = SlotAttentionAutoEncoder(resolution=args["resolution"],
-                                     num_slots=args["num_slots"], 
-                                     num_channels=args["stacked_frames"] * args["channels_per_frame"],
-                                     num_iterations=args["num_iterations"], 
-                                     slots_dim=args["slots_dim"], 
-                                     encdec_dim=32 if args["small_arch"] else 64, 
-                                     small_arch=args["small_arch"])
+    if args["disentangle"]:
+        model = DisentangledSlotAttentionAutoEncoder(
+            tuple(args["resolution"]),
+            args["num_slots"],
+            args["stacked_frames"] * args["channels_per_frame"],
+            args["num_iterations"],
+            args["slots_dim"],
+            32 if args["small_arch"] else 64,
+            args["small_arch"],
+            args["latent_dim"]
+        ).to(device)
+    else:
+        model = SlotAttentionAutoEncoder(resolution=args["resolution"],
+                                        num_slots=args["num_slots"], 
+                                        num_channels=args["stacked_frames"] * args["channels_per_frame"],
+                                        num_iterations=args["num_iterations"], 
+                                        slots_dim=args["slots_dim"], 
+                                        encdec_dim=32 if args["small_arch"] else 64, 
+                                        small_arch=args["small_arch"])
     
     model.load_state_dict(torch.load(checkpoint_path)['model_state_dict'])
     model.to(device)
@@ -59,7 +71,7 @@ def load_model(checkpoint_path):
 
 def get_reconstructions(model, test_path, max_samples=10000):
     print("Loading test dataset:", test_path)
-    test_dataset = StateTransitionsDataset(hdf5_file=test_path, hdf5_format=args["hdf5_format"])
+    test_dataset = ObservationDataset(hdf5_file=test_path, hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
     all_obs = []
     all_recons = []
