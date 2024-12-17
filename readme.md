@@ -31,7 +31,7 @@ python -m slot_attention.train --config 5Ffixed
 
 To load the pre-trained model and continue training with an added disentanglement loss, run:
 ```bash
-python -m slot_attention.train --config [model-name]
+python -m slot_attention.train --config disentangle5Ffixed
 ```
 
 The configurations will be loaded from the configs.json file.
@@ -42,7 +42,7 @@ The configurations will be loaded from the configs.json file.
 To evaluate the performance of the trained slot attention model, run:
 
 ```bash
-python -m slot_attention.eval --config disentangle5Ffixed
+python -m slot_attention.eval --config [model-name]
 ```
 
 The configuration will be loaded from the configs.json file.
