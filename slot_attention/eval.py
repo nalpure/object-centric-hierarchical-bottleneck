@@ -39,6 +39,21 @@ if args['num_output_figs'] > args['batch_size']:
     raise ValueError("Number of output figures exceeds batch size.")
 
 
+def main():
+    set_seed(args["seed"])
+
+    model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}.ckpt')
+    all_obs, all_recons, all_masks, all_recon_combined = get_reconstructions(model, args['test_path'])
+
+    loss_list = np.array([criterion(obs, rec).item() for obs, rec in zip(all_obs, all_recon_combined)])
+
+    print(f"Mean batch loss: {np.mean(loss_list):.6f}")
+
+    plot_obs_with_combined_recons(all_obs[0][:args['num_output_figs']], all_recon_combined[0][:args['num_output_figs']], criterion)
+    plot_observations_with_masks(all_obs[0][:args['num_output_figs']], all_masks[0][:args['num_output_figs']])
+    plot_observations_and_reconstructions(all_obs[0][:args['num_output_figs']], all_recons[0][:args['num_output_figs']])
+
+
 def load_model(checkpoint_path):
     print("Loading model:", checkpoint_path)
     if args["disentangle"]:
@@ -61,7 +76,7 @@ def load_model(checkpoint_path):
                                         encdec_dim=32 if args["small_arch"] else 64, 
                                         small_arch=args["small_arch"])
     
-    model.load_state_dict(torch.load(checkpoint_path)['model_state_dict'])
+    model.load_state_dict(torch.load(checkpoint_path, weights_only=True)['model_state_dict'])
     model.to(device)
     model.encoder_cnn.encoder_pos.grid = model.encoder_cnn.encoder_pos.grid.to(device)  # model.to(device) do not move
     model.decoder_cnn.decoder_pos.grid = model.decoder_cnn.decoder_pos.grid.to(device)  # these tensors automatically
@@ -69,7 +84,7 @@ def load_model(checkpoint_path):
     return model
 
 
-def get_reconstructions(model, test_path, max_samples=10000):
+def get_reconstructions(model, test_path, max_samples=1000):
     print("Loading test dataset:", test_path)
     test_dataset = ObservationDataset(hdf5_file=test_path, hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
@@ -92,7 +107,7 @@ def get_reconstructions(model, test_path, max_samples=10000):
 
             # samples consists of 3 lists for observations, actions, next observations.
             # obs and next_obs have shape (num_steps, num_channels, frame_height, frame_width)
-            obs, action, next_obs = batch
+            obs = batch[0]
             obs = obs[:,:args['stacked_frames']*args['channels_per_frame'],:,:]
 
             if args['randomize_frame_order']:
@@ -305,19 +320,5 @@ def plot_observations_and_reconstructions(all_obs, recons):
         plt.close(fig)
 
 
-set_seed(args["seed"])
-
-model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}.ckpt')
-all_obs, all_recons, all_masks, all_recon_combined = get_reconstructions(model, args['test_path'])
-
-loss_list = np.array([criterion(obs, rec).item() for obs, rec in zip(all_obs, all_recon_combined)])
-
-for i, loss in enumerate(loss_list):
-    print(f'Loss batch #{i}: {loss:6f}')
-
-print()
-print(f"Mean batch loss: {np.mean(loss_list):.6f}")
-
-plot_obs_with_combined_recons(all_obs[0][:args['num_output_figs']], all_recon_combined[0][:args['num_output_figs']], criterion)
-plot_observations_with_masks(all_obs[0][:args['num_output_figs']], all_masks[0][:args['num_output_figs']])
-plot_observations_and_reconstructions(all_obs[0][:args['num_output_figs']], all_recons[0][:args['num_output_figs']])
+if __name__ == '__main__':
+    main()
