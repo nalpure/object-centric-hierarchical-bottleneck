@@ -1,89 +1,47 @@
 {
-    "5frame": {
-        "train_path": "data/5F_1000ep_s1.h5",
-        "test_path": "data/5F_200ep_s2.h5",
-        "ckpt_path": "slot_attention/checkpoints/3-body/",
-        "stacked_frames": 5,
-        "channels_per_frame": 3,
-        "resolution": [
-            50,
-            50
-        ],
-        "num_slots": 3,
-        "num_iterations": 3,
-        "slots_dim": 8,
-        "small_arch": true,
-        "batch_size": 64,
-        "learning_rate": 0.0004,
-        "num_epochs": 600,
-        "warmup_steps": 3140,
-        "decay_steps": 31400,
-        "seed": 1
-    },
-    "5frameEndToEnd": {
-        "train_path": "data/5F_1000ep_s1.h5",
-        "test_path": "data/5F_200ep_s2.h5",
-        "ckpt_path": "slot_attention/checkpoints/spriteworld/",
-        "stacked_frames": 5,
-        "channels_per_frame": 3,
-        "resolution": [
-            50,
-            50
-        ],
-        "num_slots": 3,
-        "num_iterations": 3,
-        "slots_dim": 16,
-        "small_arch": true
-    },
-    "spriteworld": {
-        "train_path": "data/spriteworld/spriteworld_train.h5",
-        "val_paths": [
-            "data/spriteworld/spriteworld_test_0.h5",
-            "data/spriteworld/spriteworld_test_1.h5",
-            "data/spriteworld/spriteworld_test_2.h5"
-        ],
-        "test_path": "data/spriteworld/spriteworld_test0.h5",
-        "ckpt_path": "slot_attention/checkpoints/spriteworld/",
+    "5Ffixed":{
+        "train_path": "data/slipscape/5F_fixed_4000ep_s0.h5",
+        "test_path": "data/slipscape/5F_fixed_200ep_s1.h5",
+        "ckpt_path": "slot_attention/checkpoints/slipscape/",
         "hdf5_format": "HWC",
-        "stacked_frames": 1,
+        "stacked_frames": 5,
         "channels_per_frame": 3,
         "resolution": [
             64,
             64
         ],
-        "num_slots": 6,
+        "num_slots": 7,
         "num_iterations": 3,
         "slots_dim": 64,
         "small_arch": true,
         "batch_size": 64,
         "learning_rate": 0.0005,
-        "num_epochs": 600,
+        "num_epochs": 500,
         "warmup_steps": 10000,
         "decay_steps": 100000
     },
-    "1frame": {
-        "train_path": "data/1F_20ep_s1.h5",
-        "val_paths": [
-            "data/1F_10ep_s1.h5",
-            "data/1F_20ep_s1.h5"
-        ],
-        "test_path": "data/1F_10ep_s1.h5",
-        "ckpt_path": "slot_attention/checkpoints/test/",
-        "stacked_frames": 1,
+    "disentangle5Ffixed":{
+        "train_path": "data/slipscape/5F_fixed_4000ep_s0.h5",
+        "test_path": "data/slipscape/5F_fixed_200ep_s1.h5",
+        "ckpt_path": "slot_attention/checkpoints/disentangle/",
+        "init_ckpt": "./slot_attention/checkpoints/slipscape/5Ffixed.ckpt",
+        "hdf5_format": "HWC",
+        "stacked_frames": 5,
         "channels_per_frame": 3,
         "resolution": [
-            50,
-            50
+            64,
+            64
         ],
-        "num_slots": 3,
+        "num_slots": 7,
         "num_iterations": 3,
-        "slots_dim": 3,
+        "slots_dim": 64,
         "small_arch": true,
         "batch_size": 64,
         "learning_rate": 0.0005,
-        "num_epochs": 6,
-        "warmup_steps": 3140,
-        "decay_steps": 31400,
-        "seed": 1
+        "num_epochs": 300,
+        "warmup_steps": 10000,
+        "decay_steps": 100000,
+        "disentangle": true,
+        "latent_dim": 5
     }
 }
