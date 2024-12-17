@@ -68,8 +68,7 @@ if args["config"] is not None:
 def main():
     if args['val_paths']:
         warnings.warn('A validation path was specified but will not be used.')
-    if not args['disentangle'] and args['latent_dim']:
-        warnings.warn('Latent dimensionality was specified but will not be used.')
+        
 
     set_seed(args['seed'])
     model = initialize_model()
@@ -86,7 +85,7 @@ def main():
     else:
         dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
 
-    train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"])
+    train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"], drop_last=True)
     
     train(model, optimizer, train_dataloader)
 
@@ -99,18 +98,15 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
     ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
 
     disentangle = args["disentangle"]
-
-    if verbose:
-        print(f"Batches: {len(train_dataloader)}")
-        print(f"Batch size: {args['batch_size']}")
-        print(f"Disentangle: {disentangle}")
-        if disentangle: print(f"Latent dim: {args['latent_dim']}")
-
     loss_list = []
     current_step = 0
     best_loss = 1e9
     model.train()
     start = datetime.now()
+    
+    print(f"Training slot attention over {args['batch_size'] * len(train_dataloader)} samples.")
+    if disentangle:
+        print(f"Applying disentanglement loss with ratio {args['loss_ratio']}.")
     print("Training started at", start.ctime())
     
     for epoch in range(1, args["num_epochs"] + 1): 
@@ -232,8 +228,10 @@ def initialize_model():
             args["small_arch"],
             args["latent_dim"]
         ).to(device)
-
     else:
+        if args["latent_dim"]:
+            warnings.warn('Latent dimensionality was specified but will not be used.')
+            
         model = SlotAttentionAutoEncoder(
             tuple(args["resolution"]),
             args["num_slots"],
@@ -249,7 +247,8 @@ def initialize_model():
 
     # Load model weights from checkpoint if provided
     if args["init_ckpt"] is not None:
-        checkpoint = torch.load(args["ckpt_path"] + args["init_ckpt"] + ".ckpt")
+        print(f"Loading model weights from {args['init_ckpt']}")
+        checkpoint = torch.load(args["init_ckpt"])
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
     return model
