@@ -23,13 +23,18 @@ python -m data_gen.physics --stacked-frames 5 --num-episodes 200 --fname data/da
 
 ### Training SA model
 
-To train the slot attention model, use the following command:
+To pre-train the slot attention model, use the following command:
 
 ```bash
-python -m slot_attention.train --config 5frame
+python -m slot_attention.train --config 5Ffixed
 ```
 
-The configuration will be loaded from the configs.json file.
+To load the pre-trained model and continue training with an added disentanglement loss, run:
+```bash
+python -m slot_attention.train --config [model-name]
+```
+
+The configurations will be loaded from the configs.json file.
 
 
 ### Optional: Evaluating SA model
@@ -37,12 +42,12 @@ The configuration will be loaded from the configs.json file.
 To evaluate the performance of the trained slot attention model, run:
 
 ```bash
-python -m slot_attention.eval --config 5frame
+python -m slot_attention.eval --config disentangle5Ffixed
 ```
 
 The configuration will be loaded from the configs.json file.
 
-### Training GNN model
+### Training GNN model (TODO)
 
 To load the SA model and train a GNN model on it, use the following command: 
 
