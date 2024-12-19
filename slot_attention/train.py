@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 import warnings
 
-from utils import ObservationDataset, PerturbationDataset, StateTransitionsDataset, log_progress, set_seed
+from utils import ObservationDataset, PerturbationDataset, log_progress, set_seed
 
 
 TRAINING_NOISE = False # if true, noise is added to data whilst training
@@ -31,8 +31,6 @@ parser.add_argument('--resolution', default=[35, 35], type=list)
 parser.add_argument('--small_arch', action='store_true', help='if true set the encoder/decoder dim to 32, 64 otherwise')
 parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
 parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
-parser.add_argument('--wandb_project', default=None, type=str, help='wandb project')
-parser.add_argument('--wandb_entity', default=None, type=str, help='wandb entity')
 parser.add_argument('--num_workers', default=0, type=int, help='number of workers for loading data')
 
 # Model parameters
@@ -50,7 +48,8 @@ parser.add_argument('--num_epochs', default=100, type=int, help='number of epoch
 # Disentanglement parameters
 parser.add_argument('--disentangle', default=False, action='store_true', help='If true, adds disentanglement loss. Expects training data to include perturbations.')
 parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
-parser.add_argument('--loss_ratio', default=10, type=float, help='Ratio of reconstruction loss to disentanglement loss. Higher values favor reconstruction loss.')
+parser.add_argument('--loss_ratio', default=100, type=float, help='Ratio of reconstruction loss to disentanglement loss. Higher values favor reconstruction loss.')
+parser.add_argument('--disentangle_warmup', default=20, type=int, help='Number of warmup epochs for disentanglement parameters.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -69,14 +68,8 @@ def main():
     if args['val_paths']:
         warnings.warn('A validation path was specified but will not be used.')
         
-
     set_seed(args['seed'])
-    model = initialize_model()
-
-    if args["wandb_project"] and args["wandb_entity"]:
-        setup_wandb(model)
-
-    optimizer = initialize_optimizer(model)
+    model, optimizer_full, optimizer_disentangle = initialize_model()
     
     print("Loading training data...")
     
@@ -86,11 +79,19 @@ def main():
         dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
 
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"], drop_last=True)
-    
-    train(model, optimizer, train_dataloader)
+    print(f"Training slot attention over {args['batch_size'] * len(train_dataloader)} samples.")
+
+    if args["disentangle"]:
+        print("Warmup new disentangle parameters...")
+        train(model, optimizer_disentangle, train_dataloader, args["disentangle_warmup"], reconstruct=False, disentangle=True)
+        print(f"Training full model with ratio {args['loss_ratio']}...")
+        train(model, optimizer_full, train_dataloader, args["num_epochs"], reconstruct=True, disentangle=True)
+    else:
+        print("Training model...")
+        train(model, optimizer_full, train_dataloader, args["num_epochs"])
 
 
-def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
     """Main training loop. Saves model for each checkpoint. Returns trained model and the loss for each epoch."""
 
     if not exists(args["ckpt_path"]):
@@ -104,33 +105,36 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
     model.train()
     start = datetime.now()
     
-    print(f"Training slot attention over {args['batch_size'] * len(train_dataloader)} samples.")
-    if disentangle:
-        print(f"Applying disentanglement loss with ratio {args['loss_ratio']}.")
     print("Training started at", start.ctime())
     
-    for epoch in range(1, args["num_epochs"] + 1): 
+    for epoch in range(1, num_epochs + 1): 
         epoch_recon_loss = 0
         epoch_disentangle_loss = 0
         
         for batch in train_dataloader:
+            total_loss = 0
+
             obs = batch[0].to(device)
-            
             if TRAINING_NOISE:
                 obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1)
 
-            recon_combined, _, _, _ = model(obs)
-            recon_loss = criterion(recon_combined, obs)
-            epoch_recon_loss += recon_loss.item()
-            total_loss = recon_loss
+            slots_obs = model.encode(obs)
+
+            if reconstruct:
+                recon_combined, _, _, _ = model.decode(slots_obs)
+                recon_loss = criterion(recon_combined, obs)
+                epoch_recon_loss += recon_loss.item()
+                total_loss += recon_loss
 
             if disentangle:
                 _, perturbed, magnitudes, _, _ = batch
                 perturbed = perturbed.to(device)
                 magnitudes = magnitudes.to(device)
 
-                z_obs = model.get_latents(obs)              # [B, num_slots, latent_dim]
-                z_perturbed = model.get_latents(perturbed)  # [B, num_slots, latent_dim]
+                slots_perturbed = model.encode(perturbed)
+
+                z_obs = model.get_latents(slots_obs)              # [B, num_slots, latent_dim]
+                z_perturbed = model.get_latents(slots_perturbed)  # [B, num_slots, latent_dim]
 
                 disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
                 disentangle_loss /= args["loss_ratio"]
@@ -152,20 +156,24 @@ def train(model, optimizer, train_dataloader, criterion=torch.nn.MSELoss(), verb
 
         epoch_recon_loss /= len(train_dataloader)
         epoch_disentangle_loss /= len(train_dataloader)
-        total_loss = epoch_recon_loss + epoch_disentangle_loss
-        loss_list.append(total_loss)
+        epoch_total_loss = epoch_recon_loss + epoch_disentangle_loss
+        loss_list.append(epoch_total_loss)
 
         if verbose:
-            if disentangle:
-                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, Disentangle loss: {epoch_disentangle_loss:.6f}, total loss: {total_loss:.6f}'
-            else:
-                additional_msg = f'Loss: {total_loss:.6f}'
-            log_progress(epoch, args['num_epochs'], start, additional_msg)
+            if disentangle and reconstruct:
+                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, Disentangle loss: {epoch_disentangle_loss:.6f}, total loss: {epoch_total_loss:.6f}'
+            elif disentangle:
+                additional_msg = f'Disentangle loss: {epoch_disentangle_loss:.6f}'
+            elif reconstruct:
+                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}'
 
-        # Save the model and optimizer state every few epochs
-        if total_loss < best_loss:
-            best_loss = total_loss
+            log_progress(epoch, num_epochs, start, additional_msg)
+
+        # Save the best model and optimizer state
+        if epoch_total_loss < best_loss:
+            best_loss = epoch_total_loss
             best_epoch = epoch
+
             torch.save({
                 "model_state_dict": model.state_dict(),
                 "optim_state_dict": optimizer.state_dict(),
@@ -200,6 +208,7 @@ def disentanglement_loss(z_obs, z_perturbed, magnitudes):
     z_perturbed_expanded = z_perturbed.unsqueeze(1).unsqueeze(3)        # [B, 1, S, 1, D]
     deltas_expanded = deltas.unsqueeze(1).unsqueeze(1)                  # [B, 1, 1, D, D]
 
+    #TODO: Delta can be positive or negative, so the loss should be the minimum of the two
     diff = z_perturbed_expanded - (z_obs_expanded + deltas_expanded)    # [B, S, S, D, D]
     diff_norm = torch.norm(diff, dim=-1)                                # [B, S, S, D]
 
@@ -227,7 +236,7 @@ def initialize_model():
             32 if args["small_arch"] else 64,
             args["small_arch"],
             args["latent_dim"]
-        ).to(device)
+        )
     else:
         if args["latent_dim"]:
             warnings.warn('Latent dimensionality was specified but will not be used.')
@@ -240,38 +249,52 @@ def initialize_model():
             args["slots_dim"],
             32 if args["small_arch"] else 64,
             args["small_arch"]
-        ).to(device)
-
-    model.encoder_cnn.encoder_pos.grid = model.encoder_cnn.encoder_pos.grid.to(device)
-    model.decoder_cnn.decoder_pos.grid = model.decoder_cnn.decoder_pos.grid.to(device)
+        )
 
     # Load model weights from checkpoint if provided
     if args["init_ckpt"] is not None:
         print(f"Loading model weights from {args['init_ckpt']}")
-        checkpoint = torch.load(args["init_ckpt"])
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        checkpoint = torch.load(args["init_ckpt"], weights_only=True)
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
-    return model
+        if unexpected_keys:
+            warnings.warn("Ignoring unexpected keys:", unexpected_keys)
 
+    model.to(device)
 
-def setup_wandb(model):
-    """Initialize Weights & Biases if required."""
-    import wandb
-    wandb.init(project=args["wandb_project"], entity=args["wandb_entity"])
-    wandb.run.name = args["config"]
-    wandb.config.update(args)
-    wandb.watch(model)
+    model.encoder_cnn.encoder_pos.grid = model.encoder_cnn.encoder_pos.grid.to(device)
+    model.decoder_cnn.decoder_pos.grid = model.decoder_cnn.decoder_pos.grid.to(device)
 
 
-def initialize_optimizer(model):
-    """Initialize optimizer with specified learning rate."""
-    params = [{'params': model.parameters()}]
+    all_params = model.parameters()
+
+    params_reconstruct = []
+    params_disentangle = []
+
+    for name, param in model.named_parameters():
+        if name in missing_keys:  # Parameters not found in the checkpoint are "new"
+            params_disentangle.append(param)
+        else:
+            params_reconstruct.append(param)
+
+    optimizer = initialize_optimizer(all_params, args["learning_rate"])
+
+    if params_disentangle:
+        optimizer_new = initialize_optimizer(params_disentangle, args["learning_rate"] * 2)
+    else:
+        optimizer_new = None
+    
+    return model, optimizer, optimizer_new
+
+
+def initialize_optimizer(params, lr=0.0004):
+    """Initialize the optimizer for the model."""
     if args["optimizer"] == "adam":
-        optimizer = optim.Adam(params, lr=args["learning_rate"])
+        optimizer = optim.Adam(params, lr=lr)
     elif args["optimizer"] == "rmsprop":
-        optimizer = optim.RMSprop(params, lr=args["learning_rate"])
+        optimizer = optim.RMSprop(params, lr=lr)
     elif args["optimizer"] == "sgd":
-        optimizer = optim.SGD(params, lr=args["learning_rate"])
+        optimizer = optim.SGD(params, lr=lr)
     else:
         raise ValueError("Select a valid optimizer.")
     
