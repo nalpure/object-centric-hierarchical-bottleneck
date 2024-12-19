@@ -281,9 +281,7 @@ class DisentangledSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
 
         self.projection_heads = nn.ModuleList(ProjectionHead(slots_dim) for _ in range(latent_dim))
 
-    def get_latents(self, image):
-        slots = self.encode(image)  # shape: [batch_size, num_slots, slot_size]
-        
+    def get_latents(self, slots):
         # apply projection heads
         batch_size = slots.shape[0]
         z = torch.empty(batch_size, self.num_slots, self.latent_dim, device=slots.device)  # shape: [batch_size, num_slots, latent_dim]
