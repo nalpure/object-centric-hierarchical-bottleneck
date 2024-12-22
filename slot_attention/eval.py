@@ -3,6 +3,7 @@ from utils import ObservationDataset, set_seed
 from torch.utils import data
 import numpy as np
 import torch
+from torch.amp import autocast
 from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
 import os
 import matplotlib.pyplot as plt
@@ -43,6 +44,7 @@ def main():
     set_seed(args["seed"])
 
     model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}.ckpt')
+
     all_obs, all_recons, all_masks, all_recon_combined = get_reconstructions(model, args['test_path'])
 
     loss_list = np.array([criterion(obs, rec).item() for obs, rec in zip(all_obs, all_recon_combined)])
@@ -84,7 +86,7 @@ def load_model(checkpoint_path):
     return model
 
 
-def get_reconstructions(model, test_path, max_samples=1000):
+def get_reconstructions(model, test_path, max_samples=10000):
     print("Loading test dataset:", test_path)
     test_dataset = ObservationDataset(hdf5_file=test_path, hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
@@ -127,7 +129,8 @@ def get_reconstructions(model, test_path, max_samples=1000):
                 obs = obs.view(args['batch_size'], args['stacked_frames'] * args['channels_per_frame'], args['resolution'][0], args['resolution'][1])
 
             obs = obs.to(device)
-            recon_combined, recons, masks, slots = model(obs)
+            with autocast(device_type=str(device)):
+                recon_combined, recons, masks, slots = model(obs)
 
             all_obs.append(obs)
             all_recons.append(recons)
@@ -264,33 +267,21 @@ def plot_observations_with_masks(all_obs, all_masks):
 
 
 def plot_observations_and_reconstructions(all_obs, recons):
-    """
-    Visualizes each observation and corresponding reconstruction. Observed frames are displayed in the first row.
-    Each slot's reconstruction is displayed in subsequent rows.
-    
-    Args:
-    - all_obs (torch.Tensor): The observed frames, shape (num_samples, STACKED_FRAMES * CHANNELS_PER_FRAME, height, width).
-    - recons (torch.Tensor): The reconstructed frames, shape (num_samples, num_slots, width, height, STACKED_FRAMES * CHANNELS_PER_FRAME).
-    - save_path (str): Directory path to save the plots.
-    """
-
     num_samples = all_obs.shape[0]
     num_slots = recons.shape[1]
     height, width = all_obs.shape[2], all_obs.shape[3]
     recons = recons.permute(0, 1, 4, 2, 3)
 
-    # Loop through each observation and corresponding reconstruction
     for i in range(num_samples):
         fig, axes = plt.subplots(num_slots + 1, args['stacked_frames'], figsize=(4 * args['stacked_frames'], 4 * (num_slots + 1)))
 
-        # If there's only one image per sample, axes will be a 1D array
         if args['stacked_frames'] == 1:
-            axes = np.expand_dims(axes, axis=1)  # Make it 2D for consistent indexing
+            axes = np.expand_dims(axes, axis=1)
 
-        # Plot observed frames in the first row
+        # Plot observed frames
         obs_frames = all_obs[i].view(args['stacked_frames'], args['channels_per_frame'], height, width)
         for j in range(args['stacked_frames']):
-            frame = obs_frames[j].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C) format for plotting
+            frame = obs_frames[j].permute(1, 2, 0).cpu().to(torch.float32).numpy()  # Convert to (H, W, C) format
             frame = np.clip(frame, 0.0, 1.0)
             axes[0, j].imshow(frame)
             axes[0, j].set_title(f't={j}', fontsize=12, fontweight='bold')
@@ -298,26 +289,25 @@ def plot_observations_and_reconstructions(all_obs, recons):
             if j == 0:
                 axes[0, j].set_ylabel("Observed", fontsize=12)
 
-        # Plot reconstructed frames for each slot in subsequent rows
+        # Plot reconstructed frames
         for slot in range(num_slots):
             recon_frames = recons[i, slot].view(args['stacked_frames'], args['channels_per_frame'], height, width)
             for j in range(args['stacked_frames']):
-                recon_frame = recon_frames[j].permute(1, 2, 0).cpu().numpy()  # Convert to (H, W, C) format
+                recon_frame = recon_frames[j].permute(1, 2, 0).cpu().to(torch.float32).numpy()  # Ensure float32
                 recon_frame = np.clip(recon_frame, 0.0, 1.0)
                 axes[slot + 1, j].imshow(recon_frame)
                 axes[slot + 1, j].axis('off')
                 if j == 0:
                     axes[slot + 1, j].set_ylabel(f"Slot {slot + 1}", fontsize=12)
 
-        # Add shared labels for x and y axes
         fig.text(0.5, 0.04, 'Frames', ha='center', fontsize=14)
         fig.text(0.04, 0.5, 'Reconstructions (Slots)', va='center', rotation='vertical', fontsize=14)
-        fig.subplots_adjust(left=0.4, right=0.9, bottom=0.2, top=0.95)  # Add space for labels
+        fig.subplots_adjust(left=0.4, right=0.9, bottom=0.2, top=0.95)
 
-        # Save the figure for the current observation and reconstruction
         plt.tight_layout(pad=4)
         plt.savefig(os.path.join(args['output_dir'], f"slot_recons_{i}.png"))
         plt.close(fig)
+
 
 
 if __name__ == '__main__':
