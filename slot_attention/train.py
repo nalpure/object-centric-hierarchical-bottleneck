@@ -4,6 +4,7 @@ from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, 
 import torch.optim as optim
 import torch
 from torch.utils import data
+from torch.optim.lr_scheduler import LambdaLR
 from os import makedirs
 from os.path import exists
 import json
@@ -100,19 +101,18 @@ def main():
     if train_SA:
         if init_ckpt:
             raise ValueError("Loading of model weights is only supported for disentangling pre-trained models, not to continue interrupted training.")
-        model, optim = initialize_model('SA')
+        model, optim = initialize_model('SA', lr=args["learning_rates"][completed_objectives])
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA.ckpt"
 
         print("Training slot attention model...")
         
         train(model, optim, train_dataloader, 
-            args["num_epochs"][completed_objectives], 
-            args["learning_rates"][completed_objectives], 
+            args["num_epochs"][completed_objectives],
             args["warmup_steps"][completed_objectives], 
             args["decay_steps"][completed_objectives], 
-            args["decay_rate"][completed_objectives], 
+            args["decay_rates"][completed_objectives], 
             ckpt_path,
-            reconstruct=False,
+            reconstruct=True,
             disentangle=False
         )
         
@@ -123,17 +123,16 @@ def main():
         if init_ckpt is None:
             raise ValueError("Projection training requires a pre-trained model.")
         
-        model, optim = initialize_model('PH', init_ckpt)
+        model, optim = initialize_model('PH', init_ckpt, lr=args["learning_rates"][completed_objectives])
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_PH.ckpt"
 
         print("Training projection head...")
         
         train(model, optim, train_dataloader, 
-            args["num_epochs"][completed_objectives], 
-            args["learning_rates"][completed_objectives], 
+            args["num_epochs"][completed_objectives],
             args["warmup_steps"][completed_objectives], 
             args["decay_steps"][completed_objectives], 
-            args["decay_rate"][completed_objectives], 
+            args["decay_rates"][completed_objectives], 
             ckpt_path,
             reconstruct=False,
             disentangle=True
@@ -143,17 +142,16 @@ def main():
         completed_objectives += 1
     
     if train_SA_disentangled:
-        model, optim = initialize_model('SA_disentangled', init_ckpt)
+        model, optim = initialize_model('SA_disentangled', init_ckpt, lr=args["learning_rates"][completed_objectives])
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA_disentangled.ckpt"
 
         print("Training disentangled slot attention model...")
         
         train(model, optim, train_dataloader, 
-            args["num_epochs"][completed_objectives], 
-            args["learning_rates"][completed_objectives], 
+            args["num_epochs"][completed_objectives],
             args["warmup_steps"][completed_objectives], 
             args["decay_steps"][completed_objectives], 
-            args["decay_rate"][completed_objectives], 
+            args["decay_rates"][completed_objectives], 
             ckpt_path,
             reconstruct=True,
             disentangle=True
@@ -162,12 +160,25 @@ def main():
     print("Completed all objectives.")
 
 
-def train(model, optimizer, train_dataloader, num_epochs, lr, warmup_steps, decay_steps, decay_rate, ckpt_path, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
-    """Main training loop. Saves model for each checkpoint. Returns trained model and the loss for each epoch."""
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
+    """
+    Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
+
+    @param model: SlotAttentionAutoEncoder or DisentangledSlotAttentionAutoEncoder
+        Model to train.
+    @param optimizer: torch.optim.Optimizer
+        Optimizer for the model.
+    @param train_dataloader: torch.utils.data.DataLoader
+        DataLoader for the training dataset.
+    """
+    if reconstruct + disentangle < 1:
+        raise ValueError("At least one loss function must be set to true.")
 
     ckpt_dir = os.path.dirname(ckpt_path)
     if not exists(ckpt_dir):
         makedirs(ckpt_dir)
+
+    scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
 
     loss_list = []
     current_step = 0
@@ -211,17 +222,13 @@ def train(model, optimizer, train_dataloader, num_epochs, lr, warmup_steps, deca
                 epoch_disentangle_loss += disentangle_loss.item()
                 total_loss += disentangle_loss
 
-            # Adjust the learning rate based on warmup and decay steps
-            if current_step < warmup_steps:
-                lr *= (current_step / warmup_steps)
-
-            lr *= (decay_rate ** ((current_step - warmup_steps) / decay_steps))
-            optimizer.param_groups[0]['lr'] = lr
-
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
             current_step += 1
+        
+        scheduler.step() # Adjust the learning rates
+        current_lr = scheduler.get_last_lr()
 
         epoch_recon_loss /= len(train_dataloader)
         epoch_disentangle_loss /= len(train_dataloader)
@@ -230,11 +237,11 @@ def train(model, optimizer, train_dataloader, num_epochs, lr, warmup_steps, deca
 
         if verbose:
             if disentangle and reconstruct:
-                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, Disentangle loss: {epoch_disentangle_loss:.6f}, total loss: {epoch_total_loss:.6f}'
+                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, Disentangle loss: {epoch_disentangle_loss:.6f}, total loss: {epoch_total_loss:.6f}, lr: {current_lr[0]:.6f} / {current_lr[1]:.6f}'
             elif disentangle:
-                additional_msg = f'Disentangle loss: {epoch_disentangle_loss:.6f}'
+                additional_msg = f'Disentangle loss: {epoch_disentangle_loss:.6f}, lr: {current_lr[0]:.6f}'
             elif reconstruct:
-                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}'
+                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, lr: {current_lr[0]:.6f}'
 
             log_progress(epoch, num_epochs, start, additional_msg)
 
@@ -280,8 +287,8 @@ def disentanglement_loss(z_obs, z_perturbed, magnitudes):
     batch_loss = 1e9
 
     for sign in [-1, 1]:
-        diff = z_perturbed_expanded - (z_obs_expanded + deltas_expanded * sign)    # [B, S, S, D, D]
-        diff_norm = torch.norm(diff, dim=-1)                                # [B, S, S, D]
+        diff = z_perturbed_expanded - (z_obs_expanded + deltas_expanded * sign)     # [B, S, S, D, D]
+        diff_norm = torch.norm(diff, dim=-1)                                        # [B, S, S, D]
         losses = diff_norm.min(dim=-1).values.min(dim=-1).values.min(dim=-1).values # [B]
         if losses.sum() < batch_loss:
             batch_loss = losses.sum()
@@ -289,7 +296,7 @@ def disentanglement_loss(z_obs, z_perturbed, magnitudes):
     return batch_loss
 
 
-def initialize_model(objective = 'SA', ckpt = None):
+def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
     """
     Initialize the model and optimizer for the given objective.
     
@@ -339,124 +346,21 @@ def initialize_model(objective = 'SA', ckpt = None):
     if ckpt is not None:
         print(f"Loading model weights from {ckpt}")
         checkpoint = torch.load(ckpt, weights_only=True)
-        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"])
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        print(f"Found {len(missing_keys)} missing keys.")
+        warnings.warn(f"Found {len(unexpected_keys)} unexpected keys.")
 
-        warnings.warn("Ignoring unexpected keys:", unexpected_keys)
+    SA_params = [p for name, p in model.named_parameters() if 'projection' not in name]
+    PH_params = [p for name, p in model.named_parameters() if 'projection' in name]
 
-    if objective == 'PH':
-        params_projections = []
-        params_slots = []
-        
-        for name, param in model.named_parameters():
-            if name in missing_keys:  # Parameters not found in the checkpoint are "new"
-                print("Missing key:", name)
-                params_projections.append(param)
-            else:
-                print("Found key:", name)
-                params_slots.append(param)
-        
-        params = params_projections
+    if objective == 'SA':
+        optim = initialize_optimizer([{'params': SA_params, 'lr': lr}])
+    elif objective == 'PH':
+        optim = initialize_optimizer([{'params': PH_params, 'lr': lr}])
     else:
-        params = model.parameters()
-            
-    optim = initialize_optimizer([{'params': params, 'lr': args["learning_rate"]}])
+        optim = initialize_optimizer([{'params': SA_params, 'lr': lr * args["lr_ratio"]}, {'params': PH_params, 'lr': lr}])
 
     return model, optim
-
-
-
-def initialize_model_old():
-    """
-    Initialize the SlotAttentionAutoEncoder model. Returns the model, and optimizer for slots parameters and an optimizer for disentanglement parameters.
-    
-    @return model: SlotAttentionAutoEncoder
-        Slot attention model.
-
-    @return optimizer_full: torch.optim.Optimizer
-        Optimizer for the full model parameters.
-
-    @return optimizer_projections: torch.optim.Optimizer
-        Optimizer for the projection head parameters.
-    """
-    
-    train_slots = args["train_slots"]
-    train_projections = args["train_projections"]
-    train_disentangled_slots = args["train_disentangled_slots"]
-
-    if train_projections or train_disentangled_slots:
-        if args["latent_dim"] is None:
-            raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
-        
-        model = DisentangledSlotAttentionAutoEncoder(
-            tuple(args["resolution"]),
-            args["num_slots"],
-            args["stacked_frames"] * args["channels_per_frame"],
-            args["num_iterations"],
-            args["slots_dim"],
-            32 if args["small_arch"] else 64,
-            args["small_arch"],
-            args["latent_dim"]
-        )
-    else:
-        if args["latent_dim"]:
-            warnings.warn('Latent dimensionality was specified but will not be used.')
-            
-        model = SlotAttentionAutoEncoder(
-            tuple(args["resolution"]),
-            args["num_slots"],
-            args["stacked_frames"] * args["channels_per_frame"],
-            args["num_iterations"],
-            args["slots_dim"],
-            32 if args["small_arch"] else 64,
-            args["small_arch"]
-        )
-
-    params_all = model.parameters()
-    params_slots = []
-    params_projections = []
-
-    # Load model weights from checkpoint if provided
-    if args["init_ckpt"] is not None:
-        if train_slots:
-            raise ValueError("Loading of model weights is only supported for disentangling pre-trained models.")
-        
-        print(f"Loading model weights from {args['init_ckpt']}")
-        checkpoint = torch.load(args["init_ckpt"], weights_only=True)
-        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-
-        for name, param in model.named_parameters():
-            if name in missing_keys:  # Parameters not found in the checkpoint are "new"
-                print("Missing key:", name)
-                params_projections.append(param)
-            else:
-                print("Found key:", name)
-                params_slots.append(param)
-
-
-        if unexpected_keys:
-            warnings.warn("Ignoring unexpected keys:", unexpected_keys)
-
-        raise ValueError("stop")
-
-    model.to(device)
-    model.encoder_cnn.encoder_pos.grid = model.encoder_cnn.encoder_pos.grid.to(device)
-    model.decoder_cnn.decoder_pos.grid = model.decoder_cnn.decoder_pos.grid.to(device)
-
-    if params_projections:
-        optimizer_projections = initialize_optimizer([
-            {'params': params_projections, 'lr': args["learning_rate"]}
-        ])
-        optimizer_full = initialize_optimizer([
-            {'params': params_projections, 'lr': args["learning_rate"]},
-            {'params': params_slots, 'lr': args["learning_rate"] * args["lr_ratio"]}
-        ])
-    else:
-        optimizer_full = initialize_optimizer([
-            {'params': params_all, 'lr': args["learning_rate"]}
-        ])
-        optimizer_projections = None
-    
-    return model, optimizer_full, optimizer_projections
 
 
 def initialize_optimizer(init_list):
@@ -471,6 +375,20 @@ def initialize_optimizer(init_list):
         raise ValueError("Select a valid optimizer.")
     
     return optimizer
+
+
+def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
+    """ Creates a learning rate scheduler with warmup and exponential decay."""
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            # Linear warmup
+            return float(current_step) / float(max(1, warmup_steps))
+        else:
+            # Exponential decay after warmup
+            decay_factor = (current_step - warmup_steps) / decay_steps
+            return decay_rate ** decay_factor
+    
+    return LambdaLR(optimizer, lr_lambda)
 
 
 if __name__ == "__main__":
