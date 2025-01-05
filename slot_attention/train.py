@@ -1,4 +1,5 @@
 import argparse
+import os
 from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
 import torch.optim as optim
 import torch
@@ -33,24 +34,31 @@ parser.add_argument('--stacked_frames', default=1, type=int, help='number of fra
 parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 parser.add_argument('--num_workers', default=0, type=int, help='number of workers for loading data')
 
-# Model parameters
+# General training parameters
 parser.add_argument('--batch_size', default=64, type=int)
 parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
+
+# Training objectives. If more than one is set to true, they will be trained sequentially.
+parser.add_argument('--train_SA', default=True, action='store_true', help='If true, trains a slot attention model.')
+parser.add_argument('--train_PH', default=False, action='store_true', help='If true, trains the projection heads on a pre-trained slot attention model.')
+parser.add_argument('--train_SA_disentangled', default=False, action='store_true', help='If true, trains a disentangled slot attention model using reconstruction and disentanglement loss.')
+
+# Parameters for each objective
+parser.add_argument('--num_epochs', default=[100], type=list, help='number of epochs for each objective')
+parser.add_argument('--learning_rates', default=[0.004], type=list, help='Learning rates for each objective')
+parser.add_argument('--warmup_steps', default=[10000], type=list, help='Number of warmup steps for the learning rate for each objective.')
+parser.add_argument('--decay_steps', default=[100000], type=list, help='Number of steps for the learning rate decay for each objective.')
+parser.add_argument('--decay_rates', default=[0.5], type=list, help='Rate for the learning rate decay for each objective.')
+
+# Further Slot Attention parameters
 parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
 parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
 parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
-parser.add_argument('--learning_rate', default=0.0004, type=float)
-parser.add_argument('--warmup_steps', default=10000, type=int, help='Number of warmup steps for the learning rate.')
-parser.add_argument('--decay_rate', default=0.5, type=float, help='Rate for the learning rate decay.')
-parser.add_argument('--decay_steps', default=100000, type=int, help='Number of steps for the learning rate decay.')
-parser.add_argument('--num_epochs', default=100, type=int, help='number of epochs')
 
-# Disentanglement parameters
-parser.add_argument('--disentangle', default=False, action='store_true', help='If true, adds disentanglement loss. Expects training data to include perturbations.')
+# Further disentanglement parameters
 parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
 parser.add_argument('--loss_ratio', default=100, type=int, help='Ratio of reconstruction loss to disentanglement loss. Higher values favor reconstruction loss.')
 parser.add_argument('--lr_ratio', default=0.25, type=float, help='Ratio of slot parameters learning rate to disentanglement parameters learning rate. Higher values favor reconstruction parameters.')
-parser.add_argument('--disentangle_warmup', default=20, type=int, help='Number of warmup epochs for disentanglement parameters.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -66,40 +74,101 @@ if args["config"] is not None:
             warnings.warn(f"{key} is not a valid parameter")
 
 def main():
+    train_SA = args["train_SA"]
+    train_PH = args["train_PH"]
+    train_SA_disentangled = args["train_SA_disentangled"]
+    init_ckpt = args["init_ckpt"]
+    set_seed(args['seed'])
+    completed_objectives = 0
+
     if args['val_paths']:
         warnings.warn('A validation path was specified but will not be used.')
-        
-    set_seed(args['seed'])
-    model, optimizer_full, optimizer_projections = initialize_model()
+
+    if train_SA + train_PH + train_SA_disentangled < 1:
+        raise ValueError("At least one training objective must be set to true.")
     
     print("Loading training data...")
-    
-    if args["disentangle"]:
+
+    if train_PH or train_SA_disentangled:
         dataset = PerturbationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
     else:
         dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
 
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"], drop_last=True)
-    print(f"Training slot attention over {args['batch_size'] * len(train_dataloader)} samples.")
+    print(f"Training dataset contains {args['batch_size'] * len(train_dataloader)} samples.")
+    
+    if train_SA:
+        if init_ckpt:
+            raise ValueError("Loading of model weights is only supported for disentangling pre-trained models, not to continue interrupted training.")
+        model, optim = initialize_model('SA')
+        ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA.ckpt"
 
-    if args["disentangle"]:
-        print("Warmup new disentangle parameters...")
-        train(model, optimizer_projections, train_dataloader, args["disentangle_warmup"], reconstruct=False, disentangle=True)
-        print(f"Training full model with ratio {args['loss_ratio']}...")
-        train(model, optimizer_full, train_dataloader, args["num_epochs"], reconstruct=True, disentangle=True)
-    else:
-        print("Training model...")
-        train(model, optimizer_full, train_dataloader, args["num_epochs"])
+        print("Training slot attention model...")
+        
+        train(model, optim, train_dataloader, 
+            args["num_epochs"][completed_objectives], 
+            args["learning_rates"][completed_objectives], 
+            args["warmup_steps"][completed_objectives], 
+            args["decay_steps"][completed_objectives], 
+            args["decay_rate"][completed_objectives], 
+            ckpt_path,
+            reconstruct=False,
+            disentangle=False
+        )
+        
+        init_ckpt = ckpt_path
+        completed_objectives += 1
+    
+    if train_PH:
+        if init_ckpt is None:
+            raise ValueError("Projection training requires a pre-trained model.")
+        
+        model, optim = initialize_model('PH', init_ckpt)
+        ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_PH.ckpt"
+
+        print("Training projection head...")
+        
+        train(model, optim, train_dataloader, 
+            args["num_epochs"][completed_objectives], 
+            args["learning_rates"][completed_objectives], 
+            args["warmup_steps"][completed_objectives], 
+            args["decay_steps"][completed_objectives], 
+            args["decay_rate"][completed_objectives], 
+            ckpt_path,
+            reconstruct=False,
+            disentangle=True
+        )
+
+        init_ckpt = ckpt_path
+        completed_objectives += 1
+    
+    if train_SA_disentangled:
+        model, optim = initialize_model('SA_disentangled', init_ckpt)
+        ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA_disentangled.ckpt"
+
+        print("Training disentangled slot attention model...")
+        
+        train(model, optim, train_dataloader, 
+            args["num_epochs"][completed_objectives], 
+            args["learning_rates"][completed_objectives], 
+            args["warmup_steps"][completed_objectives], 
+            args["decay_steps"][completed_objectives], 
+            args["decay_rate"][completed_objectives], 
+            ckpt_path,
+            reconstruct=True,
+            disentangle=True
+        )
+    
+    print("Completed all objectives.")
 
 
-def train(model, optimizer, train_dataloader, num_epochs, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, lr, warmup_steps, decay_steps, decay_rate, ckpt_path, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
     """Main training loop. Saves model for each checkpoint. Returns trained model and the loss for each epoch."""
 
-    if not exists(args["ckpt_path"]):
-        makedirs(args["ckpt_path"])
-    ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
+    ckpt_dir = os.path.dirname(ckpt_path)
+    if not exists(ckpt_dir):
+        makedirs(ckpt_dir)
 
-    disentangle = args["disentangle"]
     loss_list = []
     current_step = 0
     best_loss = 1e9
@@ -142,16 +211,11 @@ def train(model, optimizer, train_dataloader, num_epochs, reconstruct=True, dise
                 epoch_disentangle_loss += disentangle_loss.item()
                 total_loss += disentangle_loss
 
-            # Adjust number of warmup and decay steps if number of epochs is different from the default
-            warmup_steps = args["warmup_steps"] * (num_epochs / args["num_epochs"]) 
-            decay_steps = args["decay_steps"] * (num_epochs / args["num_epochs"])
-            
             # Adjust the learning rate based on warmup and decay steps
             if current_step < warmup_steps:
-                lr = args["learning_rate"] * (current_step / warmup_steps)
-            else:
-                lr = args["learning_rate"]
-            lr = lr * (args["decay_rate"] ** (current_step / decay_steps))
+                lr *= (current_step / warmup_steps)
+
+            lr *= (decay_rate ** ((current_step - warmup_steps) / decay_steps))
             optimizer.param_groups[0]['lr'] = lr
 
             optimizer.zero_grad()
@@ -225,14 +289,103 @@ def disentanglement_loss(z_obs, z_perturbed, magnitudes):
     return batch_loss
 
 
+def initialize_model(objective = 'SA', ckpt = None):
+    """
+    Initialize the model and optimizer for the given objective.
+    
+    @param objective: str
+        Training objective. Choose between ['slots', 'projections', 'disentangled_slots'].
+    
+    @param ckpt: str
+        Path to a checkpoint to load model weights from.
+    """
+    if objective == 'PH' and ckpt is None:
+        raise ValueError("Training of projection heads requires pre-trained slot attention model.")
 
-
-def initialize_model():
-    """Initialize the SlotAttentionAutoEncoder model."""
-
-    if args["disentangle"]:
+    if objective == 'SA':
+        if args["latent_dim"]:
+            warnings.warn('Latent dimensionality was specified but will not be used.')
+        
+        model = SlotAttentionAutoEncoder(
+            tuple(args["resolution"]),
+            args["num_slots"],
+            args["stacked_frames"] * args["channels_per_frame"],
+            args["num_iterations"],
+            args["slots_dim"],
+            32 if args["small_arch"] else 64,
+            args["small_arch"]
+        )
+    elif objective == 'PH' or objective == 'SA_disentangled':
         if args["latent_dim"] is None:
-            raise ValueError("Specify the latent dimensionality when disentangle is true.")
+            raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
+        
+        model = DisentangledSlotAttentionAutoEncoder(
+            tuple(args["resolution"]),
+            args["num_slots"],
+            args["stacked_frames"] * args["channels_per_frame"],
+            args["num_iterations"],
+            args["slots_dim"],
+            32 if args["small_arch"] else 64,
+            args["small_arch"],
+            args["latent_dim"]
+        )
+    else:
+        raise ValueError("Select a valid training objective.")
+    
+    model.to(device)
+    model.encoder_cnn.encoder_pos.grid = model.encoder_cnn.encoder_pos.grid.to(device)
+    model.decoder_cnn.decoder_pos.grid = model.decoder_cnn.decoder_pos.grid.to(device)
+
+    if ckpt is not None:
+        print(f"Loading model weights from {ckpt}")
+        checkpoint = torch.load(ckpt, weights_only=True)
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"])
+
+        warnings.warn("Ignoring unexpected keys:", unexpected_keys)
+
+    if objective == 'PH':
+        params_projections = []
+        params_slots = []
+        
+        for name, param in model.named_parameters():
+            if name in missing_keys:  # Parameters not found in the checkpoint are "new"
+                print("Missing key:", name)
+                params_projections.append(param)
+            else:
+                print("Found key:", name)
+                params_slots.append(param)
+        
+        params = params_projections
+    else:
+        params = model.parameters()
+            
+    optim = initialize_optimizer([{'params': params, 'lr': args["learning_rate"]}])
+
+    return model, optim
+
+
+
+def initialize_model_old():
+    """
+    Initialize the SlotAttentionAutoEncoder model. Returns the model, and optimizer for slots parameters and an optimizer for disentanglement parameters.
+    
+    @return model: SlotAttentionAutoEncoder
+        Slot attention model.
+
+    @return optimizer_full: torch.optim.Optimizer
+        Optimizer for the full model parameters.
+
+    @return optimizer_projections: torch.optim.Optimizer
+        Optimizer for the projection head parameters.
+    """
+    
+    train_slots = args["train_slots"]
+    train_projections = args["train_projections"]
+    train_disentangled_slots = args["train_disentangled_slots"]
+
+    if train_projections or train_disentangled_slots:
+        if args["latent_dim"] is None:
+            raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
         
         model = DisentangledSlotAttentionAutoEncoder(
             tuple(args["resolution"]),
@@ -264,18 +417,26 @@ def initialize_model():
 
     # Load model weights from checkpoint if provided
     if args["init_ckpt"] is not None:
+        if train_slots:
+            raise ValueError("Loading of model weights is only supported for disentangling pre-trained models.")
+        
         print(f"Loading model weights from {args['init_ckpt']}")
         checkpoint = torch.load(args["init_ckpt"], weights_only=True)
         missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
         for name, param in model.named_parameters():
             if name in missing_keys:  # Parameters not found in the checkpoint are "new"
+                print("Missing key:", name)
                 params_projections.append(param)
             else:
+                print("Found key:", name)
                 params_slots.append(param)
+
 
         if unexpected_keys:
             warnings.warn("Ignoring unexpected keys:", unexpected_keys)
+
+        raise ValueError("stop")
 
     model.to(device)
     model.encoder_cnn.encoder_pos.grid = model.encoder_cnn.encoder_pos.grid.to(device)
