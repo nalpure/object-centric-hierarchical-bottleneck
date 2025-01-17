@@ -96,7 +96,7 @@ def main():
         dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
 
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"], drop_last=True)
-    print(f"Training dataset contains {args['batch_size'] * len(train_dataloader)} samples.")
+    print(f"Finished loading all {args['batch_size'] * len(train_dataloader)} training samples.")
     
     if train_SA:
         if init_ckpt:
@@ -272,7 +272,7 @@ def disentanglement_loss(z_obs, z_perturbed, magnitudes):
         Latent representation of the original observation.
     @param z_perturbed: torch.Tensor, [B, S, D]
         Latent representation of the perturbed observation.
-    @param magnitudes: torch.Tensor, [B, S]
+    @param magnitudes: torch.Tensor, [B]
         Magnitude of the perturbation.
     """
     latent_dim = z_obs.shape[2]
@@ -284,16 +284,11 @@ def disentanglement_loss(z_obs, z_perturbed, magnitudes):
     z_perturbed_expanded = z_perturbed.unsqueeze(1).unsqueeze(3)        # [B, 1, S, 1, D]
     deltas_expanded = deltas.unsqueeze(1).unsqueeze(1)                  # [B, 1, 1, D, D]
 
-    batch_loss = 1e9
+    diff = z_perturbed_expanded - (z_obs_expanded + deltas_expanded)     # [B, S, S, D, D]
+    diff_norm = torch.norm(diff, dim=-1)                                        # [B, S, S, D]
+    losses = diff_norm.min(dim=-1).values.min(dim=-1).values.min(dim=-1).values # [B]
 
-    for sign in [-1, 1]:
-        diff = z_perturbed_expanded - (z_obs_expanded + deltas_expanded * sign)     # [B, S, S, D, D]
-        diff_norm = torch.norm(diff, dim=-1)                                        # [B, S, S, D]
-        losses = diff_norm.min(dim=-1).values.min(dim=-1).values.min(dim=-1).values # [B]
-        if losses.sum() < batch_loss:
-            batch_loss = losses.sum()
-
-    return batch_loss
+    return losses.sum()
 
 
 def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
@@ -347,8 +342,8 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
         print(f"Loading model weights from {ckpt}")
         checkpoint = torch.load(ckpt, weights_only=True)
         missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        print(f"Found {len(missing_keys)} missing keys.")
-        warnings.warn(f"Found {len(unexpected_keys)} unexpected keys.")
+        if len(unexpected_keys) > 0:
+            warnings.warn(f"Found {len(unexpected_keys)} unexpected keys.")
 
     SA_params = [p for name, p in model.named_parameters() if 'projection' not in name]
     PH_params = [p for name, p in model.named_parameters() if 'projection' in name]
