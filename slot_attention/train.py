@@ -196,14 +196,16 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             total_loss = 0
 
             obs = batch[0].to(device)   # [B, C, H, W]
+            obs_frames = obs.view(obs.shape[0], args["stacked_frames"], args["channels_per_frame"], obs.shape[2], obs.shape[3]) 
+            #obs_frames shape is [B, stacked_frames, 3, H, W]
             if TRAINING_NOISE:
                 obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1)
 
             slots_obs = model.encode(obs)
+            recon_combined, recons, masks, _ = model.decode(slots_obs)
 
             if reconstruct:
-                recon_combined, _, _, _ = model.decode(slots_obs)
-                recon_loss = criterion(recon_combined, obs)
+                recon_loss = criterion(recon_combined, obs_frames)
                 epoch_recon_loss += recon_loss.item()
                 total_loss += recon_loss
 

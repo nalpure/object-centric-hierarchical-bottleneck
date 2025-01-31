@@ -135,13 +135,13 @@ class Decoder(nn.Module):
             self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
             self.conv4 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
             self.conv5 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv6 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1)
+            self.conv6 = nn.ConvTranspose2d(hid_dim, num_channels + 5, 3, stride=(1, 1), padding=1)
             self.decoder_initial_size = (8, 8)
         else:
             self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, stride=(1, 1), padding=2)
             self.conv2 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
             self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv4 = nn.ConvTranspose2d(hid_dim, num_channels + 1, 3, stride=(1, 1), padding=1)
+            self.conv4 = nn.ConvTranspose2d(hid_dim, num_channels + 5, 3, stride=(1, 1), padding=1)
             self.decoder_initial_size = resolution
         self.decoder_pos = SoftPositionEmbed(slots_dim, self.decoder_initial_size)
         self.resolution = resolution
@@ -173,6 +173,7 @@ class SlotAttentionAutoEncoder(nn.Module):
         Args:
         resolution: Tuple of integers specifying width and height of input image.
         num_slots: Number of slots in Slot Attention.
+        num_channels: Number of channels in input image.
         num_iterations: Number of iterations in Slot Attention.
         slots_dim: Dimensionality of slot features.
         encdec_dim: Dimensionality of encoder/decoder features.
@@ -238,18 +239,27 @@ class SlotAttentionAutoEncoder(nn.Module):
         # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
 
         # Undo combination of slot and batch dimension; split alpha masks.
-        recons, masks = x.reshape(batch_size, -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,1], dim=-1)
+        recons, masks = x.reshape(batch_size, -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,5], dim=-1)
         # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
-        # `masks` has shape: [batch_size, num_slots, width, height, 1].
+        # `masks` has shape: [batch_size, num_slots, width, height, 5].
+
+        num_frames = self.num_channels // 3
+        recons_frames = recons.view(batch_size, self.num_slots, x.shape[1], x.shape[2], num_frames, 3)
+        recons_frames = recons_frames.permute(0, 4, 1, 2, 3, 5)  # [batch_size, num_frames, num_slots, width, height, 3]
+
+        masks_frames = masks.unsqueeze(-1)
+        masks_frames = masks_frames.permute(0, 4, 1, 2, 3, 5)  # [batch_size, num_frames, num_slots, width, height, 1]
 
         # Normalize alpha masks over slots.
-        masks = nn.Softmax(dim=1)(masks)  # + 1e-8
+        masks_frames = nn.Softmax(dim=2)(masks_frames)  # + 1e-8
         
-        recon_combined = torch.sum(recons * masks, dim=1)  # Recombine image.
-        recon_combined = recon_combined.permute(0,3,1,2)
-        # `recon_combined` has shape: [batch_size, num_channels, width, height].
+        recon_combined = torch.sum(recons_frames * masks_frames, dim=2)  # Recombine image.
+        recon_combined = recon_combined.permute(0,1,4,2,3)
+        # `recon_combined` has shape: [batch_size, num_frames, 3, width, height].
 
-        return recon_combined, recons, masks, slots
+        masks_frames = masks_frames.squeeze()  # [batch_size, num_frames, width, height]
+
+        return recon_combined, recons_frames, masks_frames, slots
 
 class ProjectionHead(nn.Module):
     """
