@@ -219,24 +219,24 @@ def log_progress(current_step, total_steps, start_time, additional_msg=''):
 
     msg = (
         f"{current_step}/{total_steps} - "
-        f"Elapsed: {timedelta(seconds=int(elapsed_time))} - "
-        f"Remaining: {remaining_time_str} - "
-        f"Estimated End Time: {estimated_end_time.strftime('%H:%M:%S')}"
+        f"Remaining: {remaining_time_str}"
     )
 
     if additional_msg: msg += f" - {additional_msg}"
     print(msg)
 
 
-def set_seed(seed):
-    random.seed()
+def set_seed(seed, deterministic_cudnn=False):
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
+
+    if deterministic_cudnn:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 class BaseDataset(data.Dataset):
