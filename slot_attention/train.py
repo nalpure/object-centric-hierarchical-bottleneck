@@ -1,16 +1,19 @@
 import argparse
 import os
-from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
-import torch.optim as optim
-import torch
-from torch.utils import data
-from torch.optim.lr_scheduler import LambdaLR
 from os import makedirs
 from os.path import exists
 import json
 from datetime import datetime
 import warnings
+import contextlib
 
+import torch
+from torch import optim, autocast
+from torch.amp import GradScaler
+from torch.utils import data
+from torch.optim.lr_scheduler import LambdaLR
+
+from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
 from utils import ObservationDataset, PerturbationDataset, log_progress, set_seed
 
 
@@ -38,6 +41,7 @@ parser.add_argument('--num_workers', default=0, type=int, help='number of worker
 # General training parameters
 parser.add_argument('--batch_size', default=64, type=int)
 parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
+parser.add_argument('--mixed_precision', default=False, action='store_true', help='If true, uses autocast for mixed precision training.')
 
 # Training objectives. If more than one is set to true, they will be trained sequentially.
 parser.add_argument('--train_SA', default=True, action='store_true', help='If true, trains a slot attention model.')
@@ -113,6 +117,7 @@ def main():
             args["decay_steps"][completed_objectives], 
             args["decay_rates"][completed_objectives], 
             ckpt_path,
+            mixed_precision=args["mixed_precision"],
             reconstruct=True,
             disentangle=False
         )
@@ -135,6 +140,7 @@ def main():
             args["decay_steps"][completed_objectives], 
             args["decay_rates"][completed_objectives], 
             ckpt_path,
+            mixed_precision=args["mixed_precision"],
             reconstruct=False,
             disentangle=True
         )
@@ -154,6 +160,7 @@ def main():
             args["decay_steps"][completed_objectives], 
             args["decay_rates"][completed_objectives], 
             ckpt_path,
+            mixed_precision=args["mixed_precision"],
             reconstruct=True,
             disentangle=True
         )
@@ -161,7 +168,7 @@ def main():
     print("Completed all objectives.")
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, mixed_precision, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -180,6 +187,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         makedirs(ckpt_dir)
 
     scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
+    scaler = GradScaler(device=device.type) if mixed_precision else None
 
     loss_list = []
     current_step = 0
@@ -197,39 +205,48 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             total_loss = 0
 
             obs = batch[0].to(device)   # [B, C, H, W]
-            #obs_frames = obs.view(obs.shape[0], args["stacked_frames"], args["channels_per_frame"], obs.shape[2], obs.shape[3]) 
-            #obs_frames shape is [B, stacked_frames, 3, H, W]
+
             if TRAINING_NOISE:
                 obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1)
 
-            slots_obs = model.encode(obs)
-            recon_combined, recons, masks, _ = model.decode(slots_obs)
+            # Use autocast if enabled, otherwise use a no-op context
+            context_manager = autocast(device_type=device.type) if mixed_precision else contextlib.nullcontext()
+            
+            with context_manager:
+                slots_obs = model.encode(obs)
+                recon_combined, recons, masks, _ = model.decode(slots_obs)
 
-            if reconstruct:
-                recon_loss = criterion(recon_combined, obs)
-                epoch_recon_loss += recon_loss.item()
-                total_loss += recon_loss
+                if reconstruct:
+                    recon_loss = criterion(recon_combined, obs)
+                    epoch_recon_loss += recon_loss.item()
+                    total_loss += recon_loss
 
-            if disentangle:
-                _, perturbed, magnitudes, _, _ = batch
-                perturbed = perturbed.to(device)
-                magnitudes = magnitudes.to(device)
+                if disentangle:
+                    _, perturbed, magnitudes, _, _ = batch
+                    perturbed = perturbed.to(device)
+                    magnitudes = magnitudes.to(device)
 
-                slots_perturbed = model.encode(perturbed)
+                    slots_perturbed = model.encode(perturbed)
 
-                z_obs = model.get_latents(slots_obs)              # [B, num_slots, latent_dim]
-                z_perturbed = model.get_latents(slots_perturbed)  # [B, num_slots, latent_dim]
+                    z_obs = model.get_latents(slots_obs)              # [B, num_slots, latent_dim]
+                    z_perturbed = model.get_latents(slots_perturbed)  # [B, num_slots, latent_dim]
 
-                disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
-                disentangle_loss /= args["loss_ratio"]
-                epoch_disentangle_loss += disentangle_loss.item()
-                total_loss += disentangle_loss
+                    disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
+                    disentangle_loss /= args["loss_ratio"]
+                    epoch_disentangle_loss += disentangle_loss.item()
+                    total_loss += disentangle_loss
 
             optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
             current_step += 1
-        
+            
+            if mixed_precision:
+                scaler.scale(total_loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                total_loss.backward()
+                optimizer.step()
+            
         scheduler.step() # Adjust the learning rates
         current_lr = scheduler.get_last_lr()
 
