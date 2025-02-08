@@ -2,7 +2,10 @@
 */__pycache__
 /env
 */checkpoints
+checkpoints
+tb_logs
 *.pyc
 requirements.txt
 *.log
 *.out
+*.sh

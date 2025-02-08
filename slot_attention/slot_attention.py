@@ -2,9 +2,12 @@ import numpy as np
 from torch import nn
 import torch
 import torch.nn.functional as F
+from typing import Union, Tuple
+
+from slot_attention.utils import sinkhorn, minimize_entropy_of_sinkhorn, assert_shape
 
 
-class SlotAttention(nn.Module):
+class SlotAttentionOriginal(nn.Module):
     def __init__(self, num_slots, dim, encdec_dim, iters = 3, eps = 1e-8, hidden_dim = 128, init_slots=True):
         super().__init__()
         self.num_slots = num_slots
@@ -78,6 +81,130 @@ class SlotAttention(nn.Module):
         return slots
 
 
+class SlotAttention(nn.Module):
+    def __init__(self, num_slots, dim, encdec_dim, iters = 3, eps = 1e-8, hidden_dim = 128, init_slots=True):
+        super().__init__()
+
+        self.in_features = encdec_dim
+        self.num_iterations = iters
+        self.num_slots = num_slots
+        self.slot_size = dim  # number of hidden layers in slot dimensions
+        self.mlp_hidden_size = hidden_dim
+        self.epsilon = eps
+
+        self.norm_inputs = nn.LayerNorm(self.in_features)
+        # I guess this is layer norm across each slot? should look into this
+        self.norm_slots = nn.LayerNorm(self.slot_size)
+        self.norm_mlp = nn.LayerNorm(self.slot_size)
+
+        # Linear maps for the attention module.
+        self.project_q = nn.Linear(self.slot_size, self.slot_size, bias=False)
+        self.project_k = nn.Linear(self.in_features, self.slot_size, bias=False)
+        self.project_v = nn.Linear(self.in_features, self.slot_size, bias=False)
+
+        # OT approach
+        self.mlp_weight_input = nn.Linear(self.in_features, 1)
+        self.mlp_weight_slots = nn.Linear(self.slot_size, 1)
+
+        # Slot update functions.
+        self.gru = nn.GRUCell(self.slot_size, self.slot_size)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.slot_size, self.mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.mlp_hidden_size, self.slot_size),
+        )
+
+        # self.slots_mu = nn.Parameter(nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")))
+        # self.slots_log_sigma = nn.Parameter(nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")))
+
+        self.register_buffer(
+            "slots_mu",
+            nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")),
+        )
+        self.register_buffer(
+            "slots_log_sigma",
+            nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")),
+        )
+    
+    def step(self, slots, n_s, k, v, a, batch_size, num_inputs):
+        slots_prev = slots
+        slots = self.norm_slots(slots)
+        
+        b = self.mlp_weight_slots(slots).squeeze(-1).softmax(-1) * n_s  # <- this is new
+
+        # Attention.
+        q = self.project_q(slots)  # Shape: [batch_size, num_slots, slot_size].
+        assert_shape(q.size(), (batch_size, n_s, self.slot_size))
+
+        # attn_norm_factor = self.slot_size ** -0.5
+        # attn_logits = attn_norm_factor * torch.matmul(k, q.transpose(2, 1))
+        # attn_logits = -attn_logits
+        attn_logits = torch.cdist(k, q)  # <- this is new
+        # k = k / k.norm(dim=2, keepdim=True)
+        # q = q / q.norm(dim=2, keepdim=True)
+        # attn_logits = 1.0 - 6* torch.matmul(k, q.transpose(2, 1))
+
+        # attn = F.softmax(attn_logits, dim=-1)
+        attn_logits, p, q = minimize_entropy_of_sinkhorn(attn_logits, a, b, mesh_lr=5)   # <- this is new
+        attn, _, _ = sinkhorn(attn_logits, a, b, u=p, v=q)  # <- this is new
+
+        # `attn` has shape: [batch_size, num_inputs, num_slots].
+        assert_shape(attn.size(), (batch_size, num_inputs, n_s))
+
+        # Weighted mean.
+        # attn = attn + self.epsilon
+        # attn = attn / torch.sum(attn, dim=1, keepdim=True)
+        updates = torch.matmul(attn.transpose(1, 2), v)
+        # `updates` has shape: [batch_size, num_slots, slot_size].
+        assert_shape(updates.size(), (batch_size, n_s, self.slot_size))
+
+        # Slot update.
+        # GRU is expecting inputs of size (N,H) so flatten batch and slots dimension
+        slots = self.gru(
+            updates.view(batch_size * n_s, self.slot_size),
+            slots_prev.view(batch_size * n_s, self.slot_size),
+        )
+        slots = slots.view(batch_size, n_s, self.slot_size)
+        assert_shape(slots.size(), (batch_size, n_s, self.slot_size))
+        slots = slots + self.mlp(self.norm_mlp(slots))
+        assert_shape(slots.size(), (batch_size, n_s, self.slot_size))
+
+        # return only input variables which changed
+        return slots, attn
+
+    def forward(self, inputs: torch.Tensor, num_slots=None, num_iterations=None, slots_init=None):
+        # `inputs` has shape [batch_size, num_inputs, inputs_size]. example: [256, 4096, 64]
+        batch_size, num_inputs, inputs_size = inputs.shape
+        n_s = num_slots if num_slots is not None else self.num_slots
+        n_i = num_iterations if num_iterations is not None else self.num_iterations
+        inputs = self.norm_inputs(inputs)  # Apply layer norm to the input.
+        k = self.project_k(inputs)  # Shape: [batch_size, num_inputs, slot_size].
+        assert_shape(k.size(), (batch_size, num_inputs, self.slot_size))
+        v = self.project_v(inputs)  # Shape: [batch_size, num_inputs, slot_size].
+        assert_shape(v.size(), (batch_size, num_inputs, self.slot_size))
+
+        # Initialize the slots. Shape: [batch_size, num_slots, slot_size].
+        if slots_init is not None:
+            slots = slots_init.clone()
+        else:
+            slots_init = torch.randn((batch_size, n_s, self.slot_size))
+            slots_init = slots_init.type_as(inputs)
+            slots = self.slots_mu + self.slots_log_sigma.exp() * slots_init
+
+        a = self.mlp_weight_input(inputs).squeeze(-1).softmax(-1) * n_s  # <- this is new
+
+        # Multiple rounds of attention.
+        for _ in range(n_i-1):
+            slots, attn = self.step(slots, n_s, k, v, a, batch_size, num_inputs)
+        
+        slots = slots.detach() # detach for approx implicit diff
+        slots, attn = self.step(slots, n_s, k, v, a, batch_size, num_inputs)            
+
+        slots_init = slots.clone()
+        return slots, attn.permute(0,2,1), slots_init # the last argument is None
+
+
+
 def build_grid(resolution):
     ranges = [np.linspace(0., 1., num=res) for res in resolution]
     grid = np.meshgrid(*ranges, sparse=False, indexing="ij")
@@ -104,9 +231,9 @@ class SoftPositionEmbed(nn.Module):
         return inputs + grid
 
 class Encoder(nn.Module):
-    def __init__(self, hid_dim, resolution, num_channels):
+    def __init__(self, hid_dim, resolution, num_frames, num_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(num_channels, hid_dim, 5, padding = 2)
+        self.conv1 = nn.Conv2d(num_channels*num_frames, hid_dim, 5, padding = 2)
         self.conv2 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv3 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv4 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
@@ -127,25 +254,14 @@ class Encoder(nn.Module):
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, hid_dim, slots_dim, resolution, small_arch, num_channels):
+    def __init__(self, hid_dim, slots_dim, resolution, num_frames, num_channels):
         super().__init__()
-        if not small_arch:
-            self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
-            self.conv2 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
-            self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
-            self.conv4 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(2, 2), padding=2, output_padding=1)
-            self.conv5 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv6 = nn.ConvTranspose2d(hid_dim, num_channels + 5, 3, stride=(1, 1), padding=1)
-            self.decoder_initial_size = (8, 8)
-        else:
-            self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv2 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=(1, 1), padding=2)
-            self.conv4 = nn.ConvTranspose2d(hid_dim, num_channels + 5, 3, stride=(1, 1), padding=1)
-            self.decoder_initial_size = resolution
-        self.decoder_pos = SoftPositionEmbed(slots_dim, self.decoder_initial_size)
         self.resolution = resolution
-        self.small_arch = small_arch
+        self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, stride=1, padding=2)
+        self.conv2 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=1, padding=2)
+        self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, stride=1, padding=2)
+        self.conv4 = nn.ConvTranspose2d(hid_dim, (num_channels + 1) * num_frames, 3, stride=1, padding=1)
+        self.decoder_pos = SoftPositionEmbed(slots_dim, resolution)
 
     def forward(self, x):
         x = self.decoder_pos(x)
@@ -157,18 +273,12 @@ class Decoder(nn.Module):
         x = self.conv3(x)
         x = F.relu(x)
         x = self.conv4(x)
-        if not self.small_arch:
-            x = F.relu(x)
-            x = self.conv5(x)
-            x = F.relu(x)
-            x = self.conv6(x)
-        x = x[:,:,:self.resolution[0], :self.resolution[1]]
         x = x.permute(0,2,3,1)
         return x
 
 """Slot Attention-based auto-encoder for object discovery."""
 class SlotAttentionAutoEncoder(nn.Module):
-    def __init__(self, resolution, num_slots, num_channels, num_iterations, slots_dim, encdec_dim, small_arch):
+    def __init__(self, resolution, num_frames, num_slots, num_channels, num_iterations, slots_dim, encdec_dim):
         """Builds the Slot Attention-based auto-encoder.
         Args:
         resolution: Tuple of integers specifying width and height of input image.
@@ -181,16 +291,16 @@ class SlotAttentionAutoEncoder(nn.Module):
         latent_dim: Dimensionality of latent space (if projection head is used).
         """
         super().__init__()
+        self.num_frames = num_frames
         self.slots_dim = slots_dim
         self.encdec_dim = encdec_dim
         self.resolution = resolution
         self.num_slots = num_slots
         self.num_iterations = num_iterations
-        self.small_arch = small_arch
         self.num_channels = num_channels
 
-        self.encoder_cnn = Encoder(self.encdec_dim, self.resolution, self.num_channels)
-        self.decoder_cnn = Decoder(self.encdec_dim, self.slots_dim, self.resolution, small_arch, self.num_channels)
+        self.encoder_cnn = Encoder(self.encdec_dim, self.resolution, self.num_frames, self.num_channels)
+        self.decoder_cnn = Decoder(self.encdec_dim, self.slots_dim, self.resolution, self.num_frames, self.num_channels)
 
         self.fc1 = nn.Linear(encdec_dim, encdec_dim)
         self.fc2 = nn.Linear(encdec_dim, encdec_dim)
@@ -219,47 +329,51 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         # Slot Attention module.
         # `slots` has shape: [batch_size, num_slots, slot_size].
-        slots = self.slot_attention(x)
-        
+        slots, attention_scores, slots_init = self.slot_attention(x)
         return slots
     
     def decode(self, slots):
         # `slots` has shape: [batch_size, num_slots, slot_size].
         batch_size = slots.shape[0]
+        width, height = self.resolution
 
         # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
         slots = slots.reshape((-1, slots.shape[-1])).unsqueeze(1).unsqueeze(2)
-        if not self.small_arch:
-            slots = slots.repeat((1, 8, 8, 1))
-        else:
-            slots = slots.repeat((1, self.resolution[0], self.resolution[1], 1))
-        
+        slots = slots.repeat((1, width, height, 1))
         # `slots` has shape: [batch_size*num_slots, width_init, height_init, slot_size].
+
         x = self.decoder_cnn(slots)
-        # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
+        # `x` has shape: [batch_size*num_slots, width, height, num_channels+num_frames].
 
-        # Undo combination of slot and batch dimension; split alpha masks.
-        recons, masks = x.reshape(batch_size, -1, x.shape[1], x.shape[2], x.shape[3]).split([self.num_channels,5], dim=-1)
-        # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
-        # `masks` has shape: [batch_size, num_slots, width, height, 5].
+        # Undo combination of slot and batch dimension
+        x = x.reshape(batch_size, -1, x.shape[1], x.shape[2], x.shape[3])
 
-        num_frames = self.num_channels // 3
-        recons_frames = recons.view(batch_size, self.num_slots, x.shape[1], x.shape[2], num_frames, 3)
-        recons_frames = recons_frames.permute(0, 4, 1, 2, 3, 5)  # [batch_size, num_frames, num_slots, width, height, 3]
+        recons, masks = x.split([self.num_channels*self.num_frames,self.num_frames], dim=-1)
+        # `recons` has shape: [batch_size, num_slots, width, height, num_channels*num_frames].
+        # `masks` has shape: [batch_size, num_slots, width, height, num_frames].
 
-        masks_frames = masks.unsqueeze(-1)
-        masks_frames = masks_frames.permute(0, 4, 1, 2, 3, 5)  # [batch_size, num_frames, num_slots, width, height, 1]
+        # Reconstruct channels
+        recons = recons.view(batch_size, self.num_slots, width, height, self.num_frames, self.num_channels)
+        recons = recons.permute(0,4,1,2,3,5)  # [batch_size, num_frames, num_slots, width, height, num_channels]
+        masks = masks.unsqueeze(-1)
+        masks = masks.permute(0,4,1,2,3,5)  # [batch_size, num_frames, num_slots, width, height, 1]
 
         # Normalize alpha masks over slots.
-        masks_frames = nn.Softmax(dim=2)(masks_frames)  # + 1e-8
+        masks = nn.Softmax(dim=2)(masks)  # + 1e-8
         
-        recon_combined = torch.sum(recons_frames * masks_frames, dim=2)  # Recombine image.
+        recon_combined = torch.sum(recons * masks, dim=2)  # Recombine image.
         recon_combined = recon_combined.permute(0,1,4,2,3)
         # `recon_combined` has shape: [batch_size, num_frames, 3, width, height].
 
-        masks_frames = masks_frames.squeeze()  # [batch_size, num_frames, width, height]
+        masks = masks.squeeze(-1)  # [batch_size, num_frames, width, height]
+        if self.num_frames == 1:
+            recon_combined = recon_combined.squeeze(1)
+            masks = masks.squeeze(1)
+        else:
+            recon_combined = recon_combined.reshape(batch_size, -1, height, width)
 
-        return recon_combined, recons_frames, masks_frames, slots
+
+        return recon_combined, recons, masks, slots
 
 class ProjectionHead(nn.Module):
     """
@@ -299,102 +413,3 @@ class DisentangledSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
             z_i = p(slots) # shape: [batch_size, num_slots]
             z[:, :, i] = z_i
         return z
-
-
-# TODO: can the following Encoder and Decoder classes be removed?
-
-class SlotAttentionEncoder(nn.Module):
-    def __init__(self, resolution, num_slots, num_iterations, slots_dim, encdec_dim):
-        """Builds the Slot Attention-based auto-encoder.
-        Args:
-        resolution: Tuple of integers specifying width and height of input image.
-        num_slots: Number of slots in Slot Attention.
-        num_iterations: Number of iterations in Slot Attention.
-        """
-        super().__init__()
-        self.slots_dim = slots_dim
-        self.encdec_dim = encdec_dim
-        self.resolution = resolution
-        self.num_slots = num_slots
-        self.num_iterations = num_iterations
-
-        self.encoder_cnn = Encoder(self.encdec_dim, self.resolution)
-
-        self.fc1 = nn.Linear(encdec_dim, encdec_dim)
-        self.fc2 = nn.Linear(encdec_dim, encdec_dim)
-
-        self.slot_attention = SlotAttention(
-            num_slots=self.num_slots,
-            dim=self.slots_dim,
-            encdec_dim=self.encdec_dim,
-            iters = self.num_iterations,
-            eps = 1e-8, 
-            hidden_dim = 128)
-
-    def forward(self, image):
-        # `image` has shape: [batch_size, num_channels, width, height].
-
-        # Convolutional encoder with position embedding.
-        x = self.encoder_cnn(image)  # CNN Backbone.
-        x = nn.LayerNorm(x.shape[1:]).to(image.device)(x)
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.fc2(x)  # Feedforward network on set.
-        # `x` has shape: [batch_size, width*height, input_size].
-
-        # Slot Attention module.
-        slots = self.slot_attention(x)
-        # `slots` has shape: [batch_size, num_slots, slot_size].
-        # `attn_masks` has shape: [batch_size, num_slots, width*height].
-        #attn_masks = attn_masks.reshape((*attn_masks.shape[:2], *self.resolution, 1))
-        # `attn_masks` has shape: [batch_size, num_slots, width, height, 1].
-
-        # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
-        #slots = slots.reshape((-1, slots.shape[-1])).unsqueeze(1).unsqueeze(2)
-
-        return slots  
-
-class SlotAttentionDecoder(nn.Module):
-    def __init__(self, resolution, slots_dim, encdec_dim, small_arch):
-        """Builds the Slot Attention-based auto-encoder.
-        Args:
-        resolution: Tuple of integers specifying width and height of input image.
-        num_slots: Number of slots in Slot Attention.
-        num_iterations: Number of iterations in Slot Attention.
-        """
-        super().__init__()
-        self.slots_dim = slots_dim
-        self.encdec_dim = encdec_dim
-        self.resolution = resolution
-        self.small_arch = small_arch
-
-        self.decoder_cnn = Decoder(self.encdec_dim, self.slots_dim, self.resolution, small_arch)
-
-
-    def forward(self, slots, image_shape):
-        # `slots` has shape: [batch_size, num_slots, slot_size].
-
-        # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
-        slots = slots.reshape((-1, slots.shape[-1])).unsqueeze(1).unsqueeze(2)
-        if not self.small_arch:
-            slots = slots.repeat((1, 8, 8, 1))
-        else:
-            slots = slots.repeat((1, self.resolution[0], self.resolution[1], 1))
-        
-        # `slots` has shape: [batch_size*num_slots, width_init, height_init, slot_size].
-        x = self.decoder_cnn(slots)
-        # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
-
-        # Undo combination of slot and batch dimension; split alpha masks.
-        recons, masks = x.reshape(image_shape[0], -1, x.shape[1], x.shape[2], x.shape[3]).split([3,1], dim=-1)
-        # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
-        # `masks` has shape: [batch_size, num_slots, width, height, 1].
-
-        # Normalize alpha masks over slots.
-        masks = nn.Softmax(dim=1)(masks)  # + 1e-8
-        
-        recon_combined = torch.sum(recons * masks, dim=1)  # Recombine image.
-        recon_combined = recon_combined.permute(0,3,1,2)
-        # `recon_combined` has shape: [batch_size, num_channels, width, height].
-
-        return recon_combined, recons, masks, slots

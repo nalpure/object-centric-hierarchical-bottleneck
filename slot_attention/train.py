@@ -55,6 +55,7 @@ parser.add_argument('--decay_rates', default=[0.5], type=list, help='Rate for th
 parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
 parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
 parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
+parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder dimension size')
 
 # Further disentanglement parameters
 parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
@@ -196,7 +197,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             total_loss = 0
 
             obs = batch[0].to(device)   # [B, C, H, W]
-            obs_frames = obs.view(obs.shape[0], args["stacked_frames"], args["channels_per_frame"], obs.shape[2], obs.shape[3]) 
+            #obs_frames = obs.view(obs.shape[0], args["stacked_frames"], args["channels_per_frame"], obs.shape[2], obs.shape[3]) 
             #obs_frames shape is [B, stacked_frames, 3, H, W]
             if TRAINING_NOISE:
                 obs += (torch.randint(0, 3, (1,)) > 0) * 0.5 * torch.rand((1, obs.shape[1], 1, 1)).clip(0, 1)
@@ -205,7 +206,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             recon_combined, recons, masks, _ = model.decode(slots_obs)
 
             if reconstruct:
-                recon_loss = criterion(recon_combined, obs_frames)
+                recon_loss = criterion(recon_combined, obs)
                 epoch_recon_loss += recon_loss.item()
                 total_loss += recon_loss
 
@@ -312,12 +313,12 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
         
         model = SlotAttentionAutoEncoder(
             tuple(args["resolution"]),
+            args["stacked_frames"],
             args["num_slots"],
-            args["stacked_frames"] * args["channels_per_frame"],
+            args["channels_per_frame"],
             args["num_iterations"],
             args["slots_dim"],
-            32 if args["small_arch"] else 64,
-            args["small_arch"]
+            args["encdec_dim"]
         )
     elif objective == 'PH' or objective == 'SA_disentangled':
         if args["latent_dim"] is None:
