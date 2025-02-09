@@ -13,7 +13,8 @@ from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 
-from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
+from slot_attention.AE import SlotAttentionAutoEncoder
+from slot_attention.disentangled_AE import DisentangledSlotAttentionAutoEncoder, disentanglement_loss
 from utils import ObservationDataset, PerturbationDataset, log_progress, set_seed
 
 
@@ -33,7 +34,6 @@ parser.add_argument('--val_paths', default=None, type=list, help='Optional: List
 parser.add_argument('--test_path', default='spriteworld/spriteworld/test_data', type=str, help='Path to the training data')
 parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
 parser.add_argument('--resolution', default=[35, 35], type=list)
-parser.add_argument('--small_arch', action='store_true', help='if true set the encoder/decoder dim to 32, 64 otherwise')
 parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
 parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 parser.add_argument('--num_workers', default=0, type=int, help='number of workers for loading data')
@@ -80,18 +80,18 @@ if args["config"] is not None:
             warnings.warn(f"{key} is not a valid parameter")
 
 def main():
+    assert_configs()
+    set_seed(args['seed'])
+
     train_SA = args["train_SA"]
     train_PH = args["train_PH"]
     train_SA_disentangled = args["train_SA_disentangled"]
     init_ckpt = args["init_ckpt"]
-    set_seed(args['seed'])
+    
     completed_objectives = 0
 
     if args['val_paths']:
         warnings.warn('A validation path was specified but will not be used.')
-
-    if train_SA + train_PH + train_SA_disentangled < 1:
-        raise ValueError("At least one training objective must be set to true.")
     
     print("Loading training data...")
 
@@ -104,8 +104,6 @@ def main():
     print(f"Finished loading all {args['batch_size'] * len(train_dataloader)} training samples.")
     
     if train_SA:
-        if init_ckpt:
-            raise ValueError("Loading of model weights is only supported for disentangling pre-trained models, not to continue interrupted training.")
         model, optim = initialize_model('SA', lr=args["learning_rates"][completed_objectives])
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA.ckpt"
 
@@ -125,10 +123,7 @@ def main():
         init_ckpt = ckpt_path
         completed_objectives += 1
     
-    if train_PH:
-        if init_ckpt is None:
-            raise ValueError("Projection training requires a pre-trained model.")
-        
+    if train_PH:        
         model, optim = initialize_model('PH', init_ckpt, lr=args["learning_rates"][completed_objectives])
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_PH.ckpt"
 
@@ -179,9 +174,6 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     @param train_dataloader: torch.utils.data.DataLoader
         DataLoader for the training dataset.
     """
-    if reconstruct + disentangle < 1:
-        raise ValueError("At least one loss function must be set to true.")
-
     ckpt_dir = os.path.dirname(ckpt_path)
     if not exists(ckpt_dir):
         makedirs(ckpt_dir)
@@ -213,8 +205,14 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             context_manager = autocast(device_type=device.type) if mixed_precision else contextlib.nullcontext()
             
             with context_manager:
-                slots_obs = model.encode(obs)
-                recon_combined, recons, masks, _ = model.decode(slots_obs)
+                if reconstruct and not disentangle:
+                     recon_combined, recons, masks, slots = model(obs)[:4]
+                elif reconstruct and disentangle:
+                    recon_combined, recons, masks, slots, z_obs = model(obs)
+                elif not reconstruct and disentangle:
+                    z_obs = model(obs, reconstruct=False)
+                else:
+                    raise ValueError("At least one loss function must be set to true.")
 
                 if reconstruct:
                     recon_loss = criterion(recon_combined, obs)
@@ -222,14 +220,11 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                     total_loss += recon_loss
 
                 if disentangle:
-                    _, perturbed, magnitudes, _, _ = batch
-                    perturbed = perturbed.to(device)
+                    _, obs_perturbed, magnitudes, _, _ = batch
+                    obs_perturbed = obs_perturbed.to(device)
                     magnitudes = magnitudes.to(device)
 
-                    slots_perturbed = model.encode(perturbed)
-
-                    z_obs = model.get_latents(slots_obs)              # [B, num_slots, latent_dim]
-                    z_perturbed = model.get_latents(slots_perturbed)  # [B, num_slots, latent_dim]
+                    z_perturbed = model(obs_perturbed, reconstruct=False)   # [B, num_slots, latent_dim]
 
                     disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
                     disentangle_loss /= args["loss_ratio"]
@@ -283,34 +278,6 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     return model, loss_list
 
 
-def disentanglement_loss(z_obs, z_perturbed, magnitudes):
-    """
-    Returns the disentanglement loss for a batch of sample pairs.
-    Uses matching to calculate: (z_perturbed - (z_obs + delta)).
-
-    @param z_obs: torch.Tensor, [B, S, D]
-        Latent representation of the original observation.
-    @param z_perturbed: torch.Tensor, [B, S, D]
-        Latent representation of the perturbed observation.
-    @param magnitudes: torch.Tensor, [B]
-        Magnitude of the perturbation.
-    """
-    latent_dim = z_obs.shape[2]
-
-    eye = torch.eye(latent_dim, device=device)
-    deltas = eye.unsqueeze(0) * magnitudes[:, None, None]               # [B, D, D]
-
-    z_obs_expanded = z_obs.unsqueeze(2).unsqueeze(2)                    # [B, S, 1, 1, D]
-    z_perturbed_expanded = z_perturbed.unsqueeze(1).unsqueeze(3)        # [B, 1, S, 1, D]
-    deltas_expanded = deltas.unsqueeze(1).unsqueeze(1)                  # [B, 1, 1, D, D]
-
-    diff = z_perturbed_expanded - (z_obs_expanded + deltas_expanded)     # [B, S, S, D, D]
-    diff_norm = torch.norm(diff, dim=-1)                                        # [B, S, S, D]
-    losses = diff_norm.min(dim=-1).values.min(dim=-1).values.min(dim=-1).values # [B]
-
-    return losses.sum()
-
-
 def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
     """
     Initialize the model and optimizer for the given objective.
@@ -321,9 +288,6 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
     @param ckpt: str
         Path to a checkpoint to load model weights from.
     """
-    if objective == 'PH' and ckpt is None:
-        raise ValueError("Training of projection heads requires pre-trained slot attention model.")
-
     if objective == 'SA':
         if args["latent_dim"]:
             warnings.warn('Latent dimensionality was specified but will not be used.')
@@ -331,24 +295,21 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
         model = SlotAttentionAutoEncoder(
             tuple(args["resolution"]),
             args["stacked_frames"],
-            args["num_slots"],
             args["channels_per_frame"],
+            args["num_slots"],
             args["num_iterations"],
             args["slots_dim"],
             args["encdec_dim"]
         )
     elif objective == 'PH' or objective == 'SA_disentangled':
-        if args["latent_dim"] is None:
-            raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
-        
         model = DisentangledSlotAttentionAutoEncoder(
             tuple(args["resolution"]),
+            args["stacked_frames"],
+            args["channels_per_frame"],
             args["num_slots"],
-            args["stacked_frames"] * args["channels_per_frame"],
             args["num_iterations"],
             args["slots_dim"],
-            32 if args["small_arch"] else 64,
-            args["small_arch"],
+            args["encdec_dim"],
             args["latent_dim"]
         )
     else:
@@ -405,6 +366,40 @@ def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
     
     return LambdaLR(optimizer, lr_lambda)
 
+
+def assert_configs():
+    if args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"] <= 1:
+        raise ValueError("At least one training objective must be set to true.")
+    
+    if args["train_PH"] and args["init_ckpt"] is None:
+        raise ValueError("Training of projection heads requires a pre-trained model.")
+    
+    if args["train_SA_disentangled"] and args["latent_dim"] is None:
+        raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
+    
+    if args["init_ckpt"] and args["train_SA"]:
+        raise ValueError("Loading of model weights is only supported for disentangling pre-trained models, not to continue interrupted training.")
+    
+    if args["init_ckpt"] and not exists(args["init_ckpt"]):
+        raise ValueError("Specified checkpoint does not exist.")
+    
+    if not args["init_ckpt"] and args["train_PH"]:
+        raise ValueError("Training of projection heads requires a pre-trained model.")
+    
+    for key in ["num_epochs", "learning_rates", "warmup_steps", "decay_steps", "decay_rates"]:
+        if not isinstance(args[key], list):
+            raise ValueError(f"{key} must be a list.")
+        num_objectives = args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"]
+        list_len = len(args[key])
+        if list_len != num_objectives:
+            raise ValueError(f"Length of {key} ({list_len}) must match the number of training objectives ({num_objectives}).")
+        
+    for key in ["latent_dim", "loss_ratio", "lr_ratio"]:
+        if args["train_SA_disentangled"] and args[key] is None:
+            raise Warning(f"Argument {key} was specified but will not be used.")
+        
+    if args["val_paths"] is not None:
+        raise Warning("Validation paths were specified but will not be used.")
 
 if __name__ == "__main__":
     main()

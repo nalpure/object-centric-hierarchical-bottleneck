@@ -4,11 +4,10 @@ from torch.utils import data
 import numpy as np
 import torch
 from torch.amp import autocast
-from slot_attention.slot_attention import DisentangledSlotAttentionAutoEncoder, SlotAttentionAutoEncoder
-import os
+from slot_attention.AE import SlotAttentionAutoEncoder
+from slot_attention.disentangled_AE import DisentangledSlotAttentionAutoEncoder
 import matplotlib.pyplot as plt
 import json
-from scipy.ndimage import label, sum_labels
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

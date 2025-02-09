@@ -6,6 +6,7 @@ checkpoints
 tb_logs
 *.pyc
 requirements.txt
+settings.json
 *.log
 *.out
 *.sh
