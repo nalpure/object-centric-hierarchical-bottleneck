@@ -1,29 +1,4 @@
 {
-    "1F_implicit_fast":{
-        "train_path": "data/slipscape/1F_3sph_4000ep_s0.h5",
-        "test_path": "data/slipscape/1F_3sph_10ep_s2.h5",
-        "ckpt_path": "slot_attention/checkpoints/slipscape/",
-        "hdf5_format": "HWC",
-        "stacked_frames": 1,
-        "channels_per_frame": 3,
-        "resolution": [
-            64,
-            64
-        ],
-        "num_slots": 4,
-        "num_iterations": 3,
-        "slots_dim": 64,
-        "batch_size": 64,
-        "encdec_dim": 32,
-        "small_arch": true,
-        "learning_rates": [0.0005],
-        "num_epochs": [300],
-        "warmup_steps": [20],
-        "decay_steps": [200],
-        "train_SA": true,
-        "train_PH": false,
-        "train_SA_disentangled": false
-    },
     "5F_slow2":{
         "train_path": "data/slipscape/5F_3sph_4000ep_s0.h5",
         "test_path": "data/slipscape/5F_3sph_10ep_s2.h5",
@@ -50,35 +25,36 @@
         "train_PH": false,
         "train_SA_disentangled": false
     },
-    "test":{
+    "5F_disentanglement":{
         "train_path": "data/slipscape/5F_3sph_10ep_s2.h5",
         "test_path": "data/slipscape/5F_3sph_10ep_s2.h5",
         "ckpt_path": "slot_attention/checkpoints/slipscape/",
+        "init_ckpt": "slot_attention/checkpoints/slipscape/5F_slow2_SA.ckpt",
         "hdf5_format": "HWC",
         "stacked_frames": 5,
         "channels_per_frame": 3,
         "resolution": [64, 64],
 
         "batch_size": 64,
-        "mixed_precision": false,
+        "mixed_precision": true,
         "encdec_dim": 32,
 
-        "train_SA": true,
+        "train_SA": false,
         "train_PH": false,
         "train_SA_disentangled": true,
 
-        "learning_rates": [0.0005,0.0005],
-        "num_epochs": [10,10],
-        "warmup_steps": [10,10],
-        "decay_steps": [100,100],
-        "decay_rates": [0.5, 0.5],
+        "learning_rates": [0.0005],
+        "num_epochs": [10],
+        "warmup_steps": [10],
+        "decay_steps": [100],
+        "decay_rates": [0.5],
 
         "num_slots": 4,
         "slots_dim": 64,
         "num_iterations": 3,
 
         "latent_dim": 5,
-        "loss_ratio": 100,
-        "lr_ratio": 0.1
+        "loss_multipliers": [1000,1,1],
+        "lr_multiplier": 0.1
     }
 }

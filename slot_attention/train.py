@@ -103,22 +103,26 @@ def main():
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=args["num_workers"], drop_last=True)
     print(f"Finished loading all {args['batch_size'] * len(train_dataloader)} training samples.")
     
-    if train_SA:
-        model, optim = initialize_model('SA', lr=args["learning_rates"][completed_objectives])
-        ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA.ckpt"
-
-        print("Training slot attention model...")
-        
+    model, optim, ckpt_path = None, None, None
+    
+    def train_model(reconstruct, disentangle):
         train(model, optim, train_dataloader, 
             args["num_epochs"][completed_objectives],
             args["warmup_steps"][completed_objectives], 
             args["decay_steps"][completed_objectives], 
             args["decay_rates"][completed_objectives], 
-            ckpt_path,
             mixed_precision=args["mixed_precision"],
-            reconstruct=True,
-            disentangle=False
+            ckpt_path=ckpt_path,
+            reconstruct=reconstruct,
+            disentangle=disentangle
         )
+
+    if train_SA:
+        model, optim = initialize_model('SA', lr=args["learning_rates"][completed_objectives])
+        ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA.ckpt"
+        
+        print("Training slot attention model...")
+        train_model(reconstruct=True, disentangle=False)
         
         init_ckpt = ckpt_path
         completed_objectives += 1
@@ -128,17 +132,7 @@ def main():
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_PH.ckpt"
 
         print("Training projection head...")
-        
-        train(model, optim, train_dataloader, 
-            args["num_epochs"][completed_objectives],
-            args["warmup_steps"][completed_objectives], 
-            args["decay_steps"][completed_objectives], 
-            args["decay_rates"][completed_objectives], 
-            ckpt_path,
-            mixed_precision=args["mixed_precision"],
-            reconstruct=False,
-            disentangle=True
-        )
+        train_model(reconstruct=False, disentangle=True)
 
         init_ckpt = ckpt_path
         completed_objectives += 1
@@ -148,19 +142,12 @@ def main():
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA_disentangled.ckpt"
 
         print("Training disentangled slot attention model...")
-        
-        train(model, optim, train_dataloader, 
-            args["num_epochs"][completed_objectives],
-            args["warmup_steps"][completed_objectives], 
-            args["decay_steps"][completed_objectives], 
-            args["decay_rates"][completed_objectives], 
-            ckpt_path,
-            mixed_precision=args["mixed_precision"],
-            reconstruct=True,
-            disentangle=True
-        )
+        train_model(reconstruct=True, disentangle=True)
     
     print("Completed all objectives.")
+
+
+    
 
 
 def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, mixed_precision, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
