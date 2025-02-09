@@ -14,7 +14,7 @@ from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 
 from slot_attention.AE import SlotAttentionAutoEncoder
-from slot_attention.disentangled_AE import DisentangledSlotAttentionAutoEncoder, disentanglement_loss
+from slot_attention.disentangled_AE import DisentangledSlotAttentionAutoEncoder, perturbation_matching_loss, latent_similarity_loss
 from utils import ObservationDataset, PerturbationDataset, log_progress, set_seed
 
 
@@ -191,7 +191,8 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     
     for epoch in range(1, num_epochs + 1): 
         epoch_recon_loss = 0
-        epoch_disentangle_loss = 0
+        epoch_matching_loss = 0
+        epoch_similarity_loss = 0
         
         for batch in train_dataloader:
             total_loss = 0
@@ -224,12 +225,18 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                     obs_perturbed = obs_perturbed.to(device)
                     magnitudes = magnitudes.to(device)
 
-                    z_perturbed = model(obs_perturbed, reconstruct=False)   # [B, num_slots, latent_dim]
+                    z_perturbed = model(obs_perturbed, reconstruct=False)   
+                    # z_perturbed has shape: [B, num_slots, latent_dim]
 
-                    disentangle_loss = disentanglement_loss(z_obs, z_perturbed, magnitudes)
-                    disentangle_loss /= args["loss_ratio"]
-                    epoch_disentangle_loss += disentangle_loss.item()
-                    total_loss += disentangle_loss
+                    matching_loss = perturbation_matching_loss(z_obs, z_perturbed, magnitudes)
+                    similarity_loss = latent_similarity_loss(z_obs)
+
+                    matching_loss /= args["loss_ratio"]
+                    similarity_loss /= args["loss_ratio"]
+
+                    epoch_matching_loss += matching_loss.item()
+                    epoch_similarity_loss += similarity_loss.item()
+                    total_loss += matching_loss
 
             optimizer.zero_grad()
             current_step += 1
@@ -246,17 +253,31 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         current_lr = scheduler.get_last_lr()
 
         epoch_recon_loss /= len(train_dataloader)
-        epoch_disentangle_loss /= len(train_dataloader)
-        epoch_total_loss = epoch_recon_loss + epoch_disentangle_loss
+        epoch_matching_loss /= len(train_dataloader)
+        epoch_similarity_loss /= len(train_dataloader)
+        epoch_total_loss = epoch_recon_loss + epoch_matching_loss + epoch_similarity_loss
         loss_list.append(epoch_total_loss)
 
         if verbose:
             if disentangle and reconstruct:
-                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, Disentangle loss: {epoch_disentangle_loss:.6f}, total loss: {epoch_total_loss:.6f}, lr: {current_lr[0]:.6f} / {current_lr[1]:.6f}'
+                additional_msg = (
+                    f'Reconstruction: {epoch_recon_loss:.6f}, '
+                    f'Matching: {epoch_matching_loss:.6f}, '
+                    f'Similarity: {epoch_similarity_loss:.6f}, '
+                    f'Total: {epoch_total_loss:.6f}, '
+                    f'lr: {current_lr[0]:.6f} / {current_lr[1]:.6f}'
+                )
             elif disentangle:
-                additional_msg = f'Disentangle loss: {epoch_disentangle_loss:.6f}, lr: {current_lr[0]:.6f}'
+                additional_msg = (
+                    f'Matching: {epoch_matching_loss:.6f}, '
+                    f'Similarity: {similarity_loss:.6f}, '
+                    f'lr: {current_lr[0]:.6f}'
+                )
             elif reconstruct:
-                additional_msg = f'Reconstruction loss: {epoch_recon_loss:.6f}, lr: {current_lr[0]:.6f}'
+                additional_msg = (
+                    f'Reconstruction: {epoch_recon_loss:.6f}, '
+                    f'lr: {current_lr[0]:.6f}'
+                )
 
             log_progress(epoch, num_epochs, start, additional_msg)
 
