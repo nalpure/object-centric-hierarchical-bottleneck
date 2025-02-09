@@ -63,8 +63,8 @@ parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder 
 
 # Further disentanglement parameters
 parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
-parser.add_argument('--loss_ratio', default=100, type=int, help='Ratio of reconstruction loss to disentanglement loss. Higher values favor reconstruction loss.')
-parser.add_argument('--lr_ratio', default=0.25, type=float, help='Ratio of slot parameters learning rate to disentanglement parameters learning rate. Higher values favor reconstruction parameters.')
+parser.add_argument('--loss_multipliers', default=[10,1,1], type=list, help='Multipliers for the reconstruction, matching and similarity loss.')
+parser.add_argument('--lr_multiplier', default=0.25, type=float, help='Multiplier for the learning rate of the projection heads.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -195,6 +195,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         epoch_similarity_loss = 0
         
         for batch in train_dataloader:
+            rec_loss_mult, match_loss_mult, sim_loss_mult = args["loss_multipliers"] if disentangle else (1, 0, 0)
             total_loss = 0
 
             obs = batch[0].to(device)   # [B, C, H, W]
@@ -216,7 +217,8 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                     raise ValueError("At least one loss function must be set to true.")
 
                 if reconstruct:
-                    recon_loss = criterion(recon_combined, obs)
+                    recon_loss = criterion(recon_combined, obs) 
+                    recon_loss *= rec_loss_mult
                     epoch_recon_loss += recon_loss.item()
                     total_loss += recon_loss
 
@@ -231,8 +233,8 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                     matching_loss = perturbation_matching_loss(z_obs, z_perturbed, magnitudes)
                     similarity_loss = latent_similarity_loss(z_obs)
 
-                    matching_loss /= args["loss_ratio"]
-                    similarity_loss /= args["loss_ratio"]
+                    matching_loss *= match_loss_mult
+                    similarity_loss *= sim_loss_mult
 
                     epoch_matching_loss += matching_loss.item()
                     epoch_similarity_loss += similarity_loss.item()
@@ -309,10 +311,7 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
     @param ckpt: str
         Path to a checkpoint to load model weights from.
     """
-    if objective == 'SA':
-        if args["latent_dim"]:
-            warnings.warn('Latent dimensionality was specified but will not be used.')
-        
+    if objective == 'SA':        
         model = SlotAttentionAutoEncoder(
             tuple(args["resolution"]),
             args["stacked_frames"],
@@ -355,7 +354,7 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
     elif objective == 'PH':
         optim = initialize_optimizer([{'params': PH_params, 'lr': lr}])
     else:
-        optim = initialize_optimizer([{'params': SA_params, 'lr': lr * args["lr_ratio"]}, {'params': PH_params, 'lr': lr}])
+        optim = initialize_optimizer([{'params': SA_params, 'lr': lr * args["lr_multiplier"]}, {'params': PH_params, 'lr': lr}])
 
     return model, optim
 
@@ -389,14 +388,17 @@ def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
 
 
 def assert_configs():
-    if args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"] <= 1:
+    if args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"] < 1:
         raise ValueError("At least one training objective must be set to true.")
     
     if args["train_PH"] and args["init_ckpt"] is None:
         raise ValueError("Training of projection heads requires a pre-trained model.")
     
-    if args["train_SA_disentangled"] and args["latent_dim"] is None:
-        raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
+    if args["train_PH"] + args["train_SA_disentangled"] >= 1:
+        if args["latent_dim"] is None:
+            raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
+        if len(args["loss_multipliers"]) != 3:
+            raise ValueError("Specify the loss multipliers for reconstruction, matching and similarity loss.")
     
     if args["init_ckpt"] and args["train_SA"]:
         raise ValueError("Loading of model weights is only supported for disentangling pre-trained models, not to continue interrupted training.")
@@ -415,7 +417,9 @@ def assert_configs():
         if list_len != num_objectives:
             raise ValueError(f"Length of {key} ({list_len}) must match the number of training objectives ({num_objectives}).")
         
-    for key in ["latent_dim", "loss_ratio", "lr_ratio"]:
+    
+        
+    for key in ["latent_dim", "loss_multipliers", "lr_multiplier"]:
         if args["train_SA_disentangled"] and args[key] is None:
             raise Warning(f"Argument {key} was specified but will not be used.")
         
