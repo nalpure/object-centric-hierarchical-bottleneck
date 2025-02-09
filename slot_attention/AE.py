@@ -28,6 +28,21 @@ def spatial_broadcast(slots, resolution):
     grid = slots.repeat((1, resolution[0], resolution[1], 1))
     return grid
 
+def background_slot(attention_scores, n_bg_slots=1):
+        # attention_scores: [batch_size, num_slots, height * width]
+        n_slots = attention_scores.shape[1]
+        device = attention_scores.device
+        # There can be more than 1 background slot, so we have to find the n_slots-n_balls masks with the least std and 
+        # don't let them to be selected by the LP solution
+        _, background_masks_sorted_index_asc = torch.sort(torch.std(attention_scores, dim=-1), -1, descending=False)
+        background_masks = []
+        for i in range(n_bg_slots):
+            background_slot_indices = background_masks_sorted_index_asc[:, i]
+            background_slot_mask = torch.nn.functional.one_hot(background_slot_indices, num_classes=n_slots).bool() # [bs, n_slots]
+            background_masks.append(background_slot_mask)
+
+        return background_masks
+
 
 """Adds soft positional embedding with learnable projection."""
 class SoftPositionEmbed(nn.Module):
@@ -128,10 +143,10 @@ class SlotAttentionAutoEncoder(nn.Module):
             eps = 1e-8, 
             mlp_hidden_size = 128)
 
-    def forward(self, image):
-        return self.decode(self.encode(image))
+    def forward(self, image, slots_init=None):
+        return self.decode(self.encode(image, slots_init))
 
-    def encode(self, image):
+    def encode(self, image, slots_init=None):
         # `image` has shape: [batch_size, num_channels, width, height].
 
         # Convolutional encoder with position embedding.
@@ -144,7 +159,7 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         # Slot Attention module.
         # `slots` has shape: [batch_size, num_slots, slot_size].
-        slots, attention_scores, slots_init = self.slot_attention(x)
+        slots, attention_scores = self.slot_attention(x, slots_init)
         return slots
     
     def decode(self, slots):
