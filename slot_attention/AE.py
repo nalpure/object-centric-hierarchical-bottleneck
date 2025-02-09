@@ -129,7 +129,7 @@ class SlotAttentionAutoEncoder(nn.Module):
             mlp_hidden_size = 128)
 
     def forward(self, image):
-        return self.decode(self.encode(image))
+        return self.decode(self.encode(image)[0])
 
     def encode(self, image):
         # `image` has shape: [batch_size, num_channels, width, height].
@@ -144,8 +144,8 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         # Slot Attention module.
         # `slots` has shape: [batch_size, num_slots, slot_size].
-        slots, attention_scores, slots_init = self.slot_attention(x)
-        return slots
+        slots, attention_scores = self.slot_attention(x)
+        return slots, attention_scores
     
     def decode(self, slots):
         # `slots` has shape: [batch_size, num_slots, slot_size].

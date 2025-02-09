@@ -47,6 +47,7 @@ parser.add_argument('--mixed_precision', default=False, action='store_true', hel
 parser.add_argument('--train_SA', default=True, action='store_true', help='If true, trains a slot attention model.')
 parser.add_argument('--train_PH', default=False, action='store_true', help='If true, trains the projection heads on a pre-trained slot attention model.')
 parser.add_argument('--train_SA_disentangled', default=False, action='store_true', help='If true, trains a disentangled slot attention model using reconstruction and disentanglement loss.')
+parser.add_argument('--train_SA_latent', default=False, action='store_true', help='If true, trains a slot attention model which reconstructs using a latent.')
 
 # Parameters for each objective
 parser.add_argument('--num_epochs', default=[100], type=list, help='number of epochs for each objective')
@@ -87,6 +88,7 @@ def main():
     train_SA = args["train_SA"]
     train_PH = args["train_PH"]
     train_SA_disentangled = args["train_SA_disentangled"]
+    train_SA_latent = args["train_SA_latent"]
     init_ckpt = args["init_ckpt"]
     
     completed_objectives = 0
@@ -96,7 +98,7 @@ def main():
     
     print("Loading training data...")
 
-    if train_PH or train_SA_disentangled:
+    if train_PH or train_SA_disentangled or train_SA_latent:
         dataset = PerturbationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
     else:
         dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
@@ -373,13 +375,13 @@ def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
 
 
 def assert_configs():
-    if args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"] < 1:
+    if args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"] + args["train_SA_latent"] < 1:
         raise ValueError("At least one training objective must be set to true.")
     
     if args["train_PH"] and args["init_ckpt"] is None:
         raise ValueError("Training of projection heads requires a pre-trained model.")
     
-    if args["train_PH"] + args["train_SA_disentangled"] >= 1:
+    if args["train_PH"] + args["train_SA_disentangled"] + args["train_SA_latent"]>= 1:
         if args["latent_dim"] is None:
             raise ValueError("Specify the latent dimensionality when disentanglement loss is used.")
         if len(args["loss_multipliers"]) != 3:
@@ -397,7 +399,7 @@ def assert_configs():
     for key in ["num_epochs", "learning_rates", "warmup_steps", "decay_steps", "decay_rates"]:
         if not isinstance(args[key], list):
             raise ValueError(f"{key} must be a list.")
-        num_objectives = args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"]
+        num_objectives = args["train_SA"] + args["train_PH"] + args["train_SA_disentangled"] + args["train_SA_latent"]
         list_len = len(args[key])
         if list_len != num_objectives:
             raise ValueError(f"Length of {key} ({list_len}) must match the number of training objectives ({num_objectives}).")
