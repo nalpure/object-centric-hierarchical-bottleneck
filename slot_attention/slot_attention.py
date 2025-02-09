@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from einops import reduce
 
 class SlotAttention(nn.Module):
-    def __init__(self, num_slots, slot_size, in_features, iters = 3, eps = 1e-8, mlp_hidden_size = 128, init_slots=True):
+    def __init__(self, num_slots, slot_size, in_features, iters = 3, eps = 1e-8, mlp_hidden_size = 128):
         super().__init__()
 
         self.in_features = in_features
@@ -95,11 +95,12 @@ class SlotAttention(nn.Module):
         # return only input variables which changed
         return slots, attn
 
-    def forward(self, inputs: torch.Tensor, num_slots=None, num_iterations=None, slots_init=None):
+    def forward(self, inputs: torch.Tensor, slots_init=None):
         # `inputs` has shape [batch_size, num_inputs, inputs_size]. example: [256, 4096, 64]
         batch_size, num_inputs, inputs_size = inputs.shape
-        n_s = num_slots if num_slots is not None else self.num_slots
-        n_i = num_iterations if num_iterations is not None else self.iters
+        n_s = self.num_slots
+        n_i = self.iters
+
         inputs = self.norm_inputs(inputs)  # Apply layer norm to the input.
         k = self.project_k(inputs)  # Shape: [batch_size, num_inputs, slot_size].
         assert_shape(k.size(), (batch_size, num_inputs, self.slot_size))
@@ -121,10 +122,11 @@ class SlotAttention(nn.Module):
             slots, attn = self.step(slots, n_s, k, v, a, batch_size, num_inputs)
         
         slots = slots.detach() # detach for approx implicit diff
+        
+        # Final round of attention.
         slots, attn = self.step(slots, n_s, k, v, a, batch_size, num_inputs)            
 
-        slots_init = slots.clone()
-        return slots, attn.permute(0,2,1), slots_init # the last argument is None
+        return slots, attn.permute(0,2,1)
     
 @torch.jit.script
 def sinkhorn(

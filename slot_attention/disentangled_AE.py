@@ -37,8 +37,8 @@ class DisentangledSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
         self.projection_heads = nn.ModuleList(ProjectionHead(slots_dim) for _ in range(latent_dim))
 
 
-    def forward(self, image, reconstruct=True):
-        slots = self.encode(image)
+    def forward(self, image, reconstruct=True, init_slots=None):
+        slots = self.encode(image, init_slots)
         z = self.get_latents(slots)
 
         if reconstruct:

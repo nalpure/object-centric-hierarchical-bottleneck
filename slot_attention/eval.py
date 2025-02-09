@@ -53,15 +53,28 @@ def main():
     obs = batch[0].to(device)
 
     with torch.no_grad():
+        obs_forwarded = model(obs)    
+        recon_combined = obs_forwarded[0]
+        masks = obs_forwarded[2]
+
         if disentangled:
+            slots = obs_forwarded[3]
+            z_obs = obs_forwarded[4]
+
             _, obs_perturbed, magnitudes, _, properties = batch
             obs_perturbed = obs_perturbed.to(device)
             magnitudes = magnitudes.to(device)
-            recon_combined, _, masks, _, z_obs = model(obs)
-            z_perturbed = model(obs_perturbed, reconstruct=False)
+            
+            recon_combined_perturbed, _, masks_perturbed, _, z_perturbed = model(obs_perturbed, init_slots = slots)
+            obs_perturbed_frames = obs_perturbed.view(obs_perturbed.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
+            recon_combined_perturbed_frames = recon_combined_perturbed.view(recon_combined_perturbed.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
+            masks_perturbed_frames = masks_perturbed.view(masks_perturbed.shape[0], args['stacked_frames'], args['num_slots'], *args['resolution'])
+            
+            for i in range(args['num_output_figs']):
+                plot_frames(obs_perturbed_frames[i], masks_perturbed_frames[i], recon_combined_perturbed_frames[i], save_path=f"data/figures/perturbed{i}.png")
+            
             disentanglement_score(z_obs, z_perturbed, magnitudes, properties)
-        else:
-            recon_combined, _, masks, _ = model(obs)
+            
 
     # split into frames
     obs_frames = obs.view(obs.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
@@ -70,7 +83,7 @@ def main():
 
     # shape of recon_combined is [B, stacked_frames, 3, H, W] 
     for i in range(args['num_output_figs']):
-        plot_frames(obs_frames[i], masks_frames[i], recon_combined_frames[i], save_path=f"data/figures/separateMasks{i}.png")
+        plot_frames(obs_frames[i], masks_frames[i], recon_combined_frames[i], save_path=f"data/figures/original{i}.png")
         print(f"Loss {i}:", criterion(obs_frames[i], recon_combined_frames[i]).item())
 
     print("Overall loss: ", criterion(obs_frames, recon_combined_frames).item())
