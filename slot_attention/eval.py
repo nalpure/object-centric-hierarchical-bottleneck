@@ -21,7 +21,6 @@ parser.add_argument('--ckpt_path', default='checkpoints/3-body/', type=str, help
 parser.add_argument('--output_dir', default='data/figures/')
 parser.add_argument('--num_output_figs', default=3, type=int, help='desired number of output figures')
 parser.add_argument('--randomize_frame_order', default=False, type=bool, help='If true, reorders the frames in each frame stack randomly.')
-parser.add_argument('--disentangle', default=False, action='store_true', help='If true, adds disentanglement loss. Expects training data to include perturbations.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -43,39 +42,50 @@ if args['num_output_figs'] > args['batch_size']:
 def main():
     set_seed(args["seed"])
     disentangled = args["train_PH"] or args["train_SA_disentangled"]
-    model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}_SA.ckpt', disentangled) #TODO filename
+    model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}_SA_disentangled.ckpt', disentangled) #TODO filename
 
     print(f"Loading {'perturbation' if disentangled else 'observation'} test dataset: {args['test_path']}")
     TestDataclass = PerturbationDataset if disentangled else ObservationDataset 
     test_dataset = TestDataclass(hdf5_file=args["test_path"], hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
 
-    obs = next(iter(test_dataloader))[0].to(device)
-    recon_combined, _, masks, _ = model(obs)
+    batch = next(iter(test_dataloader))
+    obs = batch[0].to(device)
+
+    with torch.no_grad():
+        if disentangled:
+            _, obs_perturbed, magnitudes, _, properties = batch
+            obs_perturbed = obs_perturbed.to(device)
+            magnitudes = magnitudes.to(device)
+            recon_combined, _, masks, _, z_obs = model(obs)
+            z_perturbed = model(obs_perturbed, reconstruct=False)
+            disentanglement_score(z_obs, z_perturbed, magnitudes, properties)
+        else:
+            recon_combined, _, masks, _ = model(obs)
 
     # split into frames
-    obs = obs.view(obs.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
-    recon_combined = recon_combined.view(recon_combined.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
-    masks = masks.view(masks.shape[0], args['stacked_frames'], args['num_slots'], *args['resolution'])
+    obs_frames = obs.view(obs.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
+    recon_combined_frames = recon_combined.view(recon_combined.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
+    masks_frames = masks.view(masks.shape[0], args['stacked_frames'], args['num_slots'], *args['resolution'])
 
     # shape of recon_combined is [B, stacked_frames, 3, H, W] 
     for i in range(args['num_output_figs']):
-        plot_frames(obs[i], masks[i], recon_combined[i], save_path=f"data/figures/separateMasks{i}.png")
-        print(f"Loss {i}:", criterion(obs[i], recon_combined[i]).item())
+        plot_frames(obs_frames[i], masks_frames[i], recon_combined_frames[i], save_path=f"data/figures/separateMasks{i}.png")
+        print(f"Loss {i}:", criterion(obs_frames[i], recon_combined_frames[i]).item())
 
-    print("Overall loss: ", criterion(obs, recon_combined).item())
+    print("Overall loss: ", criterion(obs_frames, recon_combined_frames).item())
 
 def load_model(checkpoint_path, disentangled=False):
     print("Loading model:", checkpoint_path)
     if disentangled:
         model = DisentangledSlotAttentionAutoEncoder(
             tuple(args["resolution"]),
+            args["stacked_frames"],
+            args["channels_per_frame"],
             args["num_slots"],
-            args["stacked_frames"] * args["channels_per_frame"],
             args["num_iterations"],
             args["slots_dim"],
-            32 if args["small_arch"] else 64,
-            args["small_arch"],
+            args["encdec_dim"],
             args["latent_dim"]
         )
     else:
@@ -92,32 +102,6 @@ def load_model(checkpoint_path, disentangled=False):
     model.to(device)
     model.eval()
     return model
-
-
-def get_disentanglement_scores(model, dataloader, max_samples=100):
-    """
-    Calculate disentanglement scores for the model using the given dataloader.
-
-    Args:
-    - model (DisentangledSlotAttentionAutoEncoder): The model to evaluate.
-    - dataloader (torch.utils.data.DataLoader): The dataloader of the PerturbationDataset to use for evaluation.
-    """
-
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-
-            if batch_idx * args['batch_size'] > max_samples:
-                break
-
-            obs, perturbed, magnitudes, _, properties = batch
-            obs = obs.to(device)
-            perturbed = perturbed.to(device)
-            magnitudes = magnitudes.to(device)
-
-            latent_obs = model.get_latents(model.encode(obs))               # [B, num_slots, latent_dim]
-            latent_perturbed = model.get_latents(model.encode(perturbed))   # [B, num_slots, latent_dim]
-
-            disentanglement_score(latent_obs, latent_perturbed, magnitudes, properties)
 
 
 def disentanglement_score(z_obs, z_perturbed, magnitudes, properties):

@@ -82,7 +82,7 @@ def perturbation_matching_loss(z_obs, z_perturbed, magnitudes):
 
     return losses.sum()
 
-def latent_similarity_loss(z, bound=0.2):
+def latent_similarity_loss(z, margin=1.0):
     """
     Returns the average similarity loss between slot latent pairs.
     
@@ -106,7 +106,7 @@ def latent_similarity_loss(z, bound=0.2):
     L1_diffs = diffs.sum(dim=-1) # [B, S, S]
     
     # Compute hinge loss per pair: penalize if L1 difference is below 'bound'
-    loss_pairs = torch.clamp(bound - L1_diffs, min=0)
+    loss_pairs = torch.clamp(margin - L1_diffs, min=0)
     
     # Remove self-comparisons by zeroing the diagonal for each batch element.
     diag_mask = torch.eye(S, device=z.device, dtype=torch.bool).unsqueeze(0)  # shape [1, S, S]

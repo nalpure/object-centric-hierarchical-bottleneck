@@ -25,8 +25,8 @@
         "train_PH": false,
         "train_SA_disentangled": false
     },
-    "5F_disentanglement":{
-        "train_path": "data/slipscape/5F_3sph_10ep_s2.h5",
+    "5F_dis_margin":{
+        "train_path": "data/slipscape/5F_3sph_4000ep_s0.h5",
         "test_path": "data/slipscape/5F_3sph_10ep_s2.h5",
         "ckpt_path": "slot_attention/checkpoints/slipscape/",
         "init_ckpt": "slot_attention/checkpoints/slipscape/5F_slow2_SA.ckpt",
@@ -44,7 +44,7 @@
         "train_SA_disentangled": true,
 
         "learning_rates": [0.0005],
-        "num_epochs": [10],
+        "num_epochs": [200],
         "warmup_steps": [10],
         "decay_steps": [100],
         "decay_rates": [0.5],
@@ -54,7 +54,8 @@
         "num_iterations": 3,
 
         "latent_dim": 5,
-        "loss_multipliers": [1000,1,1],
-        "lr_multiplier": 0.1
+        "loss_multipliers": [100,1,1],
+        "lr_multiplier": 0.1,
+        "sim_margin": 1.0
     }
 }

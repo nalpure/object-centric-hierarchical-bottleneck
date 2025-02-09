@@ -65,6 +65,7 @@ parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder 
 parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
 parser.add_argument('--loss_multipliers', default=[10,1,1], type=list, help='Multipliers for the reconstruction, matching and similarity loss.')
 parser.add_argument('--lr_multiplier', default=0.25, type=float, help='Multiplier for the learning rate of the projection heads.')
+parser.add_argument('--sim_margin', default=0.5, type=float, help='Margin for the similarity loss.')
 
 args = parser.parse_args()
 args = vars(args)
@@ -147,9 +148,6 @@ def main():
     print("Completed all objectives.")
 
 
-    
-
-
 def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, mixed_precision, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
@@ -218,7 +216,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                     # z_perturbed has shape: [B, num_slots, latent_dim]
 
                     matching_loss = perturbation_matching_loss(z_obs, z_perturbed, magnitudes)
-                    similarity_loss = latent_similarity_loss(z_obs)
+                    similarity_loss = latent_similarity_loss(z_obs, args["sim_margin"])
 
                     matching_loss *= match_loss_mult
                     similarity_loss *= sim_loss_mult
@@ -406,7 +404,7 @@ def assert_configs():
         
     
         
-    for key in ["latent_dim", "loss_multipliers", "lr_multiplier"]:
+    for key in ["latent_dim", "loss_multipliers", "lr_multiplier", "sim_margin"]:
         if args["train_SA_disentangled"] and args[key] is None:
             raise Warning(f"Argument {key} was specified but will not be used.")
         
