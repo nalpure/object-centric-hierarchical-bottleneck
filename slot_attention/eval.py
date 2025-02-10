@@ -1,4 +1,5 @@
 import argparse
+from slot_attention.latent_AE import LatentSlotAttentionAutoEncoder
 from utils import ObservationDataset, PerturbationDataset, set_seed
 from torch.utils import data
 import numpy as np
@@ -42,7 +43,17 @@ if args['num_output_figs'] > args['batch_size']:
 def main():
     set_seed(args["seed"])
     disentangled = args["train_PH"] or args["train_SA_disentangled"]
-    model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}_SA_disentangled.ckpt', disentangled) #TODO filename
+
+    # TODO remove hardcoding
+    latent = True
+    if disentangled:
+        path_addition = "SA_disentangled"
+    elif latent:
+        path_addition = "SA_latent"
+    else:
+        path_addition = "SA"
+
+    model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}_{path_addition}.ckpt', disentangled, latent) #TODO filename
 
     print(f"Loading {'perturbation' if disentangled else 'observation'} test dataset: {args['test_path']}")
     TestDataclass = PerturbationDataset if disentangled else ObservationDataset 
@@ -88,9 +99,21 @@ def main():
 
     print("Overall loss: ", criterion(obs_frames, recon_combined_frames).item())
 
-def load_model(checkpoint_path, disentangled=False):
+def load_model(checkpoint_path, disentangled=False, latent=False):
     print("Loading model:", checkpoint_path)
-    if disentangled:
+
+    if latent:
+        model = LatentSlotAttentionAutoEncoder(
+            tuple(args["resolution"]),
+            args["stacked_frames"],
+            args["channels_per_frame"],
+            args["num_slots"],
+            args["num_iterations"],
+            args["slots_dim"],
+            args["encdec_dim"],
+            args["latent_dim"]
+        )
+    elif disentangled:
         model = DisentangledSlotAttentionAutoEncoder(
             tuple(args["resolution"]),
             args["stacked_frames"],

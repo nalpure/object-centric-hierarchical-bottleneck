@@ -8,14 +8,14 @@ from slot_attention.AE import SlotAttentionAutoEncoder
     
 class ObjectEncoder(nn.Module):
     """
-    Encoder for encoding of object slots to 1 latent space property.
+    Encoder for encoding of object slots to latent space properties.
     """
-    def __init__(self, slots_dim):
+    def __init__(self, slots_dim, feature_dim):
         super().__init__()
         self.fc1 = nn.Linear(slots_dim, 64, bias=True)
         self.fc2 = nn.Linear(64, 64, bias=True)
         self.fc3 = nn.Linear(64, 64, bias=True)
-        self.fc4 = nn.Linear(64, 1, bias=True)
+        self.fc4 = nn.Linear(64, feature_dim, bias=True)
 
     def forward(self, x):
         """
@@ -35,22 +35,20 @@ class ObjectEncoder(nn.Module):
 
 class ObjectDecoder(nn.Module):
     """
-    Decoder for decoding of object slots from 1 latent space property.
+    Decoder for decoding of object slots from latent space properties.
     """
-    def __init__(self, slots_dim):
+    def __init__(self, feature_dim, slots_dim):
         super().__init__()
-        self.fc1 = nn.Linear(1, 64, bias=True)
+        self.fc1 = nn.Linear(feature_dim, 64, bias=True)
         self.fc2 = nn.Linear(64, 64, bias=True)
         self.fc3 = nn.Linear(64, 64, bias=True)
         self.fc4 = nn.Linear(64, slots_dim, bias=True)
 
     def forward(self, x):
         """
-        Args: x: torch.Tensor of shape [batch_size, num_slots]
+        Args: x: torch.Tensor of shape [batch_size, num_slots, feature_dim]
         Returns: x: torch.Tensor of shape [batch_size, num_slots, slot_dim]
         """
-        batch_size, n_slots = x.shape
-        x = x.view(x.shape[0] * x.shape[1], 1)
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)
@@ -58,7 +56,6 @@ class ObjectDecoder(nn.Module):
         x = self.fc3(x)
         x = F.relu(x)
         x = self.fc4(x)
-        x = x.view(batch_size, n_slots, -1)
         return x
 
 
@@ -66,9 +63,11 @@ class LatentSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
     def __init__(self, resolution, num_frames, num_channels, num_slots, num_iterations, slots_dim, encdec_dim, latent_dim):
         super().__init__(resolution, num_frames, num_channels, num_slots, num_iterations, slots_dim, encdec_dim)
         
+        self.explicit_latent_dim = 3
+
         self.latent_dim = latent_dim
-        self.object_encoder = ObjectEncoder(slots_dim)
-        self.object_decoder = ObjectDecoder(slots_dim)
+        self.object_encoder = ObjectEncoder(slots_dim, self.explicit_latent_dim)
+        self.object_decoder = ObjectDecoder(self.explicit_latent_dim, slots_dim)
 
 
     def forward(self, image, reconstruct=True):
