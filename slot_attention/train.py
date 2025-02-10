@@ -270,6 +270,11 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                     f'Similarity: {similarity_loss:.6f}, '
                     f'lr: {current_lr[0]:.6f}'
                 )
+            elif latent:
+                additional_msg = (
+                    f'Reconstruction: {epoch_recon_loss:.6f}, '
+                    f'lr: {current_lr[0]:.6f} / {current_lr[1]:.6f}'
+                )
             elif reconstruct:
                 additional_msg = (
                     f'Reconstruction: {epoch_recon_loss:.6f}, '
@@ -352,13 +357,20 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
         if len(unexpected_keys) > 0:
             warnings.warn(f"Found {len(unexpected_keys)} unexpected keys.")
 
-    SA_params = [p for name, p in model.named_parameters() if 'projection' not in name]
+    # TODO: Instead of following, determine which parameters have been pretrained and only reduce their learning rate
+
+    SA_params = [p for name, p in model.named_parameters() if 'projection' not in name and 'object' not in name]
     PH_params = [p for name, p in model.named_parameters() if 'projection' in name]
+    latent_params = [p for name, p in model.named_parameters() if 'object' in name]
+
+    print(f"Training {objective} model with {len(SA_params)} slot attention, {len(PH_params)} projection head and {len(latent_params)} latent parameters.")
 
     if objective == 'SA':
         optim = initialize_optimizer([{'params': SA_params, 'lr': lr}])
     elif objective == 'PH':
         optim = initialize_optimizer([{'params': PH_params, 'lr': lr}])
+    elif objective == 'SA_latent':
+        optim = initialize_optimizer([{'params': SA_params, 'lr': lr * args["lr_multiplier"]}, {'params': latent_params, 'lr': lr}])
     else:
         optim = initialize_optimizer([{'params': SA_params, 'lr': lr * args["lr_multiplier"]}, {'params': PH_params, 'lr': lr}])
 
