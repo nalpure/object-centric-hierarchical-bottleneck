@@ -57,5 +57,39 @@
         "loss_multipliers": [100,1,1],
         "lr_multiplier": 0.1,
         "sim_margin": 1.0
+    },
+    "1F_latent":{
+        "train_path": "data/slipscape/1F_3sph_10ep_s2.h5",
+        "test_path": "data/slipscape/1F_3sph_10ep_s2.h5",
+        "ckpt_path": "slot_attention/checkpoints/latent/",
+        "init_ckpt": "slot_attention/checkpoints/slipscape/1F_implicit_fast_SA.ckpt",
+        "hdf5_format": "HWC",
+        "stacked_frames": 1,
+        "channels_per_frame": 3,
+        "resolution": [64, 64],
+
+        "batch_size": 64,
+        "mixed_precision": true,
+        "encdec_dim": 32,
+
+        "train_SA": false,
+        "train_PH": false,
+        "train_SA_disentangled": false,
+        "train_SA_latent": true,
+
+        "learning_rates": [0.0005],
+        "num_epochs": [200],
+        "warmup_steps": [10],
+        "decay_steps": [100],
+        "decay_rates": [0.5],
+
+        "num_slots": 4,
+        "slots_dim": 64,
+        "num_iterations": 3,
+
+        "latent_dim": 5,
+        "loss_multipliers": [100,1,1],
+        "lr_multiplier": 0.1,
+        "sim_margin": 1.0
     }
 }

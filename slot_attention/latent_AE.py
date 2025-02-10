@@ -5,20 +5,23 @@ import torch.nn.functional as F
 
 from slot_attention.AE import SlotAttentionAutoEncoder
 
-
-class ProjectionHead(nn.Module):
+    
+class ObjectEncoder(nn.Module):
     """
-    Projection head for projecting slot features to a single latent space property, as described in Mansouri et al. (2023).
-    Tuned for slot dimensionality of 64.
+    Encoder for encoding of object slots to 1 latent space property.
     """
     def __init__(self, slots_dim):
         super().__init__()
-        self.fc1 = nn.Linear(slots_dim, 32, bias=True)
-        self.fc2 = nn.Linear(32, 32, bias=True)
-        self.fc3 = nn.Linear(32, 16, bias=False)
-        self.fc4 = nn.Linear(16, 1, bias=False)
+        self.fc1 = nn.Linear(slots_dim, 64, bias=True)
+        self.fc2 = nn.Linear(64, 64, bias=True)
+        self.fc3 = nn.Linear(64, 64, bias=True)
+        self.fc4 = nn.Linear(64, 1, bias=True)
 
     def forward(self, x):
+        """
+        Args: x: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+        Returns: x: torch.Tensor of shape [batch_size, num_slots]
+        """
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)
@@ -26,96 +29,86 @@ class ProjectionHead(nn.Module):
         x = self.fc3(x)
         x = F.relu(x)
         x = self.fc4(x)
-        x = x.squeeze(-1) # shape: [batch_size, num_slots]
+        x = x.squeeze(-1) 
         return x
+    
+
+class ObjectDecoder(nn.Module):
+    """
+    Decoder for decoding of object slots from 1 latent space property.
+    """
+    def __init__(self, slots_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(1, 64, bias=True)
+        self.fc2 = nn.Linear(64, 64, bias=True)
+        self.fc3 = nn.Linear(64, 64, bias=True)
+        self.fc4 = nn.Linear(64, slots_dim, bias=True)
+
+    def forward(self, x):
+        """
+        Args: x: torch.Tensor of shape [batch_size, num_slots]
+        Returns: x: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+        """
+        batch_size, n_slots = x.shape
+        x = x.view(x.shape[0] * x.shape[1], 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = F.relu(x)
+        x = self.fc3(x)
+        x = F.relu(x)
+        x = self.fc4(x)
+        x = x.view(batch_size, n_slots, -1)
+        return x
+
 
 class LatentSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
     def __init__(self, resolution, num_frames, num_channels, num_slots, num_iterations, slots_dim, encdec_dim, latent_dim):
         super().__init__(resolution, num_frames, num_channels, num_slots, num_iterations, slots_dim, encdec_dim)
         
         self.latent_dim = latent_dim
-        self.projection_heads = nn.ModuleList(ProjectionHead(slots_dim) for _ in range(latent_dim))
+        self.object_encoder = ObjectEncoder(slots_dim)
+        self.object_decoder = ObjectDecoder(slots_dim)
 
 
     def forward(self, image, reconstruct=True):
         slots, attention_scores = self.encode(image)
+
+        # slots has shape: [batch_size, num_slots, slot_dim]
+        active_slots, background_slot = separate_slots(slots, attention_scores)
         
-        z = self.get_latents(slots)
+        z = self.object_encoder(active_slots)
+        active_slots_reconstructed = self.object_decoder(z)
+
+        #slots_original_ordered = torch.cat((active_slots_reconstructed, background_slot), dim=1, device=slots.device)
+        slots_reconstructed_ordered = torch.cat((active_slots_reconstructed, background_slot), dim=1)
+
+        return *self.decode(slots_reconstructed_ordered), z
 
         if reconstruct:
-            return *self.decode(slots), z
-        else:
-            return z
+            recon_combined, recons, masks, slots = self.decode(slots_original_ordered)
+            return (recon_combined, recons, masks, slots, slots_reconstructed_ordered), (slots_original_ordered, slots_reconstructed_ordered), z
 
-    def get_latents(self, slots):
-        # apply projection heads
-        batch_size = slots.shape[0]
-        z = torch.empty(batch_size, self.num_slots, self.latent_dim, device=slots.device)  # shape: [batch_size, num_slots, latent_dim]
-        for i, p in enumerate(self.projection_heads):
-            z_i = p(slots) # shape: [batch_size, num_slots]
-            z[:, :, i] = z_i
-        return z
-    
-def perturbation_matching_loss(z_obs, z_perturbed, magnitudes):
-    """
-    Returns the disentanglement loss for a batch of sample pairs.
-    Uses matching to calculate: (z_perturbed - (z_obs + delta)).
+        return 
 
-    @param z_obs: torch.Tensor, [B, S, D]
-        Latent representation of the original observation.
-    @param z_perturbed: torch.Tensor, [B, S, D]
-        Latent representation of the perturbed observation.
-    @param magnitudes: torch.Tensor, [B]
-        Magnitude of the perturbation.
-    """
-    latent_dim = z_obs.shape[2]
+def separate_slots(slots, attention_scores):
+        """
+        Separates slots into active slots and background slot based on standard deviation of attention scores.
+        @param slots: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+        @param attention_scores: torch.Tensor of shape [batch_size, num_slots, height * width]
+        @return: 
+            active_slots: torch.Tensor of shape [batch_size, num_active_slots, slot_dim]
+            background_slot: torch.Tensor of shape [batch_size, 1, slot_dim]
+        """
+        batch_size, n_slots, slot_dim = slots.shape
 
-    eye = torch.eye(latent_dim, device=z_obs.device)                    # [D, D]
-    deltas = eye.unsqueeze(0) * magnitudes[:, None, None]               # [B, D, D]
+        # Find mask with least standard deviation
+        background_slot_indices = torch.argmin(torch.std(attention_scores, dim=-1), dim=-1)
+        background_slot_mask = torch.nn.functional.one_hot(background_slot_indices, num_classes=n_slots).bool()
 
-    z_obs_expanded = z_obs.unsqueeze(2).unsqueeze(2)                    # [B, S, 1, 1, D]
-    z_perturbed_expanded = z_perturbed.unsqueeze(1).unsqueeze(3)        # [B, 1, S, 1, D]
-    deltas_expanded = deltas.unsqueeze(1).unsqueeze(1)                  # [B, 1, 1, D, D]
+        active_slots = slots[~background_slot_mask]
+        background_slot = slots[background_slot_mask].unsqueeze(1)
+        
+        active_slots = active_slots.view(batch_size, n_slots-1, slot_dim)
 
-    diff = z_perturbed_expanded - (z_obs_expanded + deltas_expanded)     # [B, S, S, D, D]
-    diff_norm = torch.norm(diff, dim=-1)                                        # [B, S, S, D]
-    losses = diff_norm.min(dim=-1).values.min(dim=-1).values.min(dim=-1).values # [B]
-
-    return losses.sum()
-
-def latent_similarity_loss(z, margin=1.0):
-    """
-    Returns the average similarity loss between slot latent pairs.
-    
-    The loss penalizes pairs of slots whose L1 distance is smaller than 'bound'.
-    For each pair (i, j) of slot latent vectors in each sample, the loss is:
-    
-        loss_ij = max(0, bound - L1_norm(z_i - z_j))
-    
-    and the overall loss is the average over all distinct pairs.
-    
-    @param z: torch.Tensor, shape [B, S, D]
-        Latent representation of an observation.
-    @param bound: float
-        The threshold below which slot latent differences are penalized.
-    @return: A scalar torch.Tensor representing the average loss.
-    """
-    B, S, D = z.shape
-
-    # Compute pairwise L1 differences and sum over the latent dimension.
-    diffs = torch.abs(z.unsqueeze(2) - z.unsqueeze(1)) # [B, S, S, D]
-    L1_diffs = diffs.sum(dim=-1) # [B, S, S]
-    
-    # Compute hinge loss per pair: penalize if L1 difference is below 'bound'
-    loss_pairs = torch.clamp(margin - L1_diffs, min=0)
-    
-    # Remove self-comparisons by zeroing the diagonal for each batch element.
-    diag_mask = torch.eye(S, device=z.device, dtype=torch.bool).unsqueeze(0)  # shape [1, S, S]
-    loss_pairs = loss_pairs.masked_fill(diag_mask, 0)
-    
-    # Use only the upper triangular portion (each pair appears once).
-    loss_sum = loss_pairs.triu(diagonal=1).sum()
-    num_pairs = B * (S * (S - 1) / 2)
-    
-    loss = loss_sum / num_pairs
-    return loss
+        return active_slots, background_slot

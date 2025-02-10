@@ -38,7 +38,7 @@ class DisentangledSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
 
 
     def forward(self, image, reconstruct=True, init_slots=None):
-        slots = self.encode(image, init_slots)
+        slots = self.encode(image, init_slots)[0]
         z = self.get_latents(slots)
 
         if reconstruct:

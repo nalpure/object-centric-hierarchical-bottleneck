@@ -13,6 +13,7 @@ from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 
+from slot_attention.latent_AE import LatentSlotAttentionAutoEncoder
 from slot_attention.AE import SlotAttentionAutoEncoder
 from slot_attention.disentangled_AE import DisentangledSlotAttentionAutoEncoder, perturbation_matching_loss, latent_similarity_loss
 from utils import ObservationDataset, PerturbationDataset, log_progress, set_seed
@@ -108,7 +109,7 @@ def main():
     
     model, optim, ckpt_path = None, None, None
     
-    def train_model(reconstruct, disentangle):
+    def train_model(reconstruct, disentangle, latent=False):
         train(model, optim, train_dataloader, 
             args["num_epochs"][completed_objectives],
             args["warmup_steps"][completed_objectives], 
@@ -146,11 +147,18 @@ def main():
 
         print("Training disentangled slot attention model...")
         train_model(reconstruct=True, disentangle=True)
+
+    if train_SA_latent:
+        model, optim = initialize_model('SA_latent', init_ckpt, lr=args["learning_rates"][completed_objectives])
+        ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA_latent.ckpt"
+
+        print("Training latent slot attention model...")
+        train_model(reconstruct=True, disentangle=False, latent=True)
     
     print("Completed all objectives.")
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, mixed_precision, reconstruct=True, disentangle=False, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, mixed_precision, reconstruct=True, disentangle=False, latent=False, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -194,7 +202,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             context_manager = autocast(device_type=device.type) if mixed_precision else contextlib.nullcontext()
             
             with context_manager:
-                if reconstruct and not disentangle:
+                if (reconstruct or latent) and not disentangle:
                      recon_combined, recons, masks, slots = model(obs)[:4]
                 elif reconstruct and disentangle:
                     recon_combined, recons, masks, slots, z_obs = model(obs)
@@ -203,7 +211,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                 else:
                     raise ValueError("At least one loss function must be set to true.")
 
-                if reconstruct:
+                if reconstruct or latent:
                     recon_loss = criterion(recon_combined, obs) 
                     recon_loss *= rec_loss_mult
                     epoch_recon_loss += recon_loss.item()
@@ -318,6 +326,17 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
             args["slots_dim"],
             args["encdec_dim"],
             args["latent_dim"]
+        )
+    elif objective == 'SA_latent':
+        model = LatentSlotAttentionAutoEncoder(
+            tuple(args["resolution"]),
+            args["stacked_frames"],
+            args["channels_per_frame"],
+            args["num_slots"],
+            args["num_iterations"],
+            args["slots_dim"],
+            args["encdec_dim"],
+            3   #TODO change this to implicit / explicit latent_dim
         )
     else:
         raise ValueError("Select a valid training objective.")
