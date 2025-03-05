@@ -20,7 +20,7 @@ class ObjectEncoder(nn.Module):
     def forward(self, x):
         """
         Args: x: torch.Tensor of shape [batch_size, num_slots, slot_dim]
-        Returns: x: torch.Tensor of shape [batch_size, num_slots]
+        Returns: x: torch.Tensor of shape [batch_size, num_slots, feature_dim]
         """
         x = self.fc1(x)
         x = F.relu(x)
@@ -70,25 +70,47 @@ class LatentSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
         self.object_decoder = ObjectDecoder(self.explicit_latent_dim, slots_dim)
 
 
-    def forward(self, image, reconstruct=True):
-        slots, attention_scores = self.encode(image)
-
+    def forward(self, image, slots_init=None, obj_index=None, feat_index=None, magnitude=0):
+        """
+        Args:
+            image: torch.Tensor of shape [batch_size, num_channels, height, width]
+            slots_init: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+            obj_index: int For experiments: index of object to modify
+            feat_index: int For experiments: index of object's latent feature to modify
+            magnitude: float For experiments: magnitude of modification
+        Returns:
+            If training:
+                slots_original_ordered: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+                slots_reconstructed_ordered: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+            If not training:
+                recon_combined: torch.Tensor of shape [batch_size, num_channels, height, width]
+                recons: torch.Tensor of shape [batch_size, num_channels, height, width]
+                masks: torch.Tensor of shape [batch_size, 1, height, width]
+                slots: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+                z: torch.Tensor of shape [batch_size, num_slots, latent_dim]        
+        """
+        
+        slots, attention_scores = self.encode(image, slots_init=slots_init)
         # slots has shape: [batch_size, num_slots, slot_dim]
+        # attention_scores has shape: [batch_size, num_slots, height * width]
+
         active_slots, background_slot = separate_slots(slots, attention_scores)
         
         z = self.object_encoder(active_slots)
+        if obj_index is not None:
+            print("z before", z)
+            z[:, obj_index, feat_index] += magnitude
+            print("z after", z)
         active_slots_reconstructed = self.object_decoder(z)
 
-        #slots_original_ordered = torch.cat((active_slots_reconstructed, background_slot), dim=1, device=slots.device)
         slots_reconstructed_ordered = torch.cat((active_slots_reconstructed, background_slot), dim=1)
 
-        return *self.decode(slots_reconstructed_ordered), z
-
-        if reconstruct:
-            recon_combined, recons, masks, slots = self.decode(slots_original_ordered)
-            return (recon_combined, recons, masks, slots, slots_reconstructed_ordered), (slots_original_ordered, slots_reconstructed_ordered), z
-
-        return 
+        if self.training:
+            slots_original_ordered = torch.cat((active_slots, background_slot), dim=1)
+            return slots_original_ordered, slots_reconstructed_ordered
+        else:
+            recon_combined, recons, masks, slots = self.decode(slots_reconstructed_ordered)
+            return recon_combined, recons, masks, slots, z
 
 def separate_slots(slots, attention_scores):
         """
@@ -106,8 +128,9 @@ def separate_slots(slots, attention_scores):
         background_slot_mask = torch.nn.functional.one_hot(background_slot_indices, num_classes=n_slots).bool()
 
         active_slots = slots[~background_slot_mask]
-        background_slot = slots[background_slot_mask].unsqueeze(1)
+        background_slot = slots[background_slot_mask]
         
         active_slots = active_slots.view(batch_size, n_slots-1, slot_dim)
+        background_slot = background_slot.view(batch_size, 1, slot_dim)
 
         return active_slots, background_slot
