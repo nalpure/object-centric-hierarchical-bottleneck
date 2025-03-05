@@ -80,14 +80,22 @@ class LatentSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
             magnitude: float For experiments: magnitude of modification
         Returns:
             If training:
-                slots_original_ordered: torch.Tensor of shape [batch_size, num_slots, slot_dim]
-                slots_reconstructed_ordered: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+                torch.Tensor of shape [batch_size, num_slots-1, slot_dim]
+                    The active slots (excluding background)
+                torch.Tensor of shape [batch_size, num_slots-1, slot_dim]
+                    The active slots (excluding background) after encoding to and decoding from latent space
+
             If not training:
-                recon_combined: torch.Tensor of shape [batch_size, num_channels, height, width]
-                recons: torch.Tensor of shape [batch_size, num_channels, height, width]
-                masks: torch.Tensor of shape [batch_size, 1, height, width]
-                slots: torch.Tensor of shape [batch_size, num_slots, slot_dim]
-                z: torch.Tensor of shape [batch_size, num_slots, latent_dim]        
+                torch.Tensor of shape [batch_size, num_channels, height, width]
+                    Reconstruction with mask applied
+                torch.Tensor of shape [batch_size, num_channels, height, width]
+                    Reconstruction without mask applied
+                torch.Tensor of shape [batch_size, 1, height, width]
+                    The mask to the reconstruction
+                torch.Tensor of shape [batch_size, num_slots, slot_dim]
+                    All slots (including background)
+                torch.Tensor of shape [batch_size, num_slots-1, latent_dim]
+                    The latents of the active slots        
         """
         
         slots, attention_scores = self.encode(image, slots_init=slots_init)
@@ -103,13 +111,11 @@ class LatentSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
             print("z after", z)
         active_slots_reconstructed = self.object_decoder(z)
 
-        slots_reconstructed_ordered = torch.cat((active_slots_reconstructed, background_slot), dim=1)
-
         if self.training:
-            slots_original_ordered = torch.cat((active_slots, background_slot), dim=1)
-            return slots_original_ordered, slots_reconstructed_ordered
+            return active_slots, active_slots_reconstructed
         else:
-            recon_combined, recons, masks, slots = self.decode(slots_reconstructed_ordered)
+            slots_reconstructed = torch.cat((active_slots_reconstructed, background_slot), dim=1)
+            recon_combined, recons, masks, slots = self.decode(slots_reconstructed)
             return recon_combined, recons, masks, slots, z
 
 def separate_slots(slots, attention_scores):
