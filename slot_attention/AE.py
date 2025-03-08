@@ -139,7 +139,7 @@ class SlotAttentionAutoEncoder(nn.Module):
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)  # Feedforward network on set.
-        # `x` has shape: [batch_size, width*height, input_size].
+        # `x` has shape: [batch_size, width*height, encdec_dim].
 
         # Slot Attention module.
         # `slots` has shape: [batch_size, num_slots, slot_size].

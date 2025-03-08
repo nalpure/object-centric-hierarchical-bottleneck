@@ -12,6 +12,7 @@ from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
+from torch.nn.functional import mse_loss # TODO change this to MSELoss
 
 from slot_attention.latent_AE import LatentSlotAttentionAutoEncoder
 from slot_attention.AE import SlotAttentionAutoEncoder
@@ -65,7 +66,7 @@ parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder 
 
 # Further disentanglement parameters
 parser.add_argument('--latent_dim', default=None, type=int, help='If disentangle is true, specify the latent dimensionality.')
-parser.add_argument('--loss_multipliers', default=[10,1,1], type=list, help='Multipliers for the reconstruction, matching and similarity loss.')
+parser.add_argument('--loss_multipliers', default=[1,1,1], type=list, help='Multipliers for the reconstruction, matching and similarity loss.')
 parser.add_argument('--lr_multiplier', default=0.25, type=float, help='Multiplier for the learning rate of the projection heads.')
 parser.add_argument('--sim_margin', default=0.5, type=float, help='Margin for the similarity loss.')
 
@@ -83,6 +84,9 @@ if args["config"] is not None:
             warnings.warn(f"{key} is not a valid parameter")
 
 def main():
+    for key, value in args.items():
+        print(f"{key}: {value}")
+    print()
     assert_configs()
     set_seed(args['seed'])
 
@@ -118,7 +122,8 @@ def main():
             mixed_precision=args["mixed_precision"],
             ckpt_path=ckpt_path,
             reconstruct=reconstruct,
-            disentangle=disentangle
+            disentangle=disentangle,
+            latent=latent
         )
 
     if train_SA:
@@ -153,12 +158,12 @@ def main():
         ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}_SA_latent.ckpt"
 
         print("Training latent slot attention model...")
-        train_model(reconstruct=True, disentangle=False, latent=True)
+        train_model(reconstruct=False, disentangle=False, latent=True)
     
     print("Completed all objectives.")
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, mixed_precision, reconstruct=True, disentangle=False, latent=False, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, ckpt_path, mixed_precision, reconstruct, disentangle, latent, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -188,6 +193,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         epoch_recon_loss = 0
         epoch_matching_loss = 0
         epoch_similarity_loss = 0
+        epoch_disentanglement_loss = 0
         
         for batch in train_dataloader:
             rec_loss_mult, match_loss_mult, sim_loss_mult = args["loss_multipliers"] if disentangle else (1, 0, 0)
@@ -202,22 +208,34 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             context_manager = autocast(device_type=device.type) if mixed_precision else contextlib.nullcontext()
             
             with context_manager:
-                if (reconstruct or latent) and not disentangle:
-                     recon_combined, recons, masks, slots = model(obs)[:4]
-                elif reconstruct and disentangle:
-                    recon_combined, recons, masks, slots, z_obs = model(obs)
-                elif not reconstruct and disentangle:
-                    z_obs = model(obs, reconstruct=False)
-                else:
-                    raise ValueError("At least one loss function must be set to true.")
+                
+                if latent:
+                    rec_loss_mult = 1000 # TODO remove this hardcoding
 
-                if reconstruct or latent:
+                    active_slots, active_slots_reconstructed, z = model(obs)
+                    obs_perturbed = batch[1].to(device)
+                
+                    active_slots_perturbed, active_slots_perturbed_reconstructed, z_perturbed = model(obs_perturbed)
+
+                    recon_loss = mse_loss(active_slots, active_slots_reconstructed) * rec_loss_mult
+                    recon_loss += mse_loss(active_slots_perturbed, active_slots_perturbed_reconstructed) * rec_loss_mult
+                    epoch_recon_loss += recon_loss.item()
+
+                    dis_loss = disentanglement_loss(z, z_perturbed)
+                    epoch_disentanglement_loss += dis_loss.item()
+
+                    total_loss += recon_loss
+                    total_loss += dis_loss
+
+                if reconstruct:
+                    recon_combined, recons, masks, slots = model(obs)
                     recon_loss = criterion(recon_combined, obs) 
                     recon_loss *= rec_loss_mult
                     epoch_recon_loss += recon_loss.item()
                     total_loss += recon_loss
 
                 if disentangle:
+                    recon_combined, recons, masks, slots, z_obs = model(obs)
                     _, obs_perturbed, magnitudes, _, _ = batch
                     obs_perturbed = obs_perturbed.to(device)
                     magnitudes = magnitudes.to(device)
@@ -252,7 +270,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         epoch_recon_loss /= len(train_dataloader)
         epoch_matching_loss /= len(train_dataloader)
         epoch_similarity_loss /= len(train_dataloader)
-        epoch_total_loss = epoch_recon_loss + epoch_matching_loss + epoch_similarity_loss
+        epoch_total_loss = epoch_recon_loss + epoch_matching_loss + epoch_similarity_loss + epoch_disentanglement_loss
         loss_list.append(epoch_total_loss)
 
         if verbose:
@@ -272,10 +290,12 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                 )
             elif latent:
                 additional_msg = (
-                    f'Reconstruction: {epoch_recon_loss:.6f}, '
-                    f'lr: {current_lr[0]:.6f} / {current_lr[1]:.6f}'
+                    f'Slot diff: {epoch_recon_loss:.6f}, '
+                    f'Disentanglement: {epoch_disentanglement_loss:.6f}, '
+                    f'Total: {epoch_total_loss:.6f}, '
+                    f'lr: {current_lr[0]:.6f}'
                 )
-            elif reconstruct:
+            else:
                 additional_msg = (
                     f'Reconstruction: {epoch_recon_loss:.6f}, '
                     f'lr: {current_lr[0]:.6f}'
@@ -299,6 +319,50 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         print(f'Best epoch was #{best_epoch} with a loss of {best_loss:.6f}. Saved at \'{ckpt_path}\'.')
 
     return model, loss_list
+
+
+def disentanglement_loss(latents_original, latents_perturbed, eps=1e-8):
+    """
+    Exactly one feature of exactly one object should be changed. 
+    This loss sums the L1 differences between the corresponding slot latent vectors,
+    but excludes the slot that shows the maximum difference (assumed to be the one that
+    was intentionally perturbed). The loss is then averaged over slots for each batch.
+
+    @param latents_original: torch.Tensor of shape [B, O, D]
+        The latent representation of the original observation.
+    @param latents_perturbed: torch.Tensor of shape [B, O, D]
+        The latent representation of the perturbed observation.
+    @param eps: float
+        A small epsilon to avoid numerical issues.
+    @return: torch.Tensor of shape [B, 1]
+        The sum of differences (L1 norm) between the original and perturbed latents,
+        excluding the slot with the maximum difference, for each sample in the batch.
+    """
+    # Compute the L1 difference between the original and perturbed latents
+    diff = torch.abs(latents_original - latents_perturbed) # [B, O, D]
+    max_diff = diff.amax(dim=(-2,-1)) # [B]    
+    total_diff = diff.sum(dim=-1).sum(dim=-1) # [B]
+    
+    # Exclude the maximum difference by subtracting it from the total difference.
+    loss = total_diff - max_diff
+
+    # Normalize the loss by the sum of all original latents
+    batch_loss = loss.sum()
+    batch_loss = batch_loss / (torch.abs(latents_original).sum(dim=-1).sum(dim=-1).sum(dim=-1) + eps)
+    
+    return batch_loss
+
+
+def background_loss(background_mask):
+    """ The mask should be the largest possible 
+    
+    @param background_mask: torch.Tensor of shape [B, H, W]
+        The mask of the background slot
+    @return: torch.Tensor of shape [B, 1]
+        The loss
+    """
+
+    return
 
 
 def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
@@ -370,7 +434,9 @@ def initialize_model(objective = 'SA', ckpt = None, lr = 0.0004):
     elif objective == 'PH':
         optim = initialize_optimizer([{'params': PH_params, 'lr': lr}])
     elif objective == 'SA_latent':
-        optim = initialize_optimizer([{'params': SA_params, 'lr': lr * args["lr_multiplier"]}, {'params': latent_params, 'lr': lr}])
+        for p in SA_params:
+            p.requires_grad = False
+        optim = initialize_optimizer([{'params': latent_params, 'lr': lr}])
     else:
         optim = initialize_optimizer([{'params': SA_params, 'lr': lr * args["lr_multiplier"]}, {'params': PH_params, 'lr': lr}])
 
@@ -418,8 +484,8 @@ def assert_configs():
         if len(args["loss_multipliers"]) != 3:
             raise ValueError("Specify the loss multipliers for reconstruction, matching and similarity loss.")
     
-    if args["init_ckpt"] and args["train_SA"]:
-        raise ValueError("Loading of model weights is only supported for disentangling pre-trained models, not to continue interrupted training.")
+    #if args["init_ckpt"] and args["train_SA"]:
+    #    raise ValueError("Loading of model weights is only supported for disentangling pre-trained models, not to continue interrupted training.")
     
     if args["init_ckpt"] and not exists(args["init_ckpt"]):
         raise ValueError("Specified checkpoint does not exist.")
@@ -434,8 +500,6 @@ def assert_configs():
         list_len = len(args[key])
         if list_len != num_objectives:
             raise ValueError(f"Length of {key} ({list_len}) must match the number of training objectives ({num_objectives}).")
-        
-    
         
     for key in ["latent_dim", "loss_multipliers", "lr_multiplier", "sim_margin"]:
         if args["train_SA_disentangled"] and args[key] is None:

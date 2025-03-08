@@ -44,16 +44,16 @@ def main():
     set_seed(args["seed"])
     disentangled = args["train_PH"] or args["train_SA_disentangled"]
 
-    # TODO remove hardcoding
-    latent = True
+    # TODO make this cleaner
+    latent_arch = args["train_SA_latent"]
     if disentangled:
         path_addition = "SA_disentangled"
-    elif latent:
+    elif latent_arch:
         path_addition = "SA_latent"
     else:
         path_addition = "SA"
 
-    model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}_{path_addition}.ckpt', disentangled, latent) #TODO filename
+    model = load_model(f'{args["ckpt_path"]}{args["ckpt_name"]}_{path_addition}.ckpt', disentangled, latent_arch) #TODO filename
 
     print(f"Loading {'perturbation' if disentangled else 'observation'} test dataset: {args['test_path']}")
     TestDataclass = PerturbationDataset if disentangled else ObservationDataset 
@@ -64,13 +64,18 @@ def main():
     obs = batch[0].to(device)
 
     with torch.no_grad():
+        print("zs")
+        zs = [model(obs)[4][0].cpu().numpy() for _ in range(10)]
+        for z in zs:
+            print(z)
+
         obs_forwarded = model(obs)    
         recon_combined = obs_forwarded[0]
         masks = obs_forwarded[2]
+        slots = obs_forwarded[3]
 
         if disentangled:
-            slots = obs_forwarded[3]
-            z_obs = obs_forwarded[4]
+            z = obs_forwarded[4]
 
             _, obs_perturbed, magnitudes, _, properties = batch
             obs_perturbed = obs_perturbed.to(device)
@@ -84,20 +89,49 @@ def main():
             for i in range(args['num_output_figs']):
                 plot_frames(obs_perturbed_frames[i], masks_perturbed_frames[i], recon_combined_perturbed_frames[i], save_path=f"data/figures/perturbed{i}.png")
             
-            disentanglement_score(z_obs, z_perturbed, magnitudes, properties)
-            
+            disentanglement_score(z, z_perturbed, magnitudes, properties)
+        elif latent_arch:
+            z = obs_forwarded[4]
 
+            #recon_combined_perturbed, _, masks_perturbed, _, z_perturbed = model(obs, slots_init = slots)
+            recon_combined_perturbed, _, masks_perturbed, _, z_perturbed = model(obs)
+            print("z", z[0])
+            print("z_perturbed", z_perturbed[0])
+            obs_perturbed_frames = recon_combined_perturbed.view(obs.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
+            recon_combined_perturbed_frames = recon_combined_perturbed.view(recon_combined_perturbed.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
+            masks_perturbed_frames = masks_perturbed.view(masks_perturbed.shape[0], args['stacked_frames'], args['num_slots'], *args['resolution'])
+            
     # split into frames
     obs_frames = obs.view(obs.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
     recon_combined_frames = recon_combined.view(recon_combined.shape[0], args['stacked_frames'], args['channels_per_frame'], *args['resolution'])
     masks_frames = masks.view(masks.shape[0], args['stacked_frames'], args['num_slots'], *args['resolution'])
 
-    # shape of recon_combined is [B, stacked_frames, 3, H, W] 
-    for i in range(args['num_output_figs']):
-        plot_frames(obs_frames[i], masks_frames[i], recon_combined_frames[i], save_path=f"data/figures/original{i}.png")
-        print(f"Loss {i}:", criterion(obs_frames[i], recon_combined_frames[i]).item())
+    if not latent_arch:
+        # shape of recon_combined is [B, stacked_frames, 3, H, W] 
+        for i in range(args['num_output_figs']):
+            plot_frames(obs_frames[i], masks_frames[i], recon_combined_frames[i], save_path=f"data/figures/original{i}.png")
+            print(f"Loss {i}:", criterion(obs_frames[i], recon_combined_frames[i]).item())
+    
+
+    if latent_arch:
+        for i in range(args['num_output_figs']):
+            plot_images([obs_frames[i][0].cpu().numpy(), recon_combined_perturbed_frames[i][0].cpu().numpy()], save_path=f"data/figures/latent_pert{i}.png")
+        for i in range(args['num_output_figs']):
+            plot_frames(obs_frames[i], masks_frames[i], recon_combined_frames[i], save_path=f"data/figures/sample{i}_orig.png")
+            print(f"Loss {i}:", criterion(obs_frames[i], recon_combined_frames[i]).item())
+            print(z[i])
+
+        for i in range(args['num_output_figs']):
+            plot_frames(obs_perturbed_frames[i], masks_perturbed_frames[i], recon_combined_perturbed_frames[i], save_path=f"data/figures/sample{i}_pert.png")
+            print(f"Loss {i}:", criterion(obs_perturbed_frames[i], recon_combined_perturbed_frames[i]).item())
+            print(z_perturbed[i])
+        
+        print("Latent diff:")
+        for i in range(args['num_output_figs']):
+            print(z_perturbed[i] - z[i])
 
     print("Overall loss: ", criterion(obs_frames, recon_combined_frames).item())
+
 
 def load_model(checkpoint_path, disentangled=False, latent=False):
     print("Loading model:", checkpoint_path)
@@ -134,7 +168,7 @@ def load_model(checkpoint_path, disentangled=False, latent=False):
             slots_dim=args["slots_dim"], 
             encdec_dim=args["encdec_dim"])
     
-    model.load_state_dict(torch.load(checkpoint_path, weights_only=True)['model_state_dict'])
+    model.load_state_dict(torch.load(checkpoint_path, weights_only=True)['model_state_dict'], strict=False)
     model.to(device)
     model.eval()
     return model
@@ -265,6 +299,41 @@ def plot_frames(orig, masks, combined_recons, save_path="output.png"):
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+
+
+import matplotlib.pyplot as plt
+
+def plot_images(images, save_path):
+    """
+    Displays all images in a single row and saves the resulting plot.
+
+    Args:
+        images (iterable): An iterable of images. Each image should be of shape [3, H, W].
+        save_path (str): File path to save the plotted image.
+    """
+    num_images = len(images)
+    images = list(images)
+
+    for i in range(num_images):
+        if hasattr(images[i], 'detach'):
+            images[i] = images[i].detach().cpu().numpy()
+        images[i] = images[i].transpose(1, 2, 0)
+    
+    # Create a figure with one row and as many columns as there are images.
+    fig, axes = plt.subplots(1, num_images, figsize=(4 * num_images, 4))
+    
+    # Ensure that axes is always iterable (if only one image, axes is not a list).
+    if num_images == 1:
+        axes = [axes]
+    
+    # Loop over images and display each one.
+    for idx, img in enumerate(images):
+        axes[idx].imshow(img)
+        axes[idx].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.show()
 
 
 if __name__ == '__main__':

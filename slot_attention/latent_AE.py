@@ -84,6 +84,8 @@ class LatentSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
                     The active slots (excluding background)
                 torch.Tensor of shape [batch_size, num_slots-1, slot_dim]
                     The active slots (excluding background) after encoding to and decoding from latent space
+                torch.Tensor of shape [batch_size, num_slots-1, latent_dim]
+                    The latents of the active slots
 
             If not training:
                 torch.Tensor of shape [batch_size, num_channels, height, width]
@@ -101,18 +103,16 @@ class LatentSlotAttentionAutoEncoder(SlotAttentionAutoEncoder):
         slots, attention_scores = self.encode(image, slots_init=slots_init)
         # slots has shape: [batch_size, num_slots, slot_dim]
         # attention_scores has shape: [batch_size, num_slots, height * width]
-
         active_slots, background_slot = separate_slots(slots, attention_scores)
-        
         z = self.object_encoder(active_slots)
+        
         if obj_index is not None:
-            print("z before", z)
             z[:, obj_index, feat_index] += magnitude
-            print("z after", z)
+        
         active_slots_reconstructed = self.object_decoder(z)
 
         if self.training:
-            return active_slots, active_slots_reconstructed
+            return active_slots, active_slots_reconstructed, z
         else:
             slots_reconstructed = torch.cat((active_slots_reconstructed, background_slot), dim=1)
             recon_combined, recons, masks, slots = self.decode(slots_reconstructed)
