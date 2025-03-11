@@ -128,7 +128,10 @@ class SlotAttentionAutoEncoder(nn.Module):
             mlp_hidden_size = 128)
 
     def forward(self, image, slots_init=None):
-        return self.decode(self.encode(image, slots_init)[0])
+        slots, attention_scores = self.encode(image, slots_init)
+        active_slots, background_slot = separate_slots(slots, attention_scores)
+        recon_combined, recons, masks = self.decode(slots)
+        return recon_combined, recons, masks, active_slots, background_slot
 
     def encode(self, image, slots_init=None):
         # `image` has shape: [batch_size, num_channels, width, height].
@@ -183,4 +186,28 @@ class SlotAttentionAutoEncoder(nn.Module):
         else:
             recon_combined = recon_combined.reshape(batch_size, -1, self.resolution[0], self.resolution[1])
 
-        return recon_combined, recons, masks, slots
+        return recon_combined, recons, masks
+    
+
+def separate_slots(slots, attention_scores):
+        """
+        Separates slots into active slots and background slot based on standard deviation of attention scores.
+        @param slots: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+        @param attention_scores: torch.Tensor of shape [batch_size, num_slots, height * width]
+        @return: 
+            active_slots: torch.Tensor of shape [batch_size, num_active_slots, slot_dim]
+            background_slot: torch.Tensor of shape [batch_size, 1, slot_dim]
+        """
+        batch_size, n_slots, slot_dim = slots.shape
+
+        # Find mask with least standard deviation
+        background_slot_indices = torch.argmin(torch.std(attention_scores, dim=-1), dim=-1)
+        background_slot_mask = torch.nn.functional.one_hot(background_slot_indices, num_classes=n_slots).bool()
+
+        active_slots = slots[~background_slot_mask]
+        background_slot = slots[background_slot_mask]
+        
+        active_slots = active_slots.view(batch_size, n_slots-1, slot_dim)
+        background_slot = background_slot.view(batch_size, 1, slot_dim)
+
+        return active_slots, background_slot

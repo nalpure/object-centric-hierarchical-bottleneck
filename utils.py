@@ -379,3 +379,31 @@ class PathDataset(data.Dataset):
         observations.append(obs)
         
         return observations, actions
+    
+
+class SlotsPairsDataset(data.Dataset):
+    def __init__(self, hdf5_file):
+        self.hdf5_file = hdf5_file
+        self.slots_data_original, self.slots_data_perturbed = self._load_slots_data()
+        self.num_samples = len(self.slots_data_original)
+        print(f"Loaded {self.num_samples} samples from {hdf5_file}")
+
+    def _load_slots_data(self):
+        slots_data_original = []
+        slots_data_perturbed = []
+        with h5py.File(self.hdf5_file, 'r') as f:
+            for key in f.keys():
+                if 'original' in key:
+                    slots_data_original.extend(f[key][:])  # Flatten the batches
+                elif 'perturbed' in key:
+                    slots_data_perturbed.extend(f[key][:])  # Flatten the batches
+        return slots_data_original, slots_data_perturbed
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        slots_original = torch.tensor(self.slots_data_original[idx], dtype=torch.float32)
+        slots_perturbed = torch.tensor(self.slots_data_perturbed[idx], dtype=torch.float32)
+        return slots_original, slots_perturbed
+

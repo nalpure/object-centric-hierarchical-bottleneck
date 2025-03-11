@@ -6,13 +6,16 @@ import json
 from datetime import datetime
 import warnings
 import contextlib
+
 import torch
 from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
-from slot_attention.AE import SlotAttentionAutoEncoder
-from utils import ObservationDataset, log_progress, set_seed
+from torch.nn.functional import mse_loss # TODO change this to MSELoss
+
+from disentangle.latent_AE import LatentAutoEncoder
+from utils import SlotsPairsDataset, log_progress, set_seed
 
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -21,24 +24,11 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 def parse_argument():
     parser = argparse.ArgumentParser()
 
-    # General parameters
     parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
-    parser.add_argument('--train_path', default='data/slipscape/training_data', type=str, help='Path to the training data')
-    parser.add_argument('--init_ckpt', default=None, type=str, help='initial weights to start training')
-    parser.add_argument('--ckpt_path', default='checkpoints/slipscape/', type=str, help='where to save models')
+    parser.add_argument('--train_path', default='data/generated_slots/slots.h5', type=str, help='Path to the training data (slots)')
+    parser.add_argument('--init_ckpt', default=None, type=str, help='Path to the initial model weights')
+    parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where to save models')
     parser.add_argument('--seed', default=0, type=int, help='random seed')
-
-    # Image parameters
-    parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
-    parser.add_argument('--resolution', default=[64, 64], type=list)
-    parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
-    parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
-
-    # Slot Attention parameters
-    parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
-    parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
-    parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
-    parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder dimension size')
 
     # Training parameters
     parser.add_argument('--batch_size', default=64, type=int)
@@ -50,13 +40,16 @@ def parse_argument():
     parser.add_argument('--decay_epochs', default=80, type=int, help='Number of epochs for the learning rate decay.')
     parser.add_argument('--decay_rate', default=0.5, type=float, help='Rate for the learning rate decay.')
 
+    # Further disentanglement parameters
+    parser.add_argument('--latent_dim', default=3, type=int, help='Specify the latent dimensionality.')
+    parser.add_argument('--rec_loss_mult', default=1000, type=int, help='Multiplier for the reconstruction loss.')
 
     args = parser.parse_args()
     args = vars(args)
 
     if args["config"] is not None:
         args["ckpt_name"] = args["config"]
-        with open("configs.json", "r") as config_file:
+        with open("configs_disentangle.json", "r") as config_file:
             configs = json.load(config_file)[args["config"]]
         for key, value in configs.items():
             if key in args:
@@ -70,32 +63,34 @@ def parse_argument():
 def main():
     print("Running on", DEVICE)
     args = parse_argument()
-
     for key, value in args.items():
         print(f"{key}: {value}")
-
     set_seed(args['seed'])
     
     print("Loading training data...")
-    dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+    dataset = SlotsPairsDataset(hdf5_file=args["train_path"])
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, drop_last=True)
     print(f"Finished loading all {args['batch_size'] * len(train_dataloader)} training samples.")
-    
-    model, optim = initialize_model(args)
+
+    slots_dim = next(iter(train_dataloader))[0].shape[-1]
+    model, optim = initialize_model(args, slots_dim)
     ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
+
+
     
     print("Training slot attention model...")
-    train(model, optim, train_dataloader, 
+    train(model, optim, train_dataloader,
         args["num_epochs"],
-        args["warmup_epochs"], 
-        args["decay_epochs"], 
-        args["decay_rate"], 
+        args["warmup_epochs"],
+        args["decay_epochs"],
+        args["decay_rate"],
         args["mixed_precision"],
-        ckpt_path
+        ckpt_path,
+        args["rec_loss_mult"]
     )
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, rec_loss_mult, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -122,20 +117,32 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     print("Training started at", start.ctime())
     
     for epoch in range(1, num_epochs + 1): 
-        epoch_loss = 0
+        epoch_recon_loss = 0
+        epoch_dis_loss = 0
         
         for batch in train_dataloader:
-            obs = batch[0].to(DEVICE)   # [B, C, H, W]
             batch_loss = 0
+
+            slots_orig, slots_pert = batch
+            slots_orig = slots_orig.to(DEVICE)
+            slots_pert = slots_pert.to(DEVICE)
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
             
             with context_manager:
-                recon_combined, _, _, _, _ = model(obs)
-                loss = criterion(recon_combined, obs) 
-                epoch_loss += loss.item()
-                batch_loss += loss
+                slots_orig_reconstructed, z_orig = model(slots_orig)
+                slots_pert_reconstructed, z_pert = model(slots_pert)
+
+                recon_loss = mse_loss(slots_orig, slots_orig_reconstructed)
+                recon_loss += mse_loss(slots_pert, slots_pert_reconstructed)
+                recon_loss *= rec_loss_mult / 2
+                batch_loss += recon_loss
+                epoch_recon_loss += recon_loss.item()
+
+                dis_loss = disentanglement_loss(z_orig, z_pert)
+                epoch_dis_loss += dis_loss.item()
+                batch_loss += dis_loss
 
             optimizer.zero_grad()
             current_step += 1
@@ -151,20 +158,23 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         scheduler.step() # Adjust the learning rates
         current_lr = scheduler.get_last_lr()
 
-        epoch_loss /= len(train_dataloader)
-        loss_list.append(epoch_loss)
+        epoch_recon_loss /= len(train_dataloader)
+        epoch_dis_loss /= len(train_dataloader)
+        epoch_total_loss = epoch_recon_loss + epoch_dis_loss
+        loss_list.append(epoch_total_loss)
 
         if verbose:
             additional_msg = (
-                f'Loss: {epoch_loss:.6f}, '
+                f'Slot diff: {epoch_recon_loss:.6f}, '
+                f'Disentanglement: {epoch_dis_loss:.6f}, '
+                f'Total: {epoch_total_loss:.6f}, '
                 f'lr: {current_lr[0]:.6f}'
             )
-
             log_progress(epoch, num_epochs, start, additional_msg)
 
         # Save the best model and optimizer state
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
+        if epoch_total_loss < best_loss:
+            best_loss = epoch_total_loss
             best_epoch = epoch
 
             torch.save({
@@ -180,15 +190,42 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     return model, loss_list
 
 
-def initialize_model(args):
-    model = SlotAttentionAutoEncoder(
-        tuple(args["resolution"]),
-        args["stacked_frames"],
-        args["channels_per_frame"],
-        args["num_slots"],
-        args["num_iterations"],
-        args["slots_dim"],
-        args["encdec_dim"]
+def disentanglement_loss(latents_original, latents_perturbed, eps=1e-8):
+    """
+    Exactly one feature of exactly one object should be changed. 
+    This loss sums the L1 differences between the corresponding slot latent vectors,
+    but excludes the slot that shows the maximum difference (assumed to be the one that
+    was intentionally perturbed). The loss is then averaged over slots for each batch.
+
+    @param latents_original: torch.Tensor of shape [B, O, D]
+        The latent representation of the original observation.
+    @param latents_perturbed: torch.Tensor of shape [B, O, D]
+        The latent representation of the perturbed observation.
+    @param eps: float
+        A small epsilon to avoid numerical issues.
+    @return: torch.Tensor of shape [B, 1]
+        The sum of differences (L1 norm) between the original and perturbed latents,
+        excluding the slot with the maximum difference, for each sample in the batch.
+    """
+    # Compute the L1 difference between the original and perturbed latents
+    diff = torch.abs(latents_original - latents_perturbed) # [B, O, D]
+    max_diff = diff.amax(dim=(-2,-1)) # [B]    
+    total_diff = diff.sum(dim=-1).sum(dim=-1) # [B]
+    
+    # Exclude the maximum difference by subtracting it from the total difference.
+    loss = total_diff - max_diff
+
+    # Normalize the loss by the sum of all original latents
+    batch_loss = loss.sum()
+    batch_loss = batch_loss / (torch.abs(latents_original).sum(dim=-1).sum(dim=-1).sum(dim=-1) + eps)
+    
+    return batch_loss
+
+
+def initialize_model(args, slots_dim):
+    model = LatentAutoEncoder(
+        args["latent_dim"],
+        slots_dim
     ).to(DEVICE)
 
     if args["init_ckpt"] is not None:
@@ -224,6 +261,7 @@ def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
             return decay_rate ** decay_factor
     
     return LambdaLR(optimizer, lr_lambda)
+
 
 if __name__ == "__main__":
     main()
