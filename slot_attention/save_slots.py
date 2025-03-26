@@ -1,5 +1,5 @@
 import argparse
-from utils import ObservationDataset, PerturbationDataset, set_seed
+from utils import ImageDataset, PerturbationDataset, PerturbedSequenceDataset, set_seed
 from torch.utils import data
 import torch
 from slot_attention.AE import SlotAttentionAutoEncoder
@@ -9,6 +9,7 @@ import os
 
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+IMG_CHANNELS = 3
 
 
 def parse_arguments():
@@ -25,8 +26,6 @@ def parse_arguments():
     # Image parameters
     parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
     parser.add_argument('--resolution', default=[64, 64], type=list)
-    parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
-    parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 
     # Further Slot Attention parameters
     parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
@@ -62,7 +61,7 @@ def main():
         num_slots=args["num_slots"],
         num_frames = args["stacked_frames"],
         num_iterations=args["num_iterations"], 
-        num_channels=args["channels_per_frame"],
+        num_channels=IMG_CHANNELS,
         slots_dim=args["slots_dim"], 
         encdec_dim=args["encdec_dim"]).to(DEVICE)
     model.eval()
@@ -78,24 +77,39 @@ def main():
         raise KeyError(f"Unexpected keys: {unexpected_keys}")
 
     print(f"Loading observation training dataset: {args['train_path']}")
-    test_dataset = PerturbationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
-    train_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
-    print(f"Finished loading all {args['batch_size'] * len(train_dataloader)} training samples.")
+    orig_dataset = PerturbedSequenceDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+    dataloader = data.DataLoader(orig_dataset, batch_size=args['batch_size'], shuffle=False, drop_last=True)
+    print(f"Finished loading all {args['batch_size'] * len(dataloader)} training samples.")
     print(f"Saving slots to {output_path}")
 
     with torch.no_grad():
-        for batch_index, batch in enumerate(train_dataloader):
-            obs, perturbed, magnitude, obj_index, prop_index = batch
-            obs = obs.to(DEVICE)
-            perturbed = perturbed.to(DEVICE)
-            _, _, _, active_slots_original, _ = model(obs)
-            _, _, _, active_slots_perturbed, _ = model(perturbed)
-            save_slots_to_hdf5(active_slots_original, active_slots_perturbed, magnitude, obj_index, prop_index, output_path, batch_index)
+        for batch_index, batch in enumerate(dataloader):
+            orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
+            seq_len = orig_seq.size(1)
+            orig_seq = orig_seq.to(DEVICE)
+            pert_seq = pert_seq.to(DEVICE)
+            orig_seq_slots = torch.empty((args['batch_size'], seq_len, args['num_slots'], args['slots_dim'])).to(DEVICE)
+            pert_seq_slots = torch.empty((args['batch_size'], seq_len, args['num_slots'], args['slots_dim'])).to(DEVICE)
+
+            for i in range(seq_len):
+                _, _, _, active_slots_original, _ = model(orig_seq[:, i])
+                _, _, _, active_slots_perturbed, _ = model(pert_seq[:, i])
+                orig_seq_slots[:, i] = active_slots_original
+                pert_seq_slots[:, i] = active_slots_perturbed
+           
+            data_dict = {
+                'orig_seq': orig_seq_slots,
+                'pert_seq': pert_seq_slots,
+                'magnitude': magnitude,
+                'obj_index': obj_index,
+                'prop_index': prop_index
+            }
+            save_slots_to_hdf5(data_dict, output_path, batch_index)
     
     print("Finished saving slots.")
 
 
-def save_slots_to_hdf5(slots_original, slots_perturbed, magnitude, obj_index, prop_index, output_path, batch_index):
+def save_slots_to_hdf5(data_dict, output_path, batch_index):
     directory = os.path.dirname(output_path)
     if not os.path.exists(directory):
         os.makedirs(directory)
@@ -103,17 +117,9 @@ def save_slots_to_hdf5(slots_original, slots_perturbed, magnitude, obj_index, pr
     # Create new file if batch_index is 0, otherwise append to existing file
     mode = 'w' if batch_index == 0 else 'a'
     with h5py.File(output_path, mode) as f:
-        dset_name_original = f'batch_{batch_index}_original'
-        dset_name_perturbed = f'batch_{batch_index}_perturbed'
-        dset_name_magnitude = f'batch_{batch_index}_magnitude'
-        dset_name_obj_index = f'batch_{batch_index}_obj_index'
-        dset_name_prop_index = f'batch_{batch_index}_prop_index'
-
-        f.create_dataset(dset_name_original, data=slots_original.cpu().numpy(), compression="gzip", chunks=True)
-        f.create_dataset(dset_name_perturbed, data=slots_perturbed.cpu().numpy(), compression="gzip", chunks=True)
-        f.create_dataset(dset_name_magnitude, data=magnitude.cpu().numpy(), compression="gzip", chunks=True)
-        f.create_dataset(dset_name_obj_index, data=obj_index.cpu().numpy(), compression="gzip", chunks=True)
-        f.create_dataset(dset_name_prop_index, data=prop_index.cpu().numpy(), compression="gzip", chunks=True)
+        for key, value in data_dict.items():
+            dset_name = f'batch_{batch_index}_{key}'
+            f.create_dataset(dset_name, data=value.cpu().numpy(), compression="gzip", chunks=True)
 
 
 if __name__ == "__main__":
