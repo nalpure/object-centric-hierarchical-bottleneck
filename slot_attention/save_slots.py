@@ -19,7 +19,7 @@ def parse_arguments():
     parser.add_argument('--seed', default=0, type=int, help='random seed')
     parser.add_argument('--train_path', default='data/slipscape/train_data', type=str, help='Path to the training data')
     parser.add_argument('--ckpt_path', default='checkpoints/slipscape/', type=str, help='where the model is saved')
-    parser.add_argument('--output_dir', default='data/generated_slots/')
+    parser.add_argument('--output_path', default='data/generated_slots/slots.h5', type=str, help='where to save the slots')
     parser.add_argument('--batch_size', default=64, type=int)
 
     # Image parameters
@@ -54,7 +54,7 @@ def main():
     args = parse_arguments()
     set_seed(args["seed"])
     ckpt_path = f"{args['ckpt_path']}{args['ckpt_name']}.ckpt"
-    output_path = f"{args['output_dir']}{args['ckpt_name']}_slots.h5" 
+    output_path = args['output_path']
 
     print("Loading model:", ckpt_path)
     model = SlotAttentionAutoEncoder(
@@ -85,17 +85,17 @@ def main():
 
     with torch.no_grad():
         for batch_index, batch in enumerate(train_dataloader):
-            obs, perturbed, _, _, _ = batch
+            obs, perturbed, magnitude, obj_index, prop_index = batch
             obs = obs.to(DEVICE)
             perturbed = perturbed.to(DEVICE)
             _, _, _, active_slots_original, _ = model(obs)
             _, _, _, active_slots_perturbed, _ = model(perturbed)
-            save_slots_to_hdf5(active_slots_original, active_slots_perturbed, output_path, batch_index)
+            save_slots_to_hdf5(active_slots_original, active_slots_perturbed, magnitude, obj_index, prop_index, output_path, batch_index)
     
     print("Finished saving slots.")
 
 
-def save_slots_to_hdf5(slots_original, slots_perturbed, output_path, batch_index):
+def save_slots_to_hdf5(slots_original, slots_perturbed, magnitude, obj_index, prop_index, output_path, batch_index):
     directory = os.path.dirname(output_path)
     if not os.path.exists(directory):
         os.makedirs(directory)
@@ -105,8 +105,15 @@ def save_slots_to_hdf5(slots_original, slots_perturbed, output_path, batch_index
     with h5py.File(output_path, mode) as f:
         dset_name_original = f'batch_{batch_index}_original'
         dset_name_perturbed = f'batch_{batch_index}_perturbed'
+        dset_name_magnitude = f'batch_{batch_index}_magnitude'
+        dset_name_obj_index = f'batch_{batch_index}_obj_index'
+        dset_name_prop_index = f'batch_{batch_index}_prop_index'
+
         f.create_dataset(dset_name_original, data=slots_original.cpu().numpy(), compression="gzip", chunks=True)
         f.create_dataset(dset_name_perturbed, data=slots_perturbed.cpu().numpy(), compression="gzip", chunks=True)
+        f.create_dataset(dset_name_magnitude, data=magnitude.cpu().numpy(), compression="gzip", chunks=True)
+        f.create_dataset(dset_name_obj_index, data=obj_index.cpu().numpy(), compression="gzip", chunks=True)
+        f.create_dataset(dset_name_prop_index, data=prop_index.cpu().numpy(), compression="gzip", chunks=True)
 
 
 if __name__ == "__main__":

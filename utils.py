@@ -384,26 +384,36 @@ class PathDataset(data.Dataset):
 class SlotsPairsDataset(data.Dataset):
     def __init__(self, hdf5_file):
         self.hdf5_file = hdf5_file
-        self.slots_data_original, self.slots_data_perturbed = self._load_slots_data()
-        self.num_samples = len(self.slots_data_original)
+        self.original, self.perturbed, self.magnitude, self.obj_index, self.prop_index = self._load_slots_data()
+        self.num_samples = len(self.original)
         print(f"Loaded {self.num_samples} samples from {hdf5_file}")
 
     def _load_slots_data(self):
-        slots_data_original = []
-        slots_data_perturbed = []
+        data_dict = {
+            'original': [],
+            'perturbed': [],
+            'magnitude': [],
+            'obj_index': [],
+            'prop_index': []
+        }
+
         with h5py.File(self.hdf5_file, 'r') as f:
             for key in f.keys():
-                if 'original' in key:
-                    slots_data_original.extend(f[key][:])  # Flatten the batches
-                elif 'perturbed' in key:
-                    slots_data_perturbed.extend(f[key][:])  # Flatten the batches
-        return slots_data_original, slots_data_perturbed
+                for data_key in data_dict:
+                    if data_key in key:
+                        data_dict[data_key].extend(f[key][:])  # Flatten the batches
+                        break  # Exit inner loop once a match is found
+
+        return tuple(data_dict.values())  # Unpack values as return tuple
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        slots_original = torch.tensor(self.slots_data_original[idx], dtype=torch.float32)
-        slots_perturbed = torch.tensor(self.slots_data_perturbed[idx], dtype=torch.float32)
-        return slots_original, slots_perturbed
+        slots_original = torch.tensor(self.original[idx], dtype=torch.float32)
+        slots_perturbed = torch.tensor(self.perturbed[idx], dtype=torch.float32)
+        magnitude = torch.tensor(self.magnitude[idx], dtype=torch.float32)
+        obj_index = torch.tensor(self.obj_index[idx], dtype=torch.int64)
+        prop_index = torch.tensor(self.prop_index[idx], dtype=torch.int64)
+        return slots_original, slots_perturbed, magnitude, obj_index, prop_index
 

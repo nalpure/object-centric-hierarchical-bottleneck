@@ -123,9 +123,10 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         for batch in train_dataloader:
             batch_loss = 0
 
-            slots_orig, slots_pert = batch
+            slots_orig, slots_pert, magnitude, obj_index, prop_index = batch
             slots_orig = slots_orig.to(DEVICE)
             slots_pert = slots_pert.to(DEVICE)
+            magnitude = magnitude.to(DEVICE)
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
@@ -140,7 +141,8 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                 batch_loss += recon_loss
                 epoch_recon_loss += recon_loss.item()
 
-                dis_loss = disentanglement_loss(z_orig, z_pert)
+                #dis_loss = disentanglement_loss(z_orig, z_pert)
+                dis_loss = disentanglement_loss_magnitude(z_orig, z_pert, magnitude)
                 epoch_dis_loss += dis_loss.item()
                 batch_loss += dis_loss
 
@@ -214,6 +216,25 @@ def disentanglement_loss(latents_original, latents_perturbed, eps=1e-8):
     
     # Exclude the maximum difference by subtracting it from the total difference.
     loss = total_diff - max_diff
+
+    # Normalize the loss by the sum of all original latents
+    batch_loss = loss.sum()
+    batch_loss = batch_loss / (torch.abs(latents_original).sum(dim=-1).sum(dim=-1).sum(dim=-1) + eps)
+    
+    return batch_loss
+
+
+def disentanglement_loss_magnitude(latents_original, latents_perturbed, magnitude, eps=1e-8):
+    # Compute the L1 difference between the original and perturbed latents
+    diff = torch.abs(latents_original - latents_perturbed) # [B, O, D]
+    total_diff = diff.sum(dim=-1).sum(dim=-1) # [B]
+
+    # Assume the maximum difference to be the perturbed feature of the perturbed object
+    max_diff = diff.amax(dim=(-2,-1)) # [B]    
+    magnitude_diff = torch.abs(torch.abs(magnitude) - max_diff)
+    
+    # Exclude the maximum difference by subtracting it from the total difference.
+    loss = total_diff - max_diff + magnitude_diff
 
     # Normalize the loss by the sum of all original latents
     batch_loss = loss.sum()
