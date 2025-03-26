@@ -12,8 +12,9 @@ class ObjectEncoder(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(slots_dim, 64, bias=True)
         self.fc2 = nn.Linear(64, 64, bias=True)
-        self.fc3 = nn.Linear(64, 64, bias=True)
-        self.fc4 = nn.Linear(64, feature_dim, bias=True)
+        self.fc3 = nn.Linear(64, 32, bias=True)
+        self.fc4 = nn.Linear(32, 16, bias=True)
+        self.fc5 = nn.Linear(16, feature_dim, bias=True)
 
     def forward(self, x):
         """
@@ -27,6 +28,8 @@ class ObjectEncoder(nn.Module):
         x = self.fc3(x)
         x = F.relu(x)
         x = self.fc4(x)
+        x = F.relu(x)
+        x = self.fc5(x)
         x = x.squeeze(-1) 
         return x
     
@@ -37,10 +40,11 @@ class ObjectDecoder(nn.Module):
     """
     def __init__(self, feature_dim, slots_dim):
         super().__init__()
-        self.fc1 = nn.Linear(feature_dim, 64, bias=True)
-        self.fc2 = nn.Linear(64, 64, bias=True)
-        self.fc3 = nn.Linear(64, 64, bias=True)
-        self.fc4 = nn.Linear(64, slots_dim, bias=True)
+        self.fc1 = nn.Linear(feature_dim, 16, bias=True)
+        self.fc2 = nn.Linear(16, 32, bias=True)
+        self.fc3 = nn.Linear(32, 64, bias=True)
+        self.fc4 = nn.Linear(64, 64, bias=True)
+        self.fc5 = nn.Linear(64, slots_dim, bias=True)
 
     def forward(self, x):
         """
@@ -54,6 +58,8 @@ class ObjectDecoder(nn.Module):
         x = self.fc3(x)
         x = F.relu(x)
         x = self.fc4(x)
+        x = F.relu(x)
+        x = self.fc5(x)
         return x
 
 
