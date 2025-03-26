@@ -56,7 +56,7 @@ def main():
     criterion = torch.nn.MSELoss()
     set_seed(args["seed"])
     ckpt_path = f"{args['ckpt_path']}{args['ckpt_name']}.ckpt"
-
+    
     print("Loading model:", ckpt_path)
     model = SlotAttentionAutoEncoder(
         resolution=args["resolution"],
@@ -69,15 +69,18 @@ def main():
     
     model.eval()    
     missing_keys, unexpected_keys = model.load_state_dict(torch.load(ckpt_path, weights_only=True)['model_state_dict'], strict=False)
-    # these keys are not in the checkpoint but will be generated again
-    missing_keys.remove('encoder_cnn.encoder_pos.grid') 
-    missing_keys.remove('decoder_cnn.decoder_pos.grid') 
+
+    # these keys can be generated again by the model
+    generatable_keys = ['encoder_cnn.encoder_pos.grid', 'decoder_cnn.decoder_pos.grid']
+    for key in generatable_keys:
+        if key in missing_keys:
+            missing_keys.remove(key)
     
     if missing_keys:
         raise KeyError(f"Missing keys: {missing_keys}")
     if unexpected_keys:
         raise KeyError(f"Unexpected keys: {unexpected_keys}")
-
+    
     print(f"Loading observation test dataset: {args['test_path']}")
     test_dataset = ObservationDataset(hdf5_file=args["test_path"], hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
