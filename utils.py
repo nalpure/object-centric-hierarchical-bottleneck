@@ -239,147 +239,117 @@ def set_seed(seed, deterministic_cudnn=False):
         torch.backends.cudnn.benchmark = False
 
 
+def plot_images(images, save_path, labels=None, grayscale_indices=[]):
+    """
+    Displays all images in a single row and saves the resulting plot.
+
+    Args:
+        images (iterable): An iterable of images. Each image should be of shape [3, H, W].
+        save_path (str): File path to save the plotted image.
+        labels (iterable): An iterable of labels for each image.
+        grayscale_indices (iterable): An iterable of indices for images that should be displayed in grayscale.
+    """
+    num_images = len(images)
+    images = list(images)
+
+    for i in range(num_images):
+        if hasattr(images[i], 'detach'):
+            images[i] = images[i].detach().cpu().numpy()
+        if i not in grayscale_indices:
+            images[i] = images[i].transpose(1, 2, 0)
+    
+    # Create a figure with one row and as many columns as there are images.
+    fig, axes = plt.subplots(1, num_images, figsize=(4 * num_images, 4))
+    
+    # Ensure that axes is always iterable (if only one image, axes is not a list).
+    if num_images == 1:
+        axes = [axes]
+    
+    # Loop over images and display each one.
+    for idx, img in enumerate(images):
+        axes[idx].imshow(img, cmap='gray' if idx in grayscale_indices else None)
+        axes[idx].axis('off')
+    
+    if labels is not None:
+        for ax, label in zip(axes, labels):
+            ax.set_title(label)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust the rect parameter to add padding at the top
+    plt.savefig(save_path)
+    plt.show()
+    plt.close()
+
 class BaseDataset(data.Dataset):
     def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
         self.experience_buffer = load_list_dict_h5py(hdf5_file)
         self.hdf5_format = hdf5_format
         self.output_format = output_format
-
-        # Build table for conversion between linear idx -> episode/step idx
         self.idx2episode = list()
-        step = 0
+        self.num_steps = 0
+    
+    def get_episode_step(self, idx):
+        return self.idx2episode[idx]
+    
+    def __len__(self):
+        return self.num_steps
+
+
+class PerturbedSequenceDataset(BaseDataset):
+    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
+        super().__init__(hdf5_file, hdf5_format, output_format)
+        # Build table for conversion between linear idx -> episode/step idx
+        # List of tuples: [(0, 0), (0, 1), ..., (num_episodes - 1, num_steps - 1)]
         for ep in range(len(self.experience_buffer)):
             num_steps = len(self.experience_buffer[ep]['obs'])
             idx_tuple = [(ep, idx) for idx in range(num_steps)]
             self.idx2episode.extend(idx_tuple)
-            step += num_steps
-
-        self.num_steps = step
-
-    def __len__(self):
-        return self.num_steps
-
-    def get_episode_step(self, idx):
-        return self.idx2episode[idx]
+            self.num_steps += num_steps
     
-
-class ObservationDataset(BaseDataset):
-    """Create dataset of observations from replay buffer."""
-
     def __getitem__(self, idx):
         ep, step = self.get_episode_step(idx)
-        obs = to_float(self.experience_buffer[ep]['obs'][step])
-        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
-        return obs, [0]   # workaround to achieve same output format as other datasets
-    
-
-class StateTransitionsDataset(BaseDataset):
-    """Create dataset of (o_t, a_t, o_{t+1}) transitions from replay buffer."""
-
-    def __getitem__(self, idx):
-        ep, step = self.get_episode_step(idx)
-        
-        obs = to_float(self.experience_buffer[ep]['obs'][step])
-        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
-        action = self.experience_buffer[ep]['action'][step]
-        next_obs = to_float(self.experience_buffer[ep]['next_obs'][step])
-        next_obs = convert_image_format(next_obs, self.hdf5_format, self.output_format)
-
-        return obs, action, next_obs
-
-
-class PerturbationDataset(BaseDataset):
-    """Create dataset of (o, o', magnitude, index, property) from replay buffer."""
-
-    def __getitem__(self, idx):
-        ep, step = self.get_episode_step(idx)
-        obs = to_float(self.experience_buffer[ep]['obs'][step])
-        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
-        perturbed = to_float(self.experience_buffer[ep]['perturbed'][step])
-        perturbed = convert_image_format(perturbed, self.hdf5_format, self.output_format)
+        orig_seq = to_float(self.experience_buffer[ep]['obs'][step])
+        orig_seq = convert_image_format(orig_seq, self.hdf5_format, self.output_format)
+        pert_seq = to_float(self.experience_buffer[ep]['perturbed'][step])
+        for img_idx, img in enumerate(pert_seq):
+            img = convert_image_format(img, self.hdf5_format, self.output_format)
+            pert_seq[img_idx] = img
         magnitudes = self.experience_buffer[ep]['magnitudes'][step]
         indices = self.experience_buffer[ep]['indices'][step]
         properties = self.experience_buffer[ep]['properties'][step]
 
-        return obs, perturbed, magnitudes, indices, properties
+        return orig_seq, pert_seq, magnitudes, indices, properties
     
 
-
-class StateTransitionsDataset(data.Dataset):
-    """Create dataset of (o_t, a_t, o_{t+1}) transitions from replay buffer."""
-
+class ImageDataset(BaseDataset):
     def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
-        """
-        Args:
-            hdf5_file (string): Path to the hdf5 file that contains experience
-                buffer
-        """
-        self.experience_buffer = load_list_dict_h5py(hdf5_file)
-        self.hdf5_format = hdf5_format
-        self.output_format = output_format
+        super().__init__(hdf5_file, hdf5_format, output_format)
 
-        # Build table for conversion between linear idx -> episode/step idx
-        # List of tuples: [(0, 0), (0, 1), ..., (episode_idx - 1, step_idx - 1)]
-        self.idx2episode = list()
-        step = 0
+        if not self.experience_buffer[0]['obs'].ndim == 5:
+            raise ValueError(f"Expected 5D tensor for 'obs', got {self.experience_buffer[0]['obs'].ndim}.")
+
+        # Build table for conversion between linear idx -> episode/pair/sequence/perturbation idx
+        # List of tuples: [(0, 0, 0, False), (0, 0, 0, True), ..., (num_episodes - 1, num_steps - 1, sequence_length - 1, True)]
         for ep in range(len(self.experience_buffer)):
-            num_steps = len(self.experience_buffer[ep]['action'])
-            idx_tuple = [(ep, idx) for idx in range(num_steps)]
-            self.idx2episode.extend(idx_tuple)
-            step += num_steps
-
-        self.num_steps = step
-
-    def __len__(self):
-        return self.num_steps
-
-    def __getitem__(self, idx):
-        ep, step = self.idx2episode[idx]
-        obs = to_float(self.experience_buffer[ep]['obs'][step])
-        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
-        action = self.experience_buffer[ep]['action'][step]
-        next_obs = to_float(self.experience_buffer[ep]['next_obs'][step])
-
-        return obs, action, next_obs
-
-
-
-class PathDataset(data.Dataset):
-    """Create dataset of {(o_t, a_t)}_{t=1:N} paths from replay buffer.
-    """
-
-    def __init__(self, hdf5_file, hdf5_format='CHW', output_format='CHW', path_length=5):
-        """
-        Args:
-            hdf5_file (string): Path to the hdf5 file that contains experience
-                buffer
-        """
-        self.experience_buffer = load_list_dict_h5py(hdf5_file)
-        self.experience_buffer = [el for el in self.experience_buffer if el['next_obs'].size > 0]
-        self.hdf5_format = hdf5_format
-        self.output_format = output_format
-        self.path_length = path_length
-
-    def __len__(self):
-        return len(self.experience_buffer)
-
-    def __getitem__(self, idx):
-        observations = []
-        actions = []
-        l = len(self.experience_buffer[idx]['obs'])
-        path_length = self.path_length if l >= self.path_length else l
-        for i in range(path_length):
-            obs = to_float(self.experience_buffer[idx]['obs'][i])
-            obs = convert_image_format(obs, self.hdf5_format, self.output_format)
-            action = self.experience_buffer[idx]['action'][i]
-            observations.append(obs)
-            actions.append(action)
-        obs = to_float(self.experience_buffer[idx]['next_obs'][self.path_length - 1])
-        obs = convert_image_format(obs, self.hdf5_format, self.output_format)
-        observations.append(obs)
-        
-        return observations, actions
+            num_steps = len(self.experience_buffer[ep]['obs'])
+            for step in range(num_steps):
+                seq_length = len(self.experience_buffer[ep]['obs'][step])
+                idx_tuple_obs = [(ep, step, seq, False) for seq in range(seq_length)]
+                self.idx2episode.extend(idx_tuple_obs)
+                idx_tuple_pert = [(ep, step, seq, True) for seq in range(seq_length)]
+                self.idx2episode.extend(idx_tuple_pert)
+            self.num_steps += num_steps
     
+    def __getitem__(self, idx):
+        ep, step, seq, is_perturbation = self.get_episode_step(idx)
+        if is_perturbation:
+            img = self.experience_buffer[ep]['perturbed'][step][seq]
+        else:
+            img = self.experience_buffer[ep]['obs'][step][seq]
+        img = to_float(img)
+        img = convert_image_format(img, self.hdf5_format, self.output_format)
+        return img
+    
+
 
 class SlotsPairsDataset(data.Dataset):
     def __init__(self, hdf5_file):
@@ -416,4 +386,3 @@ class SlotsPairsDataset(data.Dataset):
         obj_index = torch.tensor(self.obj_index[idx], dtype=torch.int64)
         prop_index = torch.tensor(self.prop_index[idx], dtype=torch.int64)
         return slots_original, slots_perturbed, magnitude, obj_index, prop_index
-

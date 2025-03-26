@@ -12,10 +12,11 @@ from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 from slot_attention.AE import SlotAttentionAutoEncoder
-from utils import ObservationDataset, log_progress, set_seed
+from utils import ImageDataset, log_progress, set_seed
 
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+IMG_CHANNELS = 3
 
 
 def parse_argument():
@@ -29,10 +30,8 @@ def parse_argument():
     parser.add_argument('--seed', default=0, type=int, help='random seed')
 
     # Image parameters
-    parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
+    parser.add_argument('--hdf5_format', default='HWC', type=str, help='format of train, val and test data frames')
     parser.add_argument('--resolution', default=[64, 64], type=list)
-    parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
-    parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
 
     # Slot Attention parameters
     parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
@@ -77,9 +76,10 @@ def main():
     set_seed(args['seed'])
     
     print("Loading training data...")
-    dataset = ObservationDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
+    dataset = ImageDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
     train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, drop_last=True)
-    print(f"Finished loading all {args['batch_size'] * len(train_dataloader)} training samples.")
+    num_batches = len(train_dataloader)
+    print(f"Finished loading {args['batch_size'] * num_batches} ({num_batches} * {args['batch_size']}) training samples.")
     
     model, optim = initialize_model(args)
     ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
@@ -125,7 +125,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         epoch_loss = 0
         
         for batch in train_dataloader:
-            obs = batch[0].to(DEVICE)   # [B, C, H, W]
+            obs = batch.to(DEVICE)   # [B, C, H, W]
             batch_loss = 0
 
             # Use autocast if enabled, otherwise use a no-op context
@@ -183,8 +183,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
 def initialize_model(args):
     model = SlotAttentionAutoEncoder(
         tuple(args["resolution"]),
-        args["stacked_frames"],
-        args["channels_per_frame"],
+        IMG_CHANNELS,
         args["num_slots"],
         args["num_iterations"],
         args["slots_dim"],

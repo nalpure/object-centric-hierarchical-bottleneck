@@ -45,9 +45,9 @@ class SoftPositionEmbed(nn.Module):
         return inputs + grid
 
 class Encoder(nn.Module):
-    def __init__(self, hid_dim, resolution, num_frames, num_channels):
+    def __init__(self, hid_dim, resolution,num_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(num_channels*num_frames, hid_dim, 5, padding = 2)
+        self.conv1 = nn.Conv2d(num_channels, hid_dim, 5, padding = 2)
         self.conv2 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv3 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
         self.conv4 = nn.Conv2d(hid_dim, hid_dim, 5, padding = 2)
@@ -68,13 +68,13 @@ class Encoder(nn.Module):
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, hid_dim, slots_dim, resolution, num_frames, num_channels):
+    def __init__(self, hid_dim, slots_dim, resolution, num_channels):
         super().__init__()
         self.resolution = resolution
         self.conv1 = nn.ConvTranspose2d(slots_dim, hid_dim, 5, padding=2)
         self.conv2 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, padding=2)
         self.conv3 = nn.ConvTranspose2d(hid_dim, hid_dim, 5, padding=2)
-        self.conv4 = nn.ConvTranspose2d(hid_dim, (num_channels + 1) * num_frames, 3, padding=1)
+        self.conv4 = nn.ConvTranspose2d(hid_dim, (num_channels + 1), 3, padding=1)
         self.decoder_pos = SoftPositionEmbed(slots_dim, resolution)
 
     def forward(self, x):
@@ -92,11 +92,10 @@ class Decoder(nn.Module):
 
 """Slot Attention-based auto-encoder for object discovery."""
 class SlotAttentionAutoEncoder(nn.Module):
-    def __init__(self, resolution, num_frames, num_channels, num_slots, num_iterations, slots_dim, encdec_dim):
+    def __init__(self, resolution, num_channels, num_slots, num_iterations, slots_dim, encdec_dim):
         """Builds the Slot Attention-based auto-encoder.
         Args:
         resolution: Tuple of integers specifying width and height of input image.
-        num_frames: Number of frames in input image.
         num_slots: Number of slots in Slot Attention.
         num_channels: Number of channels in input image.
         num_iterations: Number of iterations in Slot Attention.
@@ -105,7 +104,6 @@ class SlotAttentionAutoEncoder(nn.Module):
         latent_dim: Dimensionality of latent space (if projection head is used).
         """
         super().__init__()
-        self.num_frames = num_frames
         self.slots_dim = slots_dim
         self.encdec_dim = encdec_dim
         self.resolution = resolution
@@ -113,11 +111,13 @@ class SlotAttentionAutoEncoder(nn.Module):
         self.num_iterations = num_iterations
         self.num_channels = num_channels
 
-        self.encoder_cnn = Encoder(self.encdec_dim, self.resolution, self.num_frames, self.num_channels)
-        self.decoder_cnn = Decoder(self.encdec_dim, self.slots_dim, self.resolution, self.num_frames, self.num_channels)
+        self.encoder_cnn = Encoder(self.encdec_dim, self.resolution, self.num_channels)
+        self.decoder_cnn = Decoder(self.encdec_dim, self.slots_dim, self.resolution, self.num_channels)
 
         self.fc1 = nn.Linear(encdec_dim, encdec_dim)
         self.fc2 = nn.Linear(encdec_dim, encdec_dim)
+
+        self.enc_norm = nn.LayerNorm([self.resolution[0] * self.resolution[1], self.encdec_dim])
 
         self.slot_attention = SlotAttention(
             num_slots=self.num_slots,
@@ -138,7 +138,7 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         # Convolutional encoder with position embedding.
         x = self.encoder_cnn(image)  # CNN Backbone.
-        x = nn.LayerNorm(x.shape[1:]).to(image.device)(x)
+        x = self.enc_norm(x)
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)  # Feedforward network on set.
@@ -153,38 +153,30 @@ class SlotAttentionAutoEncoder(nn.Module):
         # `slots` has shape: [batch_size, num_slots, slot_size].
         batch_size = slots.shape[0]
 
-        # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
+        # Broadcast slot features to a 2D grid and collapse slot dimension.
         grid = spatial_broadcast(slots, self.resolution)
         # `slots` has shape: [batch_size*num_slots, width_init, height_init, slot_size].
 
         x = self.decoder_cnn(grid)
-        # `x` has shape: [batch_size*num_slots, width, height, (num_channels+1)*num_frames].
+        # `x` has shape: [batch_size*num_slots, width, height, num_channels+1].
 
         # Undo combination of slot and batch dimension
         x = x.reshape(batch_size, -1, x.shape[1], x.shape[2], x.shape[3])
-        # `x` has shape: [batch_size, num_slots, width, height, (num_channels+1)*num_frames].
+        # `x` has shape: [batch_size, num_slots, width, height, num_channels+1].
 
-        recons, masks = x.split([self.num_channels*self.num_frames,self.num_frames], dim=-1)
-        recons = recons.view(batch_size, self.num_slots, self.resolution[0], self.resolution[1], self.num_frames, self.num_channels)
-        recons = recons.permute(0,4,1,2,3,5)
-        masks = masks.unsqueeze(-1)
-        masks = masks.permute(0,4,1,2,3,5)
-        # `recons` has shape: [batch_size, num_channels*num_frames, num_slots, width, height, num_channels].
-        # `masks` has shape: [batch_size, num_frames, num_slots, width, height, 1].
+        recons, masks = x.split([self.num_channels,1], dim=-1)
+        # `recons` has shape: [batch_size, num_slots, width, height, num_channels].
+        # `masks` has shape: [batch_size, num_slots, width, height, 1].
 
         # Normalize alpha masks over slots.
-        masks = nn.Softmax(dim=2)(masks)  # + 1e-8
+        masks = nn.Softmax(dim=1)(masks)  # + 1e-8
         
-        recon_combined = torch.sum(recons * masks, dim=2)  # Recombine image.
-        recon_combined = recon_combined.permute(0,1,4,2,3)
-        # `recon_combined` has shape: [batch_size, num_frames, 3, width, height].
+        # Recombine image.
+        recon_combined = torch.sum(recons * masks, dim=1)  
+        recon_combined = recon_combined.permute(0,3,1,2)
+        # `recon_combined` has shape: [batch_size, num_channels, width, height].
 
-        masks = masks.squeeze(-1)  # [batch_size, num_frames, width, height]
-        if self.num_frames == 1:
-            recon_combined = recon_combined.squeeze(1)
-            masks = masks.squeeze(1)
-        else:
-            recon_combined = recon_combined.reshape(batch_size, -1, self.resolution[0], self.resolution[1])
+        masks = masks.squeeze()  # [batch_size, width, height]
 
         return recon_combined, recons, masks
     
