@@ -4,7 +4,7 @@ import numpy as np
 
 import torch
 from torch import nn
-from slot_attention.AE import SlotAttentionAutoEncoder
+from slot_attention.autoencoder import SlotAttentionAutoEncoder
 
 class CSWM(nn.Module):
     """Main module for a Contrastively-trained Structured World Model (C-SWM).

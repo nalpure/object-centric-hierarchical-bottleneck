@@ -1,13 +1,12 @@
 import argparse
-from utils import ObservationDataset, PerturbationDataset, set_seed
+from explicit_latents.autoencoder import LatentAutoEncoder
+from utils import ImageDataset, set_seed, plot_images
 from torch.utils import data
 import numpy as np
 import torch
-from torch.amp import autocast
 import matplotlib.pyplot as plt
 import json
-from slot_attention.AE import SlotAttentionAutoEncoder
-from disentangle.latent_AE import LatentAutoEncoder
+from slot_attention.autoencoder import SlotAttentionAutoEncoder
 
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -60,7 +59,8 @@ def parse_arguments():
 def main():
     args = parse_arguments()
     set_seed(args["seed"])
-    ckpt_path_SA = f"{args['ckpt_path_SA']}{args['ckpt_name']}.ckpt"
+    #ckpt_path_SA = f"{args['ckpt_path_SA']}{args['ckpt_name']}.ckpt"
+    ckpt_path_SA = 'slot_attention(old)/checkpoints/slipscape/1F_implicit_fast_SA.ckpt'
     ckpt_path_disentangle = f"{args['ckpt_path_disentangle']}{args['ckpt_name']}.ckpt"
 
     print("Loading model:", ckpt_path_SA)
@@ -95,7 +95,7 @@ def main():
     model_disentangle.load_state_dict(torch.load(ckpt_path_disentangle, weights_only=True)['model_state_dict'], strict=True)
 
     print(f"Loading observation test dataset: {args['test_path']}")
-    test_dataset = ObservationDataset(hdf5_file=args["test_path"], hdf5_format=args["hdf5_format"])
+    test_dataset = ImageDataset(hdf5_file=args["test_path"], hdf5_format=args["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
 
     batch = next(iter(test_dataloader))
@@ -122,6 +122,11 @@ def main():
             all_slots_perturbed = torch.concat((active_slots_perturbed, slot_background), dim=1)
             recon_perturbed, _, _ = model_SA.decode(all_slots_perturbed)
             recon_perturbed_list.append(recon_perturbed)
+
+        print("--- z's ---")
+        for i in range(args['num_output_figs']):
+            print(f"z_{i}:\n{z[i].cpu().numpy()}")
+        print("-----------")
         
         for i in range(args['num_output_figs']):
             # plot image row: original, reconstructed (SA), reconstructed (from latent dim), reconstructions with latent perturbations
@@ -131,7 +136,6 @@ def main():
                 imgs.append(recon_perturbed[i])
                 labels.append(f"Pert #{j}")
             plot_images(imgs, save_path=f"{args['output_dir']}output_{i}.png", labels=labels)
-
 
 def plot_frames(orig, masks, combined_recons, save_path="output.png"):
     """
@@ -192,45 +196,6 @@ def plot_frames(orig, masks, combined_recons, save_path="output.png"):
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
-
-
-import matplotlib.pyplot as plt
-
-def plot_images(images, save_path, labels=None):
-    """
-    Displays all images in a single row and saves the resulting plot.
-
-    Args:
-        images (iterable): An iterable of images. Each image should be of shape [3, H, W].
-        save_path (str): File path to save the plotted image.
-    """
-    num_images = len(images)
-    images = list(images)
-
-    for i in range(num_images):
-        if hasattr(images[i], 'detach'):
-            images[i] = images[i].detach().cpu().numpy()
-        images[i] = images[i].transpose(1, 2, 0)
-    
-    # Create a figure with one row and as many columns as there are images.
-    fig, axes = plt.subplots(1, num_images, figsize=(4 * num_images, 4))
-    
-    # Ensure that axes is always iterable (if only one image, axes is not a list).
-    if num_images == 1:
-        axes = [axes]
-    
-    # Loop over images and display each one.
-    for idx, img in enumerate(images):
-        axes[idx].imshow(img)
-        axes[idx].axis('off')
-    
-    if labels is not None:
-        for ax, label in zip(axes, labels):
-            ax.set_title(label)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust the rect parameter to add padding at the top
-    plt.savefig(save_path)
-    plt.show()
 
 
 if __name__ == '__main__':

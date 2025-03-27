@@ -1,97 +1,44 @@
-import argparse
 import os
 from os import makedirs
 from os.path import exists
-import json
 from datetime import datetime
-import warnings
 import contextlib
 import torch
 from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
-from slot_attention.AE import SlotAttentionAutoEncoder
-from utils import ImageDataset, log_progress, set_seed
-
-
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-IMG_CHANNELS = 3
-
-
-def parse_argument():
-    parser = argparse.ArgumentParser()
-
-    # General parameters
-    parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
-    parser.add_argument('--train_path', default='data/slipscape/training_data', type=str, help='Path to the training data')
-    parser.add_argument('--init_ckpt', default=None, type=str, help='initial weights to start training')
-    parser.add_argument('--ckpt_path', default='checkpoints/slipscape/', type=str, help='where to save models')
-    parser.add_argument('--seed', default=0, type=int, help='random seed')
-
-    # Image parameters
-    parser.add_argument('--hdf5_format', default='HWC', type=str, help='format of train, val and test data frames')
-    parser.add_argument('--resolution', default=[64, 64], type=list)
-
-    # Slot Attention parameters
-    parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
-    parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
-    parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
-    parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder dimension size')
-
-    # Training parameters
-    parser.add_argument('--batch_size', default=64, type=int)
-    parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
-    parser.add_argument('--mixed_precision', default=False, action='store_true', help='If true, uses autocast for mixed precision training.')
-    parser.add_argument('--num_epochs', default=100, type=int, help='Number of epochs')
-    parser.add_argument('--learning_rate', default=0.004, type=float, help='Learning rate')
-    parser.add_argument('--warmup_epochs', default=20, type=int, help='Number of warmup epochs for the learning rate.')
-    parser.add_argument('--decay_epochs', default=80, type=int, help='Number of epochs for the learning rate decay.')
-    parser.add_argument('--decay_rate', default=0.5, type=float, help='Rate for the learning rate decay.')
-
-
-    args = parser.parse_args()
-    args = vars(args)
-
-    if args["config"] is not None:
-        args["ckpt_name"] = args["config"]
-        with open("configs.json", "r") as config_file:
-            configs = json.load(config_file)[args["config"]]
-        for key, value in configs.items():
-            if key in args:
-                args[key] = value
-            else:
-                warnings.warn(f"{key} is not a valid parameter")
-
-    return args
+from slot_attention.autoencoder import SlotAttentionAutoEncoder
+from utils import ImageDataset, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
 
 
 def main():
     print("Running on", DEVICE)
-    args = parse_argument()
+    config_name = get_config_argument()
+    config = load_config(config_name)["slot_attention"]
 
-    for key, value in args.items():
+    for key, value in config.items():
         print(f"{key}: {value}")
 
-    set_seed(args['seed'])
+    set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = ImageDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
-    train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, drop_last=True)
+    dataset = ImageDataset(hdf5_file=config["train_path"], hdf5_format=config["hdf5_format"])
+    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
+    batch_size = config['batch_size']
     num_batches = len(train_dataloader)
-    print(f"Finished loading {args['batch_size'] * num_batches} ({num_batches} * {args['batch_size']}) training samples.")
+    print(f"Finished loading {batch_size * num_batches} ({num_batches} * {batch_size}) training samples.")
     
-    model, optim = initialize_model(args)
-    ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
+    model, optim = initialize_model(config)
     
     print("Training slot attention model...")
     train(model, optim, train_dataloader, 
-        args["num_epochs"],
-        args["warmup_epochs"], 
-        args["decay_epochs"], 
-        args["decay_rate"], 
-        args["mixed_precision"],
-        ckpt_path
+        config["num_epochs"],
+        config["warmup_epochs"], 
+        config["decay_epochs"], 
+        config["decay_rate"], 
+        config["mixed_precision"],
+        config["ckpt_path"]
     )
 
 

@@ -1,0 +1,20 @@
+{
+    "slot_attention":{
+        "train_path": "data/slipscape/10F_3sph_4000ep_s0.h5",
+        "test_path": "data/slipscape/10F_3sph_10ep_s2.h5",
+        "ckpt_path": "slot_attention/checkpoints/full2.ckpt",
+        "slot_save_path": "data/generated_slots/full2.h5",
+
+        "batch_size": 64,
+        "learning_rate": 0.0003,
+        "num_epochs": 200,
+        "warmup_epochs": 0,
+        "decay_epochs": 100,
+        "decay_rate": 0.5,
+
+        "num_slots": 4,
+        "slots_dim": 64,
+        "num_iterations": 3,
+        "encdec_dim": 32
+    }
+}

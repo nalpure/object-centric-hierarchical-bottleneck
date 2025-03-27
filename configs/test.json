@@ -1,0 +1,34 @@
+{
+    "slot_attention":{
+        "train_path": "data/slipscape/5F_test.h5",
+        "test_path": "data/slipscape/5F_test.h5",
+        "ckpt_path": "slot_attention/checkpoints/test.ckpt",
+        "slot_save_path": "data/generated_slots/test.h5",
+        
+        "batch_size": 8,
+        "learning_rate": 0.0005,
+        "num_epochs": 10,
+        "warmup_epochs": 0,
+        "decay_epochs": 100,
+        "decay_rate": 0.5,
+
+        "num_slots": 4,
+        "slots_dim": 64,
+        "num_iterations": 3,
+        "encdec_dim": 32
+    },
+    "explicit_latents": {
+        "train_path": "data/generated_slots/test.h5",
+        "ckpt_path": "checkpoints/explicit_latents/test.ckpt",
+        "batch_size": 8,
+
+        "num_epochs": 500,
+        "learning_rate": 0.0004,
+        "warmup_epochs": 0,
+        "decay_epochs": 500,
+        "decay_rate": 0.5,
+        "latent_dim": 3,
+        "rec_loss_mult": 100
+    }
+
+}

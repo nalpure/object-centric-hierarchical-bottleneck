@@ -1,8 +1,11 @@
 """Utility functions."""
 
+import argparse
 from datetime import datetime
 from datetime import timedelta
+import json
 import os
+from os.path import exists
 import random
 import h5py
 import numpy as np
@@ -14,6 +17,9 @@ from torch import nn
 import matplotlib.pyplot as plt
 
 EPS = 1e-17
+CONFIG_DIR = "configs/"
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+IMG_CHANNELS = 3
 
 # Define the mappings between property names and numerical codes
 STRING_TO_CODE = {
@@ -25,6 +31,95 @@ STRING_TO_CODE = {
 }
 
 CODE_TO_STRING = {v: k for k, v in STRING_TO_CODE.items()}
+
+DEFAULT_CONFIG = {
+    "slot_attention": {
+        # General parameters
+        "train_path": "data/slipscape/training_data.h5",
+        "init_ckpt": None,
+        "ckpt_path": "checkpoints/slot_attention/checkpoint.ckpt",
+        "slot_save_path": "data/generated_slots/slots.h5",
+        "seed": 0,
+        # Image parameters
+        "hdf5_format": "HWC",
+        "resolution": [64, 64],
+        # Slot Attention parameters
+        "num_slots": 4,
+        "num_iterations": 3,
+        "slots_dim": 64,
+        "encdec_dim": 32,
+        # Training parameters
+        "batch_size": 64,
+        "optimizer": "adam",
+        "mixed_precision": False,
+        "num_epochs": 100,
+        "learning_rate": 0.0003,
+        "warmup_epochs": 20,
+        "decay_epochs": 80,
+        "decay_rate": 0.5
+    },
+    "explicit_latents": {
+        # General parameters
+        "train_path": "data/generated_slots/slots.h5",
+        "init_ckpt": None,
+        "ckpt_path": "checkpoints/explicit_latents/checkpoint.ckpt",
+        "seed": 0,
+        # Training parameters
+        "batch_size": 128,
+        "optimizer": "adam",
+        "mixed_precision": False,
+        "num_epochs": 500,
+        "learning_rate": 0.0004,
+        "warmup_epochs": 0,
+        "decay_epochs": 500,
+        "decay_rate": 0.5,
+        # Further model parameters
+        "latent_dim": 3,
+        "rec_loss_mult": 100 # Multiplier for the reconstruction loss
+    }
+}
+
+def get_config_argument():  
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', default=None, type=str, help='name of the configuration file to use')
+    args = parser.parse_args()
+    args = vars(args)
+
+    if args['config'] is None:
+        raise ValueError("Please provide a configuration file.")
+    if len(args.keys()) != 1:
+        raise ValueError("Invalid arguments provided.")
+
+    return args['config']
+
+
+def load_config(config_name):
+    """
+    Load configuration from a nested JSON file.
+    """
+    user_config_path = CONFIG_DIR + config_name + '.json'
+    if not exists(user_config_path):
+        raise ValueError("Configuration file not found.")
+
+    with open(user_config_path, 'r') as f:
+        user_config = json.load(f)
+    
+    combined_config = recursive_update(DEFAULT_CONFIG.copy(), user_config)
+
+    return combined_config
+
+
+def recursive_update(base_dict, override_dict):
+    """
+    Recursively updates base_dict with values from override_dict.
+    If a key doesn't exist in base_dict, it is added.
+    """
+    for key, value in override_dict.items():
+        if isinstance(value, dict) and key in base_dict and isinstance(base_dict[key], dict):
+            base_dict[key] = recursive_update(base_dict[key], value)
+        else:
+            base_dict[key] = value
+    return base_dict
 
 
 def encode(string):
@@ -294,7 +389,7 @@ class BaseDataset(data.Dataset):
         return len(self.idx2episode)
 
 
-class PerturbedSequenceDataset(BaseDataset):
+class PerturbedImageSequenceDataset(BaseDataset):
     def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
         super().__init__(hdf5_file, hdf5_format, output_format)
         # Build table for conversion between linear idx -> episode/step idx
@@ -305,13 +400,22 @@ class PerturbedSequenceDataset(BaseDataset):
             self.idx2episode.extend(idx_tuple)
     
     def __getitem__(self, idx):
+        hdf5_format = self.hdf5_format
+        output_format = self.output_format
         ep, step = self.get_episode_step(idx)
         orig_seq = to_float(self.experience_buffer[ep]['obs'][step])
-        orig_seq = convert_image_format(orig_seq, self.hdf5_format, self.output_format)
         pert_seq = to_float(self.experience_buffer[ep]['perturbed'][step])
-        for img_idx, img in enumerate(pert_seq):
-            img = convert_image_format(img, self.hdf5_format, self.output_format)
-            pert_seq[img_idx] = img
+
+        if hdf5_format == 'CHW' and output_format == 'HWC':
+            transpose_tuple = (0, 2, 3, 1)  # Convert CHW to HWC
+        elif hdf5_format == 'HWC' and output_format == 'CHW':
+            transpose_tuple = (0, 3, 1, 2)  # Convert HWC to CHW
+        elif hdf5_format != output_format:
+            raise ValueError(f'Expected \'CHW\' or \'HWC\' as hdf5-format and output-format, received \'{hdf5_format}\ and \'{output_format}\'.')
+        
+        orig_seq = np.transpose(orig_seq, transpose_tuple)
+        pert_seq = np.transpose(pert_seq, transpose_tuple)
+
         magnitudes = self.experience_buffer[ep]['magnitudes'][step]
         indices = self.experience_buffer[ep]['indices'][step]
         properties = self.experience_buffer[ep]['properties'][step]
@@ -349,7 +453,7 @@ class ImageDataset(BaseDataset):
     
 
 
-class SlotsPairsDataset(data.Dataset):
+class PerturbedSlotSequenceDataset(data.Dataset):
     def __init__(self, hdf5_file):
         self.hdf5_file = hdf5_file
         self.original, self.perturbed, self.magnitude, self.obj_index, self.prop_index = self._load_slots_data()
@@ -358,8 +462,8 @@ class SlotsPairsDataset(data.Dataset):
 
     def _load_slots_data(self):
         data_dict = {
-            'original': [],
-            'perturbed': [],
+            'orig_seq': [],
+            'pert_seq': [],
             'magnitude': [],
             'obj_index': [],
             'prop_index': []

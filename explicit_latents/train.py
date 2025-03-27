@@ -14,79 +14,38 @@ from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 from torch.nn.functional import mse_loss # TODO change this to MSELoss
 
-from disentangle.latent_AE import LatentAutoEncoder
-from utils import SlotsPairsDataset, log_progress, set_seed
+from explicit_latents.autoencoder import LatentAutoEncoder
+from utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
 
-
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-
-def parse_argument():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
-    parser.add_argument('--train_path', default='data/generated_slots/slots.h5', type=str, help='Path to the training data (slots)')
-    parser.add_argument('--init_ckpt', default=None, type=str, help='Path to the initial model weights')
-    parser.add_argument('--ckpt_path', default='checkpoints/spriteworld/', type=str, help='where to save models')
-    parser.add_argument('--seed', default=0, type=int, help='random seed')
-
-    # Training parameters
-    parser.add_argument('--batch_size', default=64, type=int)
-    parser.add_argument('--optimizer', default='adam', type=str, help='Optimizer to use. Choose between [adam, sgd, rmsprop, adamw, radam]')
-    parser.add_argument('--mixed_precision', default=False, action='store_true', help='If true, uses autocast for mixed precision training.')
-    parser.add_argument('--num_epochs', default=100, type=int, help='Number of epochs')
-    parser.add_argument('--learning_rate', default=0.004, type=float, help='Learning rate')
-    parser.add_argument('--warmup_epochs', default=20, type=int, help='Number of warmup epochs for the learning rate.')
-    parser.add_argument('--decay_epochs', default=80, type=int, help='Number of epochs for the learning rate decay.')
-    parser.add_argument('--decay_rate', default=0.5, type=float, help='Rate for the learning rate decay.')
-
-    # Further disentanglement parameters
-    parser.add_argument('--latent_dim', default=3, type=int, help='Specify the latent dimensionality.')
-    parser.add_argument('--rec_loss_mult', default=1000, type=int, help='Multiplier for the reconstruction loss.')
-
-    args = parser.parse_args()
-    args = vars(args)
-
-    if args["config"] is not None:
-        args["ckpt_name"] = args["config"]
-        with open("configs_disentangle.json", "r") as config_file:
-            configs = json.load(config_file)[args["config"]]
-        for key, value in configs.items():
-            if key in args:
-                args[key] = value
-            else:
-                warnings.warn(f"{key} is not a valid parameter")
-
-    return args
 
 
 def main():
     print("Running on", DEVICE)
-    args = parse_argument()
-    for key, value in args.items():
+    config_name = get_config_argument()
+    config = load_config(config_name)["explicit_latents"]
+
+    for key, value in config.items():
         print(f"{key}: {value}")
-    set_seed(args['seed'])
+    set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = SlotsPairsDataset(hdf5_file=args["train_path"])
-    train_dataloader = data.DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, drop_last=True)
-    print(f"Finished loading all {args['batch_size'] * len(train_dataloader)} training samples.")
+    dataset = PerturbedSlotSequenceDataset(hdf5_file=config["train_path"])
+    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
+    print(f"Finished loading all {config['batch_size'] * len(train_dataloader)} training samples.")
 
     slots_dim = next(iter(train_dataloader))[0].shape[-1]
-    model, optim = initialize_model(args, slots_dim)
-    ckpt_path = f"{args['ckpt_path'] + args['ckpt_name']}.ckpt"
-
-
+    model, optim = initialize_model(config, slots_dim)
+    ckpt_path = config["ckpt_path"]
     
     print("Training slot attention model...")
     train(model, optim, train_dataloader,
-        args["num_epochs"],
-        args["warmup_epochs"],
-        args["decay_epochs"],
-        args["decay_rate"],
-        args["mixed_precision"],
+        config["num_epochs"],
+        config["warmup_epochs"],
+        config["decay_epochs"],
+        config["decay_rate"],
+        config["mixed_precision"],
         ckpt_path,
-        args["rec_loss_mult"]
+        config["rec_loss_mult"]
     )
 
 
@@ -132,6 +91,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
             
             with context_manager:
+                print("slots_orig", slots_orig.shape)
                 slots_orig_reconstructed, z_orig = model(slots_orig)
                 slots_pert_reconstructed, z_pert = model(slots_pert)
 

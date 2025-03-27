@@ -1,95 +1,57 @@
-import argparse
-from utils import ImageDataset, PerturbationDataset, PerturbedSequenceDataset, set_seed
+from tqdm import tqdm
+from utils import PerturbedImageSequenceDataset, get_config_argument, load_config, set_seed, DEVICE, IMG_CHANNELS
 from torch.utils import data
 import torch
-from slot_attention.AE import SlotAttentionAutoEncoder
-import json
+from slot_attention.autoencoder import SlotAttentionAutoEncoder
 import h5py
 import os
 
 
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-IMG_CHANNELS = 3
-
-
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-
-    # General parameters
-    parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
-    parser.add_argument('--seed', default=0, type=int, help='random seed')
-    parser.add_argument('--train_path', default='data/slipscape/train_data', type=str, help='Path to the training data')
-    parser.add_argument('--ckpt_path', default='checkpoints/slipscape/', type=str, help='where the model is saved')
-    parser.add_argument('--output_path', default='data/generated_slots/slots.h5', type=str, help='where to save the slots')
-    parser.add_argument('--batch_size', default=64, type=int)
-
-    # Image parameters
-    parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
-    parser.add_argument('--resolution', default=[64, 64], type=list)
-
-    # Further Slot Attention parameters
-    parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
-    parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
-    parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
-    parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder dimension size') 
-
-    args = parser.parse_args()
-    args = vars(args)
-
-    if args["config"] is not None:
-        args["ckpt_name"] = args["config"]
-        with open("configs.json", "r") as config_file:
-            configs = json.load(config_file)[args["config"]]
-        for key, value in configs.items():
-            try:
-                args[key] = value
-            except KeyError:
-                Warning(f"{key} is not a valid parameter")
-
-    return args
-
-
 def main():
-    args = parse_arguments()
-    set_seed(args["seed"])
-    ckpt_path = f"{args['ckpt_path']}{args['ckpt_name']}.ckpt"
-    output_path = args['output_path']
+    config_name = get_config_argument()
+    config = load_config(config_name)["slot_attention"]
+    set_seed(config["seed"])
+    ckpt_path = config['ckpt_path']
+    output_path = config['slot_save_path']
 
     print("Loading model:", ckpt_path)
     model = SlotAttentionAutoEncoder(
-        resolution=args["resolution"],
-        num_slots=args["num_slots"],
-        num_frames = args["stacked_frames"],
-        num_iterations=args["num_iterations"], 
+        resolution=config["resolution"],
+        num_slots=config["num_slots"],
+        num_iterations=config["num_iterations"], 
         num_channels=IMG_CHANNELS,
-        slots_dim=args["slots_dim"], 
-        encdec_dim=args["encdec_dim"]).to(DEVICE)
+        slots_dim=config["slots_dim"], 
+        encdec_dim=config["encdec_dim"]).to(DEVICE)
     model.eval()
     
     missing_keys, unexpected_keys = model.load_state_dict(torch.load(ckpt_path, weights_only=True)['model_state_dict'], strict=False)
-    # these keys are not in the checkpoint but will be generated again
-    missing_keys.remove('encoder_cnn.encoder_pos.grid') 
-    missing_keys.remove('decoder_cnn.decoder_pos.grid') 
+    
+    # these keys can be generated again by the model
+    generatable_keys = ['encoder_cnn.encoder_pos.grid', 'decoder_cnn.decoder_pos.grid']
+    for key in generatable_keys:
+        if key in missing_keys:
+            missing_keys.remove(key)
     
     if missing_keys:
         raise KeyError(f"Missing keys: {missing_keys}")
     if unexpected_keys:
         raise KeyError(f"Unexpected keys: {unexpected_keys}")
 
-    print(f"Loading observation training dataset: {args['train_path']}")
-    orig_dataset = PerturbedSequenceDataset(hdf5_file=args["train_path"], hdf5_format=args["hdf5_format"])
-    dataloader = data.DataLoader(orig_dataset, batch_size=args['batch_size'], shuffle=False, drop_last=True)
-    print(f"Finished loading all {args['batch_size'] * len(dataloader)} training samples.")
+    print(f"Loading observation training dataset: {config['train_path']}")
+    orig_dataset = PerturbedImageSequenceDataset(hdf5_file=config["train_path"], hdf5_format=config["hdf5_format"])
+    dataloader = data.DataLoader(orig_dataset, batch_size=config['batch_size'], shuffle=False, drop_last=True)
+    print(f"Finished loading all {config['batch_size'] * len(dataloader)} training samples.")
     print(f"Saving slots to {output_path}")
 
     with torch.no_grad():
-        for batch_index, batch in enumerate(dataloader):
+        for batch_index, batch in enumerate(tqdm(dataloader)):
             orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
             seq_len = orig_seq.size(1)
             orig_seq = orig_seq.to(DEVICE)
             pert_seq = pert_seq.to(DEVICE)
-            orig_seq_slots = torch.empty((args['batch_size'], seq_len, args['num_slots'], args['slots_dim'])).to(DEVICE)
-            pert_seq_slots = torch.empty((args['batch_size'], seq_len, args['num_slots'], args['slots_dim'])).to(DEVICE)
+            num_active_slots = config['num_slots'] - 1
+            orig_seq_slots = torch.empty((config['batch_size'], seq_len, num_active_slots, config['slots_dim'])).to(DEVICE)
+            pert_seq_slots = torch.empty((config['batch_size'], seq_len, num_active_slots, config['slots_dim'])).to(DEVICE)
 
             for i in range(seq_len):
                 _, _, _, active_slots_original, _ = model(orig_seq[:, i])
