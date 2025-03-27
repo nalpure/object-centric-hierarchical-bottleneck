@@ -257,6 +257,7 @@ def plot_images(images, save_path, labels=None, grayscale_indices=[]):
             images[i] = images[i].detach().cpu().numpy()
         if i not in grayscale_indices:
             images[i] = images[i].transpose(1, 2, 0)
+        images[i] = np.clip(images[i], 0, 1)
     
     # Create a figure with one row and as many columns as there are images.
     fig, axes = plt.subplots(1, num_images, figsize=(4 * num_images, 4))
@@ -285,13 +286,12 @@ class BaseDataset(data.Dataset):
         self.hdf5_format = hdf5_format
         self.output_format = output_format
         self.idx2episode = list()
-        self.num_steps = 0
     
     def get_episode_step(self, idx):
         return self.idx2episode[idx]
     
     def __len__(self):
-        return self.num_steps
+        return len(self.idx2episode)
 
 
 class PerturbedSequenceDataset(BaseDataset):
@@ -303,7 +303,6 @@ class PerturbedSequenceDataset(BaseDataset):
             num_steps = len(self.experience_buffer[ep]['obs'])
             idx_tuple = [(ep, idx) for idx in range(num_steps)]
             self.idx2episode.extend(idx_tuple)
-            self.num_steps += num_steps
     
     def __getitem__(self, idx):
         ep, step = self.get_episode_step(idx)
@@ -337,7 +336,6 @@ class ImageDataset(BaseDataset):
                 self.idx2episode.extend(idx_tuple_obs)
                 idx_tuple_pert = [(ep, step, seq, True) for seq in range(seq_length)]
                 self.idx2episode.extend(idx_tuple_pert)
-            self.num_steps += num_steps
     
     def __getitem__(self, idx):
         ep, step, seq, is_perturbation = self.get_episode_step(idx)
