@@ -89,22 +89,26 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
+            num_timesteps = slots_orig.shape[1]
             
             with context_manager:
-                print("slots_orig", slots_orig.shape)
-                slots_orig_reconstructed, z_orig = model(slots_orig)
-                slots_pert_reconstructed, z_pert = model(slots_pert)
-
-                recon_loss = mse_loss(slots_orig, slots_orig_reconstructed)
-                recon_loss += mse_loss(slots_pert, slots_pert_reconstructed)
-                recon_loss *= rec_loss_mult / 2
+                recon_loss = 0
+                for timestep in range(num_timesteps):
+                    slots_orig_reconstructed, z_orig = model(slots_orig[:, timestep])
+                    slots_pert_reconstructed, z_pert = model(slots_pert[:, timestep])
+                    recon_loss += mse_loss(slots_orig[:, timestep], slots_orig_reconstructed)
+                    recon_loss += mse_loss(slots_pert[:, timestep], slots_pert_reconstructed)
+                    if timestep == 0:
+                        dis_loss = disentanglement_loss_magnitude(z_orig, z_pert, magnitude)
+                
+                recon_loss *= rec_loss_mult # Account for the loss multiplier
+                recon_loss /= 2 # Account for the two reconstructions
+                recon_loss /= num_timesteps # Account for the number of timesteps
                 batch_loss += recon_loss
                 epoch_recon_loss += recon_loss.item()
 
-                #dis_loss = disentanglement_loss(z_orig, z_pert)
-                dis_loss = disentanglement_loss_magnitude(z_orig, z_pert, magnitude)
-                epoch_dis_loss += dis_loss.item()
                 batch_loss += dis_loss
+                epoch_dis_loss += dis_loss.item()
 
             optimizer.zero_grad()
             current_step += 1

@@ -98,9 +98,9 @@ class LatentAutoEncoder(nn.Module):
         batch_size, num_slots, slots_dim = slots.shape
         latent_dim = self.latent_dim
 
-        slots_flat = slots.view(batch_size * num_slots, slots_dim)
+        slots_flat = slots.reshape(batch_size * num_slots, slots_dim)
         z_flat = self.object_encoder(slots_flat)
-        z = z_flat.view(batch_size, num_slots, latent_dim)
+        z = z_flat.reshape(batch_size, num_slots, latent_dim)
         return z
 
     

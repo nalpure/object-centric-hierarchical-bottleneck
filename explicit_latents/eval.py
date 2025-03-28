@@ -1,6 +1,6 @@
 import argparse
 from explicit_latents.autoencoder import LatentAutoEncoder
-from utils import ImageDataset, set_seed, plot_images
+from utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
 from torch.utils import data
 import numpy as np
 import torch
@@ -8,70 +8,29 @@ import matplotlib.pyplot as plt
 import json
 from slot_attention.autoencoder import SlotAttentionAutoEncoder
 
-
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 PERTURBATION_MAGNITUDE = 0.1
-
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-
-    # General parameters
-    parser.add_argument('--config', default=None, type=str, help='name of the configuration to use')
-    parser.add_argument('--seed', default=0, type=int, help='random seed')
-    parser.add_argument('--test_path', default='data/slipscape/test_data', type=str, help='Path to the test data')
-    parser.add_argument('--ckpt_path_SA', default='checkpoints/slot_attention/', type=str, help='directory where the slot attention autoencoder model is saved')
-    parser.add_argument('--ckpt_path_disentangle', default='checkpoints/disentangle/', type=str, help='directory where the disentangle model is saved')
-    parser.add_argument('--output_dir', default='data/figures/')
-    parser.add_argument('--num_output_figs', default=3, type=int, help='desired number of output figures')
-    parser.add_argument('--batch_size', default=64, type=int)
-
-    # Image parameters
-    parser.add_argument('--hdf5_format', default='CHW', type=str, help='format of train, val and test data frames')
-    parser.add_argument('--resolution', default=[64, 64], type=list)
-    parser.add_argument('--stacked_frames', default=1, type=int, help='number of frames stacked in each sample')
-    parser.add_argument('--channels_per_frame', default=3, type=int, help='number of channels for a single frame')
-
-    # Further Slot Attention parameters
-    parser.add_argument('--num_slots', default=4, type=int, help='Number of slots in Slot Attention')
-    parser.add_argument('--num_iterations', default=3, type=int, help='Number of attention iterations')
-    parser.add_argument('--slots_dim', default=64, type=int, help='hidden dimension size')
-    parser.add_argument('--encdec_dim', default=32, type=int, help='encoder/decoder dimension size') 
-
-    # Disentanglement parameters
-    parser.add_argument('--latent_dim', default=3, type=int, help='Size of the latent space.')
-
-    args = parser.parse_args()
-    args = vars(args)
-
-    if args["config"] is not None:
-        args["ckpt_name"] = args["config"]
-        with open("configs.json", "r") as config_file:
-            configs = json.load(config_file)[args["config"]]
-        for key, value in configs.items():
-            try:
-                args[key] = value
-            except KeyError:
-                Warning(f"{key} is not a valid parameter")
-
-    return args
+NUM_OUTPUT_FIGS = 5
+OUTPUT_DIR = "data/figures/"
 
 
 def main():
-    args = parse_arguments()
-    set_seed(args["seed"])
-    #ckpt_path_SA = f"{args['ckpt_path_SA']}{args['ckpt_name']}.ckpt"
-    ckpt_path_SA = 'slot_attention(old)/checkpoints/slipscape/1F_implicit_fast_SA.ckpt'
-    ckpt_path_disentangle = f"{args['ckpt_path_disentangle']}{args['ckpt_name']}.ckpt"
+    config_name = get_config_argument()
+    config = load_config(config_name)
+    config_SA = config["slot_attention"]
+    config_latent = config["explicit_latents"]
+    
+    set_seed(config_latent["seed"])
+    ckpt_path_SA = config_SA["ckpt_path"]
+    ckpt_path_disentangle = config_latent["ckpt_path"]
 
     print("Loading model:", ckpt_path_SA)
     model_SA = SlotAttentionAutoEncoder(
-        resolution=args["resolution"],
-        num_slots=args["num_slots"],
-        num_frames = args["stacked_frames"],
-        num_iterations=args["num_iterations"], 
-        num_channels=args["channels_per_frame"],
-        slots_dim=args["slots_dim"], 
-        encdec_dim=args["encdec_dim"]).to(DEVICE)
+        resolution=config_SA["resolution"],
+        num_slots=config_SA["num_slots"],
+        num_iterations=config_SA["num_iterations"], 
+        num_channels=IMG_CHANNELS,
+        slots_dim=config_SA["slots_dim"], 
+        encdec_dim=config_SA["encdec_dim"]).to(DEVICE)
     model_SA.eval() 
     missing_keys, unexpected_keys = model_SA.load_state_dict(torch.load(ckpt_path_SA, weights_only=True)['model_state_dict'], strict=False)
     
@@ -88,18 +47,18 @@ def main():
 
     print("Loading model:", ckpt_path_disentangle)
     model_disentangle = LatentAutoEncoder(
-        latent_dim=args["latent_dim"], 
-        slots_dim=args["slots_dim"]
+        latent_dim=config_latent["latent_dim"], 
+        slots_dim=config_SA["slots_dim"]
     ).to(DEVICE)
     model_disentangle.eval()
     model_disentangle.load_state_dict(torch.load(ckpt_path_disentangle, weights_only=True)['model_state_dict'], strict=True)
 
-    print(f"Loading observation test dataset: {args['test_path']}")
-    test_dataset = ImageDataset(hdf5_file=args["test_path"], hdf5_format=args["hdf5_format"])
-    test_dataloader = data.DataLoader(test_dataset, batch_size=args['batch_size'], shuffle=True, drop_last=True)
+    print(f"Loading observation test dataset: {config_SA['test_path']}")
+    test_dataset = ImageDataset(hdf5_file=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
+    test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=True)
 
     batch = next(iter(test_dataloader))
-    obs = batch[0].to(DEVICE)
+    obs = batch.to(DEVICE)
 
     with torch.no_grad():
         recon_SA, _, _, slots_orig, slot_background = model_SA(obs)
@@ -113,7 +72,7 @@ def main():
         
         print("z")
         print(z[0])
-        for l in range(args['latent_dim']):
+        for l in range(config_latent['latent_dim']):
             z_perturbed = z.clone()
             z_perturbed[:, object_index, l] += PERTURBATION_MAGNITUDE
             print(f"z_pert#{l}")
@@ -124,18 +83,20 @@ def main():
             recon_perturbed_list.append(recon_perturbed)
 
         print("--- z's ---")
-        for i in range(args['num_output_figs']):
+        
+        for i in range(NUM_OUTPUT_FIGS):
             print(f"z_{i}:\n{z[i].cpu().numpy()}")
         print("-----------")
         
-        for i in range(args['num_output_figs']):
+        for i in range(NUM_OUTPUT_FIGS):
             # plot image row: original, reconstructed (SA), reconstructed (from latent dim), reconstructions with latent perturbations
             imgs = [obs[i], recon_SA[i], recon_latent[i]]
             labels = ["Original", "Reconstructed (SA)", "Reconstructed (from latent dim)"]
             for j, recon_perturbed in enumerate(recon_perturbed_list):
                 imgs.append(recon_perturbed[i])
                 labels.append(f"Pert #{j}")
-            plot_images(imgs, save_path=f"{args['output_dir']}output_{i}.png", labels=labels)
+            save_path = f"{OUTPUT_DIR}output_{i}.png"
+            plot_images(imgs, save_path, labels=labels)
 
 def plot_frames(orig, masks, combined_recons, save_path="output.png"):
     """
