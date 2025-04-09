@@ -35,10 +35,10 @@ CODE_TO_STRING = {v: k for k, v in STRING_TO_CODE.items()}
 DEFAULT_CONFIG = {
     "slot_attention": {
         # General parameters
-        "train_path": "data/slipscape/training_data.h5",
+        "train_path": "data/observations/training_data.h5",
         "init_ckpt": None,
         "ckpt_path": "checkpoints/slot_attention/checkpoint.ckpt",
-        "slot_save_path": "data/generated_slots/slots.h5",
+        "slot_save_path": "data/slots/slots.h5",
         "seed": 0,
         # Image parameters
         "hdf5_format": "HWC",
@@ -60,9 +60,10 @@ DEFAULT_CONFIG = {
     },
     "explicit_latents": {
         # General parameters
-        "train_path": "data/generated_slots/slots.h5",
+        "train_path": "data/slots/slots.h5",
         "init_ckpt": None,
         "ckpt_path": "checkpoints/explicit_latents/checkpoint.ckpt",
+        "save_path": "data/explicit_latents/expl_latents.h5",
         "seed": 0,
         # Training parameters
         "batch_size": 128,
@@ -76,6 +77,24 @@ DEFAULT_CONFIG = {
         # Further model parameters
         "latent_dim": 3,
         "rec_loss_mult": 100 # Multiplier for the reconstruction loss
+    },
+    "implicit_latents": {
+        # General parameters
+        "train_path": "data/explicit_latents/expl_latents.h5",
+        "init_ckpt": None,
+        "ckpt_path": "checkpoints/implicit_latents/checkpoint.ckpt",
+        "seed": 0,
+        # Training parameters
+        "batch_size": 128,
+        "optimizer": "adam",
+        "mixed_precision": False,
+        "num_epochs": 500,
+        "learning_rate": 0.0004,
+        "warmup_epochs": 0,
+        "decay_epochs": 500,
+        "decay_rate": 0.5,
+        # Further model parameters
+        "latent_dim": 5
     }
 }
 

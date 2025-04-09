@@ -1,10 +1,7 @@
-import argparse
 import os
 from os import makedirs
 from os.path import exists
-import json
 from datetime import datetime
-import warnings
 import contextlib
 
 import torch
@@ -12,7 +9,8 @@ from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
-from torch.nn.functional import mse_loss # TODO change this to MSELoss
+from torch.nn import MSELoss
+
 
 from explicit_latents.autoencoder import LatentAutoEncoder
 from utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
@@ -22,7 +20,7 @@ from utils import PerturbedSlotSequenceDataset, get_config_argument, load_config
 def main():
     print("Running on", DEVICE)
     config_name = get_config_argument()
-    config = load_config(config_name)["explicit_latents"]
+    config = load_config(config_name)["implicit_latents"]
 
     for key, value in config.items():
         print(f"{key}: {value}")
@@ -34,22 +32,21 @@ def main():
     print(f"Finished loading all {config['batch_size'] * len(train_dataloader)} training samples.")
 
     slots_dim = next(iter(train_dataloader))[0].shape[-1]
-    model, optim = initialize_model(config, slots_dim)
+
     ckpt_path = config["ckpt_path"]
     
     print("Training slot attention model...")
-    train(model, optim, train_dataloader,
+    train(None, None, train_dataloader,
         config["num_epochs"],
         config["warmup_epochs"],
         config["decay_epochs"],
         config["decay_rate"],
         config["mixed_precision"],
-        ckpt_path,
-        config["rec_loss_mult"]
+        ckpt_path
     )
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, rec_loss_mult, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -64,13 +61,13 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     if not exists(ckpt_dir):
         makedirs(ckpt_dir)
 
-    scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
+    #scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
     scaler = GradScaler(device=DEVICE.type) if mixed_precision else None
 
     loss_list = []
     current_step = 0
     best_loss = 1e9
-    model.train()
+    #model.train()
     start = datetime.now()
     
     print("Training started at", start.ctime())
@@ -82,7 +79,11 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         for batch in train_dataloader:
             batch_loss = 0
 
-            slots_orig, slots_pert, magnitude, obj_index, prop_index = batch
+            orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
+            print("orig_seq", orig_seq.shape)
+            print("pert_seq", pert_seq.shape)
+            raise NotImplementedError("Debugging shape issues")
+
             slots_orig = slots_orig.to(DEVICE)
             slots_pert = slots_pert.to(DEVICE)
             magnitude = magnitude.to(DEVICE)
@@ -96,8 +97,8 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                 for timestep in range(num_timesteps):
                     slots_orig_reconstructed, z_orig = model(slots_orig[:, timestep])
                     slots_pert_reconstructed, z_pert = model(slots_pert[:, timestep])
-                    recon_loss += mse_loss(slots_orig[:, timestep], slots_orig_reconstructed)
-                    recon_loss += mse_loss(slots_pert[:, timestep], slots_pert_reconstructed)
+                    recon_loss += criterion(slots_orig[:, timestep], slots_orig_reconstructed)
+                    recon_loss += criterion(slots_pert[:, timestep], slots_pert_reconstructed)
                     if timestep == 0:
                         dis_loss = disentanglement_loss_magnitude(z_orig, z_pert, magnitude)
                 
