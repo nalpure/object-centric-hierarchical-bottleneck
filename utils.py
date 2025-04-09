@@ -167,17 +167,23 @@ def weights_init(m):
         nn.init.zeros_(m.bias)
 
 
-def save_dict_h5py(array_dict, fname):
-    """Save dictionary containing numpy arrays to h5py file."""
+def save_dict_h5py(array_dict, fname, mode):
+    """Save dictionary containing numpy arrays to h5py file.
+    If the file exists, append to it; otherwise, create a new file."""
 
     # Ensure directory exists
     directory = os.path.dirname(fname)
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-    with h5py.File(fname, 'w') as hf:
+    with h5py.File(fname, mode) as hf:
         for key in array_dict.keys():
-            hf.create_dataset(key, data=array_dict[key])
+            if key in hf:
+                raise ValueError(f"Key '{key}' already exists in the file. Cannot overwrite existing data.")
+            value = array_dict[key]
+            if isinstance(value, torch.Tensor):
+                value = value.cpu().numpy()
+            hf.create_dataset(key, data=value)
 
 
 def load_dict_h5py(fname):

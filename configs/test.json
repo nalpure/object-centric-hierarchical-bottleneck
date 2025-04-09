@@ -1,7 +1,7 @@
 {
     "slot_attention":{
-        "train_path": "data/slipscape/5F_test.h5",
-        "test_path": "data/slipscape/5F_test.h5",
+        "train_path": "data/observations/5F_test.h5",
+        "test_path": "data/observations/5F_test.h5",
         "ckpt_path": "slot_attention/checkpoints/test.ckpt",
         "slot_save_path": "data/generated_slots/test.h5",
         
@@ -18,7 +18,7 @@
         "encdec_dim": 32
     },
     "explicit_latents": {
-        "train_path": "data/generated_slots/test.h5",
+        "train_path": "data/slots/test.h5",
         "ckpt_path": "checkpoints/explicit_latents/test.ckpt",
         "batch_size": 8,
 

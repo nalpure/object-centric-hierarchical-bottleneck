@@ -1,5 +1,5 @@
 from tqdm import tqdm
-from utils import PerturbedImageSequenceDataset, get_config_argument, load_config, set_seed, DEVICE, IMG_CHANNELS
+from utils import PerturbedImageSequenceDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE, IMG_CHANNELS
 from torch.utils import data
 import torch
 from slot_attention.autoencoder import SlotAttentionAutoEncoder
@@ -12,7 +12,7 @@ def main():
     config = load_config(config_name)["slot_attention"]
     set_seed(config["seed"])
     ckpt_path = config['ckpt_path']
-    output_path = config['slot_save_path']
+    output_path = config['save_path']
 
     print("Loading model:", ckpt_path)
     model = SlotAttentionAutoEncoder(
@@ -60,29 +60,17 @@ def main():
                 pert_seq_slots[:, i] = active_slots_perturbed
            
             data_dict = {
-                'orig_seq': orig_seq_slots,
-                'pert_seq': pert_seq_slots,
-                'magnitude': magnitude,
-                'obj_index': obj_index,
-                'prop_index': prop_index
+                f'batch_{batch_index}_orig_seq': orig_seq_slots,
+                f'batch_{batch_index}_pert_seq': pert_seq_slots,
+                f'batch_{batch_index}_magnitude': magnitude,
+                f'batch_{batch_index}_obj_index': obj_index,
+                f'batch_{batch_index}_prop_index': prop_index
             }
-            save_slots_to_hdf5(data_dict, output_path, batch_index)
+            mode = 'w' if batch_index == 0 else 'a'
+            save_dict_h5py(data_dict, output_path, mode)
     
     print("Finished saving slots.")
-
-
-def save_slots_to_hdf5(data_dict, output_path, batch_index):
-    directory = os.path.dirname(output_path)
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-
-    # Create new file if batch_index is 0, otherwise append to existing file
-    mode = 'w' if batch_index == 0 else 'a'
-    with h5py.File(output_path, mode) as f:
-        for key, value in data_dict.items():
-            dset_name = f'batch_{batch_index}_{key}'
-            f.create_dataset(dset_name, data=value.cpu().numpy(), compression="gzip", chunks=True)
-
+    
 
 if __name__ == "__main__":
     main()
