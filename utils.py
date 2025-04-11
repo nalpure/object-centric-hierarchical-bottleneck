@@ -94,7 +94,8 @@ DEFAULT_CONFIG = {
         "decay_epochs": 500,
         "decay_rate": 0.5,
         # Further model parameters
-        "latent_dim": 5
+        "latent_dim": 5,
+        "hidden_dim": 128
     }
 }
 
@@ -483,7 +484,6 @@ class PerturbedSlotSequenceDataset(data.Dataset):
         self.hdf5_file = hdf5_file
         self.original, self.perturbed, self.magnitude, self.obj_index, self.prop_index = self._load_slots_data()
         self.num_samples = len(self.original)
-        print(f"Loaded {self.num_samples} samples from {hdf5_file}")
 
     def _load_slots_data(self):
         data_dict = {

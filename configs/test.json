@@ -3,7 +3,7 @@
         "train_path": "data/observations/5F_test.h5",
         "test_path": "data/observations/5F_test.h5",
         "ckpt_path": "slot_attention/checkpoints/test.ckpt",
-        "slot_save_path": "data/generated_slots/test.h5",
+        "save_path": "data/generated_slots/test.h5",
         
         "batch_size": 8,
         "learning_rate": 0.0005,
@@ -20,6 +20,7 @@
     "explicit_latents": {
         "train_path": "data/slots/test.h5",
         "ckpt_path": "checkpoints/explicit_latents/test.ckpt",
+        "save_path": "data/explicit_latents/test.h5",
         "batch_size": 8,
 
         "num_epochs": 500,
@@ -29,6 +30,20 @@
         "decay_rate": 0.5,
         "latent_dim": 3,
         "rec_loss_mult": 100
+    },
+    "implicit_latents": {
+        "train_path": "data/explicit_latents/test.h5",
+        "ckpt_path": "checkpoints/implicit_latents/test.ckpt",
+
+        "batch_size": 8,
+        "num_epochs": 500,
+        "learning_rate": 0.0004,
+        "warmup_epochs": 0,
+        "decay_epochs": 500,
+        "decay_rate": 0.5,
+        
+        "latent_dim": 5,
+        "hidden_dim": 64
     }
 
 }

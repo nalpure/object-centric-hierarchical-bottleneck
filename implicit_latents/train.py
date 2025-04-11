@@ -11,8 +11,7 @@ from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 from torch.nn import MSELoss
 
-
-from explicit_latents.autoencoder import LatentAutoEncoder
+from implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
 
 
@@ -31,12 +30,14 @@ def main():
     train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
     print(f"Finished loading all {config['batch_size'] * len(train_dataloader)} training samples.")
 
-    slots_dim = next(iter(train_dataloader))[0].shape[-1]
+    explicit_dim = next(iter(train_dataloader))[0].shape[-1]
 
     ckpt_path = config["ckpt_path"]
+    print("Loading model:", ckpt_path)
+    model, optimizer = initialize_model(config, explicit_dim)
     
     print("Training slot attention model...")
-    train(None, None, train_dataloader,
+    train(model, optimizer, train_dataloader,
         config["num_epochs"],
         config["warmup_epochs"],
         config["decay_epochs"],
@@ -61,13 +62,13 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     if not exists(ckpt_dir):
         makedirs(ckpt_dir)
 
-    #scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
+    scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
     scaler = GradScaler(device=DEVICE.type) if mixed_precision else None
 
     loss_list = []
     current_step = 0
     best_loss = 1e9
-    #model.train()
+    model.train()
     start = datetime.now()
     
     print("Training started at", start.ctime())
@@ -80,8 +81,11 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             batch_loss = 0
 
             orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
+            orig_seq = orig_seq.to(DEVICE)
+            pert_seq = pert_seq.to(DEVICE)
             print("orig_seq", orig_seq.shape)
             print("pert_seq", pert_seq.shape)
+            model(orig_seq)
             raise NotImplementedError("Debugging shape issues")
 
             slots_orig = slots_orig.to(DEVICE)
@@ -157,61 +161,12 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     return model, loss_list
 
 
-def disentanglement_loss(latents_original, latents_perturbed, eps=1e-8):
-    """
-    Exactly one feature of exactly one object should be changed. 
-    This loss sums the L1 differences between the corresponding slot latent vectors,
-    but excludes the slot that shows the maximum difference (assumed to be the one that
-    was intentionally perturbed). The loss is then averaged over slots for each batch.
-
-    @param latents_original: torch.Tensor of shape [B, O, D]
-        The latent representation of the original observation.
-    @param latents_perturbed: torch.Tensor of shape [B, O, D]
-        The latent representation of the perturbed observation.
-    @param eps: float
-        A small epsilon to avoid numerical issues.
-    @return: torch.Tensor of shape [B, 1]
-        The sum of differences (L1 norm) between the original and perturbed latents,
-        excluding the slot with the maximum difference, for each sample in the batch.
-    """
-    # Compute the L1 difference between the original and perturbed latents
-    diff = torch.abs(latents_original - latents_perturbed) # [B, O, D]
-    max_diff = diff.amax(dim=(-2,-1)) # [B]    
-    total_diff = diff.sum(dim=-1).sum(dim=-1) # [B]
-    
-    # Exclude the maximum difference by subtracting it from the total difference.
-    loss = total_diff - max_diff
-
-    # Normalize the loss by the sum of all original latents
-    batch_loss = loss.sum()
-    batch_loss = batch_loss / (torch.abs(latents_original).sum(dim=-1).sum(dim=-1).sum(dim=-1) + eps)
-    
-    return batch_loss
-
-
-def disentanglement_loss_magnitude(latents_original, latents_perturbed, magnitude, eps=1e-8):
-    # Compute the L1 difference between the original and perturbed latents
-    diff = torch.abs(latents_original - latents_perturbed) # [B, O, D]
-    total_diff = diff.sum(dim=-1).sum(dim=-1) # [B]
-
-    # Assume the maximum difference to be the perturbed feature of the perturbed object
-    max_diff = diff.amax(dim=(-2,-1)) # [B]    
-    magnitude_diff = torch.abs(torch.abs(magnitude) - max_diff)
-    
-    # Exclude the maximum difference by subtracting it from the total difference.
-    loss = total_diff - max_diff + magnitude_diff
-
-    # Normalize the loss by the sum of all original latents
-    batch_loss = loss.sum()
-    batch_loss = batch_loss / (torch.abs(latents_original).sum(dim=-1).sum(dim=-1).sum(dim=-1) + eps)
-    
-    return batch_loss
-
-
-def initialize_model(args, slots_dim):
-    model = LatentAutoEncoder(
+def initialize_model(args, explicit_dim):
+    model = ImplicitLatentAutoEncoder(
+        explicit_dim,
         args["latent_dim"],
-        slots_dim
+        5, # TODO: Make this a parameter
+        args["hidden_dim"]
     ).to(DEVICE)
 
     if args["init_ckpt"] is not None:
