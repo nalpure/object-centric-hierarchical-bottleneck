@@ -1,11 +1,11 @@
-from utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
 from torch.utils import data
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
-from src.explicit_latents.autoencoder import LatentAutoEncoder
+from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
+from src.utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
 
 PERTURBATION_MAGNITUDE = 0.1
 NUM_OUTPUT_FIGS = 5
@@ -45,7 +45,7 @@ def main():
         raise KeyError(f"Unexpected keys: {unexpected_keys}")
 
     print("Loading model:", ckpt_path_disentangle)
-    model_disentangle = LatentAutoEncoder(
+    model_disentangle = ExplicitLatentAutoEncoder(
         latent_dim=config_latent["latent_dim"], 
         slots_dim=config_SA["slots_dim"]
     ).to(DEVICE)

@@ -2,7 +2,7 @@ from tqdm import tqdm
 from torch.utils import data
 import torch
 
-from src.explicit_latents.autoencoder import LatentAutoEncoder
+from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE
 
 
@@ -20,7 +20,7 @@ def main():
     slots_dim = next(iter(dataloader))[0].shape[-1]
 
     print("Loading model:", ckpt_path)
-    model = LatentAutoEncoder(config["latent_dim"], slots_dim).to(DEVICE)
+    model = ExplicitLatentAutoEncoder(config["latent_dim"], slots_dim).to(DEVICE)
     model.eval()
     model.load_state_dict(torch.load(ckpt_path, weights_only=True)['model_state_dict'], strict=True)
 

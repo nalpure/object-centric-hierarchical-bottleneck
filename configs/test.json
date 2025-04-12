@@ -2,7 +2,7 @@
     "slot_attention":{
         "train_path": "data/observations/5F_test.h5",
         "test_path": "data/observations/5F_test.h5",
-        "ckpt_path": "slot_attention/checkpoints/test.ckpt",
+        "ckpt_path": "checkpoints/slot_attention/test.ckpt",
         "save_path": "data/generated_slots/test.h5",
         
         "batch_size": 8,

@@ -61,7 +61,7 @@ class ObjectDecoder(nn.Module):
         return x
 
 
-class LatentAutoEncoder(nn.Module):
+class ExplicitLatentAutoEncoder(nn.Module):
     def __init__(self, latent_dim, slots_dim):  
         super().__init__()      
         self.latent_dim = latent_dim
@@ -114,7 +114,7 @@ class LatentAutoEncoder(nn.Module):
         batch_size, num_slots, latent_dim = z.shape
         slots_dim = self.slots_dim
 
-        z_flat = z.view(batch_size * num_slots, latent_dim)
+        z_flat = z.reshape(batch_size * num_slots, latent_dim)
         slots_reconstructed_flat = self.object_decoder(z_flat)
         slots_reconstructed = slots_reconstructed_flat.view(batch_size, num_slots, slots_dim)
         return slots_reconstructed

@@ -11,7 +11,7 @@ from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 from torch.nn.functional import mse_loss # TODO change this to MSELoss
 
-from src.explicit_latents.autoencoder import LatentAutoEncoder
+from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
 
 
@@ -205,7 +205,7 @@ def disentanglement_loss_magnitude(latents_original, latents_perturbed, magnitud
 
 
 def initialize_model(args, slots_dim):
-    model = LatentAutoEncoder(
+    model = ExplicitLatentAutoEncoder(
         args["latent_dim"],
         slots_dim
     ).to(DEVICE)
