@@ -1,10 +1,9 @@
 from tqdm import tqdm
-from utils import PerturbedImageSequenceDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE, IMG_CHANNELS
 from torch.utils import data
 import torch
-from slot_attention.autoencoder import SlotAttentionAutoEncoder
-import h5py
-import os
+
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.utils import PerturbedImageSequenceDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE, IMG_CHANNELS
 
 
 def main():

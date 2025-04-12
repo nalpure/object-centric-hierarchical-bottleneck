@@ -1,12 +1,11 @@
-import argparse
-from explicit_latents.autoencoder import LatentAutoEncoder
 from utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
 from torch.utils import data
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-import json
-from slot_attention.autoencoder import SlotAttentionAutoEncoder
+
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.explicit_latents.autoencoder import LatentAutoEncoder
 
 PERTURBATION_MAGNITUDE = 0.1
 NUM_OUTPUT_FIGS = 5

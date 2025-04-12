@@ -3,51 +3,47 @@ from os import makedirs
 from os.path import exists
 from datetime import datetime
 import contextlib
-
 import torch
 from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
-from torch.nn import MSELoss
 
-from implicit_latents.autoencoder import ImplicitLatentAutoEncoder
-from utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
-
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.utils import ImageDataset, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
 
 
 def main():
     print("Running on", DEVICE)
     config_name = get_config_argument()
-    config = load_config(config_name)["implicit_latents"]
+    config = load_config(config_name)["slot_attention"]
 
     for key, value in config.items():
         print(f"{key}: {value}")
+
     set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = PerturbedSlotSequenceDataset(hdf5_file=config["train_path"])
+    dataset = ImageDataset(hdf5_file=config["train_path"], hdf5_format=config["hdf5_format"])
     train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
-    print(f"Finished loading all {config['batch_size'] * len(train_dataloader)} training samples.")
-
-    explicit_dim = next(iter(train_dataloader))[0].shape[-1]
-
-    ckpt_path = config["ckpt_path"]
-    print("Loading model:", ckpt_path)
-    model, optimizer = initialize_model(config, explicit_dim)
+    batch_size = config['batch_size']
+    num_batches = len(train_dataloader)
+    print(f"Finished loading {batch_size * num_batches} ({num_batches} * {batch_size}) training samples.")
+    
+    model, optim = initialize_model(config)
     
     print("Training slot attention model...")
-    train(model, optimizer, train_dataloader,
+    train(model, optim, train_dataloader, 
         config["num_epochs"],
-        config["warmup_epochs"],
-        config["decay_epochs"],
-        config["decay_rate"],
+        config["warmup_epochs"], 
+        config["decay_epochs"], 
+        config["decay_rate"], 
         config["mixed_precision"],
-        ckpt_path
+        config["ckpt_path"]
     )
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -77,21 +73,17 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         epoch_loss = 0
         
         for batch in train_dataloader:
+            obs = batch.to(DEVICE)   # [B, C, H, W]
             batch_loss = 0
-
-            orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
-            # TODO: remove hardcoded 5
-            orig_seq = orig_seq[:, :5, :, :].to(DEVICE)
-            pert_seq = pert_seq[:, :5, :, :].to(DEVICE)
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
-
+            
             with context_manager:
-                orig_seq_reconstructed = model(orig_seq)
-                loss = criterion(orig_seq, orig_seq_reconstructed)
-                batch_loss += loss
+                recon_combined, _, _, _, _ = model(obs)
+                loss = criterion(recon_combined, obs) 
                 epoch_loss += loss.item()
+                batch_loss += loss
 
             optimizer.zero_grad()
             current_step += 1
@@ -115,6 +107,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
                 f'Loss: {epoch_loss:.6f}, '
                 f'lr: {current_lr[0]:.6f}'
             )
+
             log_progress(epoch, num_epochs, start, additional_msg)
 
         # Save the best model and optimizer state
@@ -135,12 +128,14 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     return model, loss_list
 
 
-def initialize_model(args, explicit_dim):
-    model = ImplicitLatentAutoEncoder(
-        explicit_dim,
-        args["latent_dim"] - explicit_dim,
-        5, # TODO: Make this a parameter
-        args["hidden_dim"]
+def initialize_model(args):
+    model = SlotAttentionAutoEncoder(
+        tuple(args["resolution"]),
+        IMG_CHANNELS,
+        args["num_slots"],
+        args["num_iterations"],
+        args["slots_dim"],
+        args["encdec_dim"]
     ).to(DEVICE)
 
     if args["init_ckpt"] is not None:
@@ -176,7 +171,6 @@ def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
             return decay_rate ** decay_factor
     
     return LambdaLR(optimizer, lr_lambda)
-
 
 if __name__ == "__main__":
     main()

@@ -1,8 +1,9 @@
 from tqdm import tqdm
-from explicit_latents.autoencoder import LatentAutoEncoder
-from utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE
 from torch.utils import data
 import torch
+
+from src.explicit_latents.autoencoder import LatentAutoEncoder
+from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE
 
 
 def main():

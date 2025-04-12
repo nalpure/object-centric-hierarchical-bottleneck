@@ -3,7 +3,7 @@ from torch import nn
 import torch
 import torch.nn.functional as F
 
-from slot_attention.slot_attention import SlotAttention
+from src.slot_attention.slot_attention import SlotAttention
 
 
 def build_grid(resolution):

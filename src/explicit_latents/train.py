@@ -1,10 +1,7 @@
-import argparse
 import os
 from os import makedirs
 from os.path import exists
-import json
 from datetime import datetime
-import warnings
 import contextlib
 
 import torch
@@ -14,8 +11,8 @@ from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 from torch.nn.functional import mse_loss # TODO change this to MSELoss
 
-from explicit_latents.autoencoder import LatentAutoEncoder
-from utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
+from src.explicit_latents.autoencoder import LatentAutoEncoder
+from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
 
 
 

@@ -1,7 +1,7 @@
-from utils import ImageDataset, load_config, get_config_argument, plot_images, set_seed, DEVICE, IMG_CHANNELS
 from torch.utils import data
 import torch
-from slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.utils import ImageDataset, load_config, get_config_argument, plot_images, set_seed, DEVICE, IMG_CHANNELS
 
 
 NUM_OUTPUT_FIGS = 5
