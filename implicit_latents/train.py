@@ -74,46 +74,24 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     print("Training started at", start.ctime())
     
     for epoch in range(1, num_epochs + 1): 
-        epoch_recon_loss = 0
-        epoch_dis_loss = 0
+        epoch_loss = 0
         
         for batch in train_dataloader:
             batch_loss = 0
 
             orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
-            orig_seq = orig_seq.to(DEVICE)
-            pert_seq = pert_seq.to(DEVICE)
-            print("orig_seq", orig_seq.shape)
-            print("pert_seq", pert_seq.shape)
-            model(orig_seq)
-            raise NotImplementedError("Debugging shape issues")
-
-            slots_orig = slots_orig.to(DEVICE)
-            slots_pert = slots_pert.to(DEVICE)
-            magnitude = magnitude.to(DEVICE)
+            # TODO: remove hardcoded 5
+            orig_seq = orig_seq[:, :5, :, :].to(DEVICE)
+            pert_seq = pert_seq[:, :5, :, :].to(DEVICE)
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
-            num_timesteps = slots_orig.shape[1]
-            
-            with context_manager:
-                recon_loss = 0
-                for timestep in range(num_timesteps):
-                    slots_orig_reconstructed, z_orig = model(slots_orig[:, timestep])
-                    slots_pert_reconstructed, z_pert = model(slots_pert[:, timestep])
-                    recon_loss += criterion(slots_orig[:, timestep], slots_orig_reconstructed)
-                    recon_loss += criterion(slots_pert[:, timestep], slots_pert_reconstructed)
-                    if timestep == 0:
-                        dis_loss = disentanglement_loss_magnitude(z_orig, z_pert, magnitude)
-                
-                recon_loss *= rec_loss_mult # Account for the loss multiplier
-                recon_loss /= 2 # Account for the two reconstructions
-                recon_loss /= num_timesteps # Account for the number of timesteps
-                batch_loss += recon_loss
-                epoch_recon_loss += recon_loss.item()
 
-                batch_loss += dis_loss
-                epoch_dis_loss += dis_loss.item()
+            with context_manager:
+                orig_seq_reconstructed = model(orig_seq)
+                loss = criterion(orig_seq, orig_seq_reconstructed)
+                batch_loss += loss
+                epoch_loss += loss.item()
 
             optimizer.zero_grad()
             current_step += 1
@@ -129,23 +107,19 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         scheduler.step() # Adjust the learning rates
         current_lr = scheduler.get_last_lr()
 
-        epoch_recon_loss /= len(train_dataloader)
-        epoch_dis_loss /= len(train_dataloader)
-        epoch_total_loss = epoch_recon_loss + epoch_dis_loss
-        loss_list.append(epoch_total_loss)
+        epoch_loss /= len(train_dataloader)
+        loss_list.append(epoch_loss)
 
         if verbose:
             additional_msg = (
-                f'Slot diff: {epoch_recon_loss:.6f}, '
-                f'Disentanglement: {epoch_dis_loss:.6f}, '
-                f'Total: {epoch_total_loss:.6f}, '
+                f'Loss: {epoch_loss:.6f}, '
                 f'lr: {current_lr[0]:.6f}'
             )
             log_progress(epoch, num_epochs, start, additional_msg)
 
         # Save the best model and optimizer state
-        if epoch_total_loss < best_loss:
-            best_loss = epoch_total_loss
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
             best_epoch = epoch
 
             torch.save({
@@ -164,7 +138,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
 def initialize_model(args, explicit_dim):
     model = ImplicitLatentAutoEncoder(
         explicit_dim,
-        args["latent_dim"],
+        args["latent_dim"] - explicit_dim,
         5, # TODO: Make this a parameter
         args["hidden_dim"]
     ).to(DEVICE)
