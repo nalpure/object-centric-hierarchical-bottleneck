@@ -1,12 +1,11 @@
 from torch.utils import data
-import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
-from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, separate_slots
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import IMG_CHANNELS, ImageDataset, PerturbedImageSequenceDataset, PerturbedSlotSequenceDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
+from src.utils import IMG_CHANNELS, PerturbedImageSequenceDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
 
 NUM_OUTPUT_FIGS = 5
 OUTPUT_DIR = "data/figures/"
@@ -74,50 +73,116 @@ def main():
 
 
     with torch.no_grad():
-        batch_size = obs.shape[0]
-        num_objects = config_SA["num_slots"] - 1
-
-        recon_SA_seq = torch.empty_like(obs)
-        recon_explicit_seq = torch.empty_like(obs)
-        recon_implicit_seq = torch.empty_like(obs)
-
-        z_explicit_seq = torch.empty((batch_size, seq_len, num_objects, config_explicit["latent_dim"])).to(DEVICE)
-        slot_background_seq = torch.empty((batch_size, seq_len, 1, config_SA["slots_dim"])).to(DEVICE)
-
-        for t in range(seq_len):
-            # reconstruction from slots
-            obs_t = obs[:, t]
-            recon_SA, _, _, slots_orig, slot_background = model_SA(obs_t)
-            recon_SA_seq[:, t] = recon_SA
-            slot_background_seq[:, t] = slot_background
-
-            # reconstruction from explicit latents
-            active_slots_recon, z_explicit = model_explicit(slots_orig)
-            all_slots_recon = torch.cat((active_slots_recon, slot_background), dim=1)
-            recon_explicit, _, _ = model_SA.decode(all_slots_recon)
-            recon_explicit_seq[:, t] = recon_explicit
-            z_explicit_seq[:, t] = z_explicit
-
-        # reconstruction from implicit latents
-        z_explicit_recon = model_implicit(z_explicit_seq)
+        # ENCODING
+        active_slots, background_slots = encode_obs(obs, model_SA)
+        z_explicit = encode_slots(active_slots, model_explicit)
+        z_implicit = encode_explicit_latents(z_explicit, model_implicit)
         
-        for t in range(seq_len):
-            active_slots = model_explicit.decode(z_explicit_recon[:, t])
-            all_slots_recon = torch.cat((active_slots, slot_background_seq[:, t]), dim=1)
-            recon_implicit, _, _ = model_SA.decode(all_slots_recon)
-            recon_implicit_seq[:, t] = recon_implicit
-
+        # DECODING
+        recon_SA = decode_slots(active_slots, background_slots, model_SA)
+        recon_explicit = decode_slots(
+            decode_explicit_latents(z_explicit, model_explicit), 
+            background_slots, 
+            model_SA
+        )
+        recon_implicit = decode_slots(
+            decode_explicit_latents(
+                decode_implicit_latents(z_implicit, model_implicit), 
+                model_explicit
+            ),
+            background_slots,
+            model_SA
+        )
         
+        # PLOTTING
         for i in range(NUM_OUTPUT_FIGS):
             save_path = f"{OUTPUT_DIR}recons_{i}.png"
             plot_recons(
                 obs[i], 
-                recon_SA_seq[i], 
-                recon_explicit_seq[i], 
-                recon_implicit_seq[i], 
+                recon_SA[i], 
+                recon_explicit[i], 
+                recon_implicit[i], 
                 save_path=save_path
             )
 
+
+def encode_obs(obs, model_SA: SlotAttentionAutoEncoder):
+    """
+    Encodes the observation into slots.
+    Args:
+    - obs (torch.Tensor): Observation of shape [batch_size, seq_len, channels, height, width]
+    - model_SA (SlotAttentionAutoEncoder): Slot Attention AutoEncoder model
+    Returns:
+    - active_slots (torch.Tensor): Active slots of shape [batch_size, seq_len, num_objects, slots_dim]
+    - background_slot (torch.Tensor): Background slots of shape [batch_size, seq_len, 1, slots_dim]
+    """
+    batch_size, seq_len, channels, height, width = obs.shape
+    obs = obs.view(batch_size * seq_len, channels, height, width)
+    slots, attention_scores = model_SA.encode(obs)
+    active_slots, background_slot = separate_slots(slots, attention_scores)
+    num_objects = active_slots.shape[1]
+    active_slots = active_slots.view(batch_size, seq_len, num_objects, model_SA.slots_dim)
+    background_slot = background_slot.view(batch_size, seq_len, 1, model_SA.slots_dim)
+    return active_slots, background_slot
+
+
+def encode_slots(slots, model_explicit: ExplicitLatentAutoEncoder):
+    """
+    Encodes the slots into explicit latents.
+    Args:
+    - slots (torch.Tensor): Active slots of shape [batch_size, seq_len, num_objects, slots_dim]
+    - model_explicit (ExplicitLatentAutoEncoder): Explicit Latent AutoEncoder model
+    Returns:
+    - z_explicit (torch.Tensor): Explicit latents of shape [batch_size, seq_len, num_objects, explicit_dim]
+    """
+    batch_size, seq_len, num_objects, slots_dim = slots.shape
+    slots = slots.view(batch_size * seq_len, num_objects, slots_dim)
+    z_explicit = model_explicit.encode(slots)
+    z_explicit = z_explicit.view(batch_size, seq_len, num_objects, model_explicit.latent_dim)
+    return z_explicit
+
+
+def encode_explicit_latents(z_explicit, model_implicit: ImplicitLatentAutoEncoder):
+    return model_implicit.encode(z_explicit)
+
+
+def decode_implicit_latents(z_implicit, model_implicit: ImplicitLatentAutoEncoder):
+    return model_implicit.decode(z_implicit)
+
+
+def decode_explicit_latents(z_explicit, model_explicit: ExplicitLatentAutoEncoder):
+    """
+    Decodes the explicit latents into slots.
+    Args:
+    - z_explicit (torch.Tensor): Explicit latents of shape [batch_size, seq_len, num_objects, explicit_dim]
+    - model_explicit (ExplicitLatentAutoEncoder): Explicit Latent AutoEncoder model
+    Returns:
+    - slots_recon (torch.Tensor): Reconstructed slots of shape [batch_size, seq_len, num_objects, slots_dim]    
+    """
+    batch_size, seq_len, num_objects, explicit_dim = z_explicit.shape
+    z_explicit = z_explicit.view(batch_size * seq_len, num_objects, explicit_dim)
+    slots_recon = model_explicit.decode(z_explicit)
+    slots_recon = slots_recon.view(batch_size, seq_len, num_objects, model_explicit.slots_dim)
+    return slots_recon
+
+
+def decode_slots(active_slots, background_slots, model_SA: SlotAttentionAutoEncoder):
+    """
+    Decodes the slots into images.
+    Args:
+    - slots (torch.Tensor): Active slots of shape [batch_size, seq_len, num_objects, slots_dim]
+    - background_slots (torch.Tensor): Background slots of shape [batch_size, seq_len, 1, slots_dim]
+    - model_SA (SlotAttentionAutoEncoder): Slot Attention AutoEncoder model
+    Returns:
+    - obs_recon (torch.Tensor): Reconstructed images of shape [batch_size, seq_len, channels, height, width]
+    """
+    batch_size, seq_len, num_objects, slots_dim = active_slots.shape
+
+    slots = torch.concat((active_slots, background_slots), dim=2)
+    slots = slots.view(batch_size * seq_len, num_objects + 1, slots_dim)
+    obs_recon = model_SA.decode(slots)[0]
+    obs_recon = obs_recon.view(batch_size, seq_len, IMG_CHANNELS, *model_SA.resolution)
+    return obs_recon      
 
 
 def plot_recons(orig, slot_attention, explicit_latent, full_latent, save_path="output.png"):
