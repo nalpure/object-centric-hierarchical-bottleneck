@@ -47,7 +47,7 @@ def main():
     )
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -76,22 +76,38 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     for epoch in range(1, num_epochs + 1): 
         epoch_loss = 0
         
-        for batch in train_dataloader:
+        for batch_idx, batch in enumerate(train_dataloader):
             batch_loss = 0
 
             orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
-            # TODO: remove hardcoded 5
-            orig_seq = orig_seq[:, :5, :, :].to(DEVICE)
-            pert_seq = pert_seq[:, :5, :, :].to(DEVICE)
+            # TODO: remove hardcoded 4
+            orig_seq = orig_seq[:, :4, :, :].to(DEVICE)
+            pert_seq = pert_seq[:, :4, :, :].to(DEVICE)
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
 
             with context_manager:
                 orig_seq_reconstructed = model(orig_seq)
+                #loss = criterion(orig_seq, orig_seq_reconstructed)
                 loss = criterion(orig_seq, orig_seq_reconstructed)
+
                 batch_loss += loss
                 epoch_loss += loss.item()
+            
+            """            
+            if batch_idx == 0:
+                print(orig_seq.shape)
+                print(orig_seq_reconstructed.shape)
+                for obj in range(2):
+                    print(f"--- Object #{obj} ---")
+                    print(f"Original: \n{orig_seq[0, :, obj, :].detach().cpu().numpy()}")
+                    print(f"Reconstructed: \n{orig_seq_reconstructed[0, :, obj, :].detach().cpu().numpy()}")
+                    print(f"Implicit latent: \n{model.encode(orig_seq)[0, obj, :].detach().cpu().numpy()}")
+                    print(f"Loss: {torch.abs(orig_seq[0, :, obj, :] - orig_seq_reconstructed[0, :, obj, :]).mean().item()}")
+                    print(f"Batch loss: {loss.item()}")
+                    print()
+            """
 
             optimizer.zero_grad()
             current_step += 1
@@ -139,7 +155,7 @@ def initialize_model(args, explicit_dim):
     model = ImplicitLatentAutoEncoder(
         explicit_dim,
         args["latent_dim"] - explicit_dim,
-        5, # TODO: Make this a parameter
+        4, # TODO: Make this a parameter
         args["hidden_dim"]
     ).to(DEVICE)
 

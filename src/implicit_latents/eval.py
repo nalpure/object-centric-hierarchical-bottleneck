@@ -27,9 +27,10 @@ def main():
     test_dataset = PerturbedImageSequenceDataset(hdf5_file=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=True)
 
-    # TODO: remove hardcoded 5
-    obs = next(iter(test_dataloader))[0][:, :5, :, :, :].to(DEVICE)
-    seq_len = obs.shape[1]
+    # TODO: remove hardcoded 4
+    obs = next(iter(test_dataloader))[0][:, :4, :, :, :].to(DEVICE)
+    seq_len = 4
+    #seq_len = obs.shape[1]
 
     print("Loading model:", ckpt_path_SA)
     model_SA = SlotAttentionAutoEncoder(
@@ -77,6 +78,7 @@ def main():
         active_slots, background_slots = encode_obs(obs, model_SA)
         z_explicit = encode_slots(active_slots, model_explicit)
         z_implicit = encode_explicit_latents(z_explicit, model_implicit)
+        print("z_explicit:", z_explicit[0, :, 0, :])
         
         # DECODING
         recon_SA = decode_slots(active_slots, background_slots, model_SA)
@@ -85,6 +87,8 @@ def main():
             background_slots, 
             model_SA
         )
+        z_explicit_recon = decode_implicit_latents(z_implicit, model_implicit)
+        print("z_explicit_recon:", z_explicit_recon[0, :, 0, :])
         recon_implicit = decode_slots(
             decode_explicit_latents(
                 decode_implicit_latents(z_implicit, model_implicit), 
@@ -200,7 +204,7 @@ def plot_recons(orig, slot_attention, explicit_latent, full_latent, save_path="o
     num_frames = orig.shape[0]
 
     all_imgs = [orig, slot_attention, explicit_latent, full_latent]
-    row_titles = ["Original", "Slot Attention", "Explicit Latents", "Full Latents"]
+    row_titles = ["Original", "Slot Attention", "Explicit Latents", "Implicit Latents"]
 
     fig, axes = plt.subplots(4, num_frames, figsize=(4 * num_frames, 4 * 4))
 
