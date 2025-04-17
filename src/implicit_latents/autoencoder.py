@@ -130,67 +130,102 @@ class ImplicitLatentAutoEncoder(nn.Module):
     def encode(self, x):
         """
         Args:
-            x: Tensor of shape (batch_size, seq_len, num_objects, explicit_dim)
+            x: [B, T, O, E]
         Returns:
-            z: Tensor of shape (batch_size, num_objects, explicit_dim + implicit_dim)
+            z: [B, O, E + I]
         """
         B, T, O, E = x.shape
         I = self.implicit_dim
-        final_latents = torch.empty((B, O, E + I), device=x.device)
+        H = self.hidden_dim
+        TE = T * E
 
-        for o in range(O):
-            edge_encodings = torch.empty((B, O - 1, self.hidden_dim), device=x.device)
-            source_node = x[:, :, o, :].reshape(B, T * E)
-            # source_node has shape (batch_size, seq_len * explicit_dim)
-            neighbor_count = 0
+        # 1) collapse time+explicit into per‐object vector
+        #    → source: [B, O, TE]
+        source = x.permute(0, 2, 1, 3).reshape(B, O, TE)
 
-            for n in range(O):
-                if o != n:
-                    neighbor_node = x[:, :, n, :].reshape(B, T * E)
-                    edge_encoding = self.edge_encoder(source_node, neighbor_node)
-                    edge_encodings[:, neighbor_count, :] = edge_encoding
-                    neighbor_count += 1
-                
-            # Aggregate edge encodings by taking the mean
-            edge_mean = edge_encodings.mean(dim=1)
-            # edge_mean has shape (batch_size, hidden_dim)
-            
-            # Pass the source node and aggregated edge encodings to the node encoder
-            final_latents[:, o, :] = self.node_encoder(source_node, edge_mean)
-        
-        return final_latents
+        # 2) build all off‐diagonal indices (i != j)
+        idx = torch.arange(O, device=x.device)
+        ii = idx.repeat_interleave(O)   # [O*O] = [0,0,0,1,1,1,2,2,2]
+        jj = idx.repeat(O)              # [O*O] = [0,1,2,0,1,2,0,1,2]
+        mask = (ii != jj)
+        ii = ii[mask]                   # [P]
+        jj = jj[mask]                   # [P]
+        P = ii.shape[0]                 # P = O*(O-1)
 
-        
+        # 3) gather neighbor pairs
+        #    src_pairs, nbr_pairs: [B, P, TE]
+        src_pairs = source[:, ii, :]    # object‐i as source
+        nbr_pairs = source[:, jj, :]    # object‐j as neighbor
+
+        # 4) flatten batch & pairs → [B*P, TE]
+        flat_src = src_pairs.reshape(B * P, TE)
+        flat_nbr = nbr_pairs.reshape(B * P, TE)
+
+        # 5) single big edge‐encoding call (no self‐pairs)
+        flat_edge = self.edge_encoder(flat_src, flat_nbr)  # [B*P, H]
+
+        # 6) rebuild [B, P, H] then [B, O, O-1, H]
+        edge_enc = flat_edge.view(B, P, H).view(B, O, O-1, H)
+
+        # 7) mean over the O-1 neighbors → [B, O, H]
+        edge_mean = edge_enc.mean(dim=2)
+
+        # 8) prepare node inputs: flatten batch×object
+        flat_source = source.reshape(B * O, TE)         # [B*O, TE]
+        flat_edges  = edge_mean.reshape(B * O, H)       # [B*O, H]
+
+        # 9) one‐shot node encoding → [B*O, E+I]
+        flat_z = self.node_encoder(flat_source, flat_edges)
+
+        # 10) reshape back → [B, O, E+I]
+        return flat_z.view(B, O, E + I)
+
+
+
     def decode(self, z):
         """
+        Loop‐free decode, skipping self‐pairs.
+
         Args:
-            z: Tensor of shape (batch_size, num_objects, explicit_dim + implicit_dim)
+            z: [B, O, L]   (L = E+I)
         Returns:
-            x: Tensor of shape (batch_size, seq_len, num_objects, explicit_dim)
+            x: [B, T, O, E]
         """
-        batch_size = z.shape[0]
-        num_objects = z.shape[1]
+        B, O, L = z.shape
+        T, E, H = self.seq_len, self.explicit_dim, self.hidden_dim
 
-        x = torch.empty((batch_size, self.seq_len, num_objects, self.explicit_dim), device=z.device)
+        # 1) build off‐diagonal indices
+        idx = torch.arange(O, device=z.device)
+        ii = idx.repeat_interleave(O)
+        jj = idx.repeat(O)
+        mask = (ii != jj)
+        ii = ii[mask]
+        jj = jj[mask]
+        P = ii.shape[0]  # O*(O-1)
 
-        for o in range(num_objects):
-            source_latent = z[:, o, :]
-            # source_latent has shape (batch_size, explicit_dim + implicit_dim)
-            neighbor_count = 0
-            edge_encodings = torch.empty((batch_size, num_objects-1, self.hidden_dim), device=z.device)
-            for n in range(num_objects):
-                if o != n:
-                    neighbor_latent = z[:, n, :]
-                    edge_encoding = self.edge_decoder(source_latent, neighbor_latent)
-                    edge_encodings[:, neighbor_count, :] = edge_encoding
-                    neighbor_count += 1
-            
-            # Aggregate edge encodings by taking the mean
-            edge_mean = edge_encodings.mean(dim=1)
-            # edge_mean has shape (batch_size, hidden_dim)
-            # Pass the source latent and aggregated edge encodings to the node decoder
-            x_o = self.node_decoder(source_latent, edge_mean)
-            x_o = x_o.reshape(batch_size, self.seq_len, self.explicit_dim)
-            x[:, :, o, :] = x_o
+        # 2) gather latent pairs → [B, P, L]
+        src_pairs = z[:, ii, :]
+        nbr_pairs = z[:, jj, :]
 
-        return x
+        # 3) flatten → [B*P, L]
+        flat_src = src_pairs.reshape(B * P, L)
+        flat_nbr = nbr_pairs.reshape(B * P, L)
+
+        # 4) single big edge‐decoding → [B*P, H]
+        flat_edge = self.edge_decoder(flat_src, flat_nbr)
+
+        # 5) regroup → [B, P, H] → [B, O, O-1, H]
+        edge_enc = flat_edge.view(B, P, H).view(B, O, O-1, H)
+
+        # 6) mean over neighbors → [B, O, H]
+        edge_mean = edge_enc.mean(dim=2)
+
+        # 7) prepare node inputs
+        flat_z      = z.reshape(B * O, L)         # [B*O, L]
+        flat_edges  = edge_mean.reshape(B * O, H) # [B*O, H]
+
+        # 8) one‐shot node decoding → [B*O, T*E]
+        flat_x = self.node_decoder(flat_z, flat_edges)
+
+        # 9) reshape → [B, O, T, E] then permute to [B, T, O, E]
+        return flat_x.view(B, O, T, E).permute(0, 2, 1, 3)
