@@ -1,67 +1,73 @@
+import h5py
 import os
-import glob
-from utils import StateTransitionsDataset, save_list_dict_h5py, load_list_dict_h5py
-from torch.utils import data
-import numpy as np
 
 
-def visualize_list_dict_structure(list_dict):
-    for idx, data_dict in enumerate(list_dict):
-        print(f"Entry {idx}:")
-
-        for key, value in data_dict.items():
-            if isinstance(value, np.ndarray):
-                print(f"  {key}: {value.shape} (numpy array)")
-            else:
-                print(f"  {key}: {type(value)}")
-
-        print()
-
-
-def ensure_chw_format(batch):
-    if batch.shape[-1] == 3:  # If it's in SHWC (Samples, Height, Width, Channels) format
-        batch = batch.permute(0, 3, 1, 2)  # Convert to SCHW format
-    return batch
-
-
-def get_replay_dict(dataloader):
-    replay_buffer = []
-
-    for batch in dataloader: 
-        obs, action, next_obs = batch
-        sample_dict = {
-            'obs' : ensure_chw_format(obs),
-            'next_obs': ensure_chw_format(next_obs),
-            'action': action
-            }
-        replay_buffer.append(sample_dict)
-
-    return replay_buffer
-
-
-def stitch_h5_files(input_dir, output_file):
+def stitch_h5_groups(input_folder, output_path):
     """
-    Stitch together multiple .h5 files containing replay buffer data into one file.
-    
+    Read all .h5 files in input_folder (sorted by name).  
+    Each file must have this structure:
+      /<episode_idx>/
+          obs
+          perturbed
+          magnitudes
+          indices
+          properties
+
+    We copy every episode group in order into output_path, renumbering
+    episode groups sequentially from 0.
+    """
+    # 1) discover and sort input files
+    files = sorted(f for f in os.listdir(input_folder) if f.endswith(".h5"))
+    if not files:
+        raise RuntimeError(f"No .h5 files in {input_folder!r}")
+
+    # 2) open output once
+    with h5py.File(output_path, "w") as fout:
+        next_episode = 0
+
+        for fname in files:
+            in_path = os.path.join(input_folder, fname)
+            print(f"Processing {fname} …", flush=True)
+
+            with h5py.File(in_path, "r") as fin:
+                # iterate each episode group in numeric order
+                for grp_name in sorted(fin.keys(), key=lambda x: int(x)):
+                    src_grp = fin[grp_name]
+                    # create a new group under the next available index
+                    dst_grp = fout.create_group(str(next_episode))
+
+                    # copy each dataset inside this episode group
+                    for ds_name, ds in src_grp.items():
+                        # ds is a Dataset, so ds[...] reads it into memory,
+                        # which is OK because these are relatively small per‐episode arrays.
+                        data = ds[...]
+                        dst_grp.create_dataset(
+                            ds_name,
+                            data=data,
+                            compression="gzip",
+                            compression_opts=4
+                        )
+
+                    next_episode += 1
+
+            print(f"  done, total episodes so far = {next_episode}")
+
+    print(f"\nAll files stitched into {output_path!r} ({next_episode} episodes).")
+
+
+def print_h5_shapes(file_path):
+    """
+    Opens an HDF5 file and prints the shape of each dataset stored in it.
+
     Args:
-        input_dir (str): Path to the directory containing the .h5 files.
-        output_file (str): Path where the stitched output .h5 file will be saved.
+        file_path (str): Path to the .h5 file.
     """
+    with h5py.File(file_path, 'r') as f:
+        print(f"Contents of '{file_path}':")
+        def visit(name, node):
+            if isinstance(node, h5py.Dataset):
+                print(f"{name}: shape {node.shape}, dtype {node.dtype}")
+        f.visititems(visit)
 
-    # Get list of all .h5 files in the directory
-    h5_files = glob.glob(os.path.join(input_dir, "*.h5"))
-
-    # Iterate over each .h5 file, load data and save it in combined replay buffer
-    combined_replay_buffer = []
-    for h5_file in h5_files:
-        dataset = StateTransitionsDataset(hdf5_file=h5_file)
-        dataloader = data.DataLoader(dataset, batch_size=12, shuffle=True, num_workers=0)   # hard-coded batch size of 12
-        combined_replay_buffer += get_replay_dict(dataloader)[:-1]  # discarding the last, as it is unlikely to have full batch size of 12
-
-    save_list_dict_h5py(combined_replay_buffer, output_file)
-
-
-stitch_h5_files(input_dir='data/spriteworld_data/', output_file='data/spriteworld.h5')
-
-#list_dict = load_list_dict_h5py('data/spriteworld.h5')
-#visualize_list_dict_structure(list_dict[:10])
+stitch_h5_groups("data/observations/separated", "data/observations/separated/stitched.h5")
+print("done")
