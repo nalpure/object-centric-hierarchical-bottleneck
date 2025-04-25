@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, separate_slots
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import IMG_CHANNELS, PerturbedImageSequenceDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
+from src.utils import IMG_CHANNELS, PerturbedH5ImageDataset, get_config_argument, load_config, set_seed, DEVICE
 
 NUM_OUTPUT_FIGS = 5
 OUTPUT_DIR = "data/figures/"
@@ -24,7 +24,7 @@ def main():
     ckpt_path_implicit = config_implicit["ckpt_path"]
 
     print(f"Loading observation test dataset: {config_SA['test_path']}")
-    test_dataset = PerturbedImageSequenceDataset(hdf5_file=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
+    test_dataset = PerturbedH5ImageDataset(h5_path=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=True)
 
     # TODO: remove hardcoded 4
@@ -164,7 +164,7 @@ def decode_explicit_latents(z_explicit, model_explicit: ExplicitLatentAutoEncode
     - slots_recon (torch.Tensor): Reconstructed slots of shape [batch_size, seq_len, num_objects, slots_dim]    
     """
     batch_size, seq_len, num_objects, explicit_dim = z_explicit.shape
-    z_explicit = z_explicit.view(batch_size * seq_len, num_objects, explicit_dim)
+    z_explicit = z_explicit.reshape(batch_size * seq_len, num_objects, explicit_dim)
     slots_recon = model_explicit.decode(z_explicit)
     slots_recon = slots_recon.view(batch_size, seq_len, num_objects, model_explicit.slots_dim)
     return slots_recon

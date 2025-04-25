@@ -9,10 +9,9 @@ from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
-from torch.nn import MSELoss
 
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
-from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
+from src.utils import PerturbedH5ImageDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
 
 
 
@@ -26,7 +25,7 @@ def main():
     set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = PerturbedSlotSequenceDataset(hdf5_file=config["train_path"])
+    dataset = PerturbedH5ImageDataset(h5_path=config["train_path"])
     train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
     print(f"Finished loading all {config['batch_size'] * len(train_dataloader)} training samples.")
 
@@ -110,10 +109,11 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             """
 
             optimizer.zero_grad()
+            batch_loss /= len(train_dataloader)
             current_step += 1
             
             if mixed_precision:
-                scaler.scale(batch_loss).backward()
+                scaler.scale(torch.mean(batch_loss)).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:

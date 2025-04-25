@@ -401,6 +401,83 @@ def plot_images(images, save_path, labels=None, grayscale_indices=[]):
     plt.show()
     plt.close()
 
+
+class PerturbedH5ImageDataset(data.Dataset):
+    def __init__(self, h5_path, hdf5_format="HWC", output_format="CHW"):
+        """
+        Streaming dataset over a single large .h5 file.
+        Assumes structure:
+           /<episode_idx>/
+               obs            shape: (T, H, W, C) or (T, C, H, W)
+               perturbed      same shape
+               magnitudes     shape: (T,) or ()
+               indices        shape: (T,) or ()
+               properties     shape: (T,) or ()
+        """
+        self.h5_path = h5_path
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
+
+        # Read once to build idx mapping
+        with h5py.File(self.h5_path, "r") as f:
+            self.episodes = sorted(int(k) for k in f.keys())
+            # assume every episode has same T
+            first = f[str(self.episodes[0])]["obs"]
+            self.seq_len = first.shape[0]
+
+        # Build (episode, step) lookup
+        self.idx2ep = []
+        for ep in self.episodes:
+            for t in range(self.seq_len):
+                self.idx2ep.append((ep, t))
+
+    def __len__(self):
+        return len(self.idx2ep)
+
+    def __getitem__(self, idx):
+        # open per worker (lazy)
+        if not hasattr(self, "_h5"):
+            self._h5 = h5py.File(self.h5_path, "r")
+
+        ep, t = self.idx2ep[idx]
+        grp = self._h5[str(ep)]
+
+        # Load on‐demand
+        orig = grp["obs"][t]         # (T,H,W,C) or (T,C,H,W)
+        pert = grp["perturbed"][t]
+
+        # optional transpose
+        if self.hdf5_format == "HWC" and self.output_format == "CHW":
+            # orig: (T,H,W,C) -> (T,C,H,W)
+            orig = np.transpose(orig, (0,3,1,2))
+            pert = np.transpose(pert, (0,3,1,2))
+        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
+            orig = np.transpose(orig, (0,2,3,1))
+            pert = np.transpose(pert, (0,2,3,1))
+        # else assume formats match
+
+        mags = grp["magnitudes"][t]
+        inds = grp["indices"][t]
+        props = grp["properties"][t]
+
+        # convert to torch if desired
+        orig = torch.from_numpy(orig).float()
+        pert = torch.from_numpy(pert).float()
+        mags = torch.tensor(mags, dtype=torch.float32)
+        inds = torch.tensor(inds, dtype=torch.long)
+        props = torch.tensor(props, dtype=torch.long)
+
+        return orig, pert, mags, inds, props
+
+    def __del__(self):
+        # ensure file closes on worker shutdown
+        if hasattr(self, "_h5"):
+            try:
+                self._h5.close()
+            except:
+                pass
+
+
 class BaseDataset(data.Dataset):
     def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
         self.experience_buffer = load_list_dict_h5py(hdf5_file)
@@ -414,40 +491,6 @@ class BaseDataset(data.Dataset):
     def __len__(self):
         return len(self.idx2episode)
 
-
-class PerturbedImageSequenceDataset(BaseDataset):
-    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
-        super().__init__(hdf5_file, hdf5_format, output_format)
-        # Build table for conversion between linear idx -> episode/step idx
-        # List of tuples: [(0, 0), (0, 1), ..., (num_episodes - 1, num_steps - 1)]
-        for ep in range(len(self.experience_buffer)):
-            num_steps = len(self.experience_buffer[ep]['obs'])
-            idx_tuple = [(ep, idx) for idx in range(num_steps)]
-            self.idx2episode.extend(idx_tuple)
-    
-    def __getitem__(self, idx):
-        hdf5_format = self.hdf5_format
-        output_format = self.output_format
-        ep, step = self.get_episode_step(idx)
-        orig_seq = to_float(self.experience_buffer[ep]['obs'][step])
-        pert_seq = to_float(self.experience_buffer[ep]['perturbed'][step])
-
-        if hdf5_format == 'CHW' and output_format == 'HWC':
-            transpose_tuple = (0, 2, 3, 1)  # Convert CHW to HWC
-        elif hdf5_format == 'HWC' and output_format == 'CHW':
-            transpose_tuple = (0, 3, 1, 2)  # Convert HWC to CHW
-        elif hdf5_format != output_format:
-            raise ValueError(f'Expected \'CHW\' or \'HWC\' as hdf5-format and output-format, received \'{hdf5_format}\ and \'{output_format}\'.')
-        
-        orig_seq = np.transpose(orig_seq, transpose_tuple)
-        pert_seq = np.transpose(pert_seq, transpose_tuple)
-
-        magnitudes = self.experience_buffer[ep]['magnitudes'][step]
-        indices = self.experience_buffer[ep]['indices'][step]
-        properties = self.experience_buffer[ep]['properties'][step]
-
-        return orig_seq, pert_seq, magnitudes, indices, properties
-    
 
 class ImageDataset(BaseDataset):
     def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
@@ -476,7 +519,6 @@ class ImageDataset(BaseDataset):
         img = to_float(img)
         img = convert_image_format(img, self.hdf5_format, self.output_format)
         return img
-    
 
 
 class PerturbedSlotSequenceDataset(data.Dataset):
