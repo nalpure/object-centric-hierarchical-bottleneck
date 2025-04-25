@@ -8,12 +8,12 @@ class NodeEncoder(nn.Module):
         super().__init__()
         #e.g. 76→64→32→16→5
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.ln2 = nn.LayerNorm(hidden_dim // 2)
-        self.fc3 = nn.Linear(hidden_dim // 2, hidden_dim // 4)
-        self.ln3 = nn.LayerNorm(hidden_dim // 4)
-        self.fc4 = nn.Linear(hidden_dim // 4, output_dim)
+        self.ln1 = nn.BatchNorm1d(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.BatchNorm1d(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln3 = nn.BatchNorm1d(hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, source_node, edge_mean):
         # source_node: [B, input_dim]
@@ -32,12 +32,12 @@ class NodeDecoder(nn.Module):
         super().__init__()
         # e.g.: 69→64→32→16→12
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.ln2 = nn.LayerNorm(hidden_dim // 2)
-        self.fc3 = nn.Linear(hidden_dim // 2, hidden_dim // 4)
-        self.ln3 = nn.LayerNorm(hidden_dim // 4)
-        self.fc4 = nn.Linear(hidden_dim // 4, output_dim)
+        self.ln1 = nn.BatchNorm1d(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.BatchNorm1d(hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln3 = nn.BatchNorm1d(hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, z, aggregated_edge_mean):
         # z: [B, input_dim]
@@ -61,9 +61,9 @@ class EdgeEncoder(nn.Module):
         self.node_dim = node_dim
         self.hidden_dim = hidden_dim
         self.fc1 = nn.Linear(node_dim * 2, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.ln1 = nn.BatchNorm1d(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2 = nn.LayerNorm(hidden_dim)
+        self.ln2 = nn.BatchNorm1d(hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
     
     def forward(self, source, neighbor):
@@ -85,12 +85,12 @@ class EdgeDecoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim):
         super().__init__()
         #e.g. 10->32->64->64
-        self.fc1 = nn.Linear(latent_dim * 2, 32)
-        self.ln1 = nn.LayerNorm(32)
-        self.fc2 = nn.Linear(32, 64)
-        self.ln2 = nn.LayerNorm(64)
-        self.fc3 = nn.Linear(64, hidden_dim)
-        self.ln3 = nn.LayerNorm(hidden_dim)
+        self.fc1 = nn.Linear(latent_dim * 2, hidden_dim)
+        self.ln1 = nn.BatchNorm1d(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.BatchNorm1d(hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln3 = nn.BatchNorm1d(hidden_dim)
         self.fc4 = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, source_latent, neighbor_latent):
@@ -184,8 +184,6 @@ class ImplicitLatentAutoEncoder(nn.Module):
 
     def decode(self, z):
         """
-        Loop‐free decode, skipping self‐pairs.
-
         Args:
             z: [B, O, L]   (L = E+I)
         Returns:
