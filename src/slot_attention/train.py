@@ -10,7 +10,7 @@ from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
-from src.utils import ImageDataset, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
+from src.utils import ImageDataset, get_lr_schedule, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
 
 
 def main():
@@ -158,19 +158,6 @@ def initialize_model(args):
     
     return model, optimizer
 
-
-def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
-    """ Creates a learning rate scheduler with warmup and exponential decay."""
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            # Linear warmup
-            return float(current_step) / float(max(1, warmup_steps))
-        else:
-            # Exponential decay after warmup
-            decay_factor = (current_step - warmup_steps) / decay_steps
-            return decay_rate ** decay_factor
-    
-    return LambdaLR(optimizer, lr_lambda)
 
 if __name__ == "__main__":
     main()

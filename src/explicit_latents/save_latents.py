@@ -1,3 +1,4 @@
+import os
 from tqdm import tqdm
 from torch.utils import data
 import torch
@@ -12,11 +13,16 @@ def main():
     set_seed(config["seed"])
     ckpt_path = config['ckpt_path']
     output_path = config['save_path']
-
+    
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Output path does not exist: {ckpt_path}")
+    
     print(f"Loading observation training dataset: {config['train_path']}")
     orig_dataset = PerturbedSlotSequenceDataset(hdf5_file=config["train_path"])
     dataloader = data.DataLoader(orig_dataset, batch_size=config['batch_size'], shuffle=False, drop_last=True)
-    print(f"Finished loading all {config['batch_size'] * len(dataloader)} training samples.")
+    print(f"Finished loading all {len(dataloader)}x{config['batch_size']} training samples.")
     slots_dim = next(iter(dataloader))[0].shape[-1]
 
     print("Loading model:", ckpt_path)

@@ -9,12 +9,12 @@ from os.path import exists
 import random
 import h5py
 import numpy as np
+from torch.optim.lr_scheduler import LambdaLR
+import matplotlib.pyplot as plt
 
 import torch
 from torch.utils import data
 from torch import nn
-
-import matplotlib.pyplot as plt
 
 EPS = 1e-17
 CONFIG_DIR = "configs/"
@@ -154,6 +154,20 @@ def decode(code):
     if code not in CODE_TO_STRING:
         raise ValueError(f"Code '{code}' is not valid.")
     return CODE_TO_STRING[code]
+
+
+def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
+    """ Creates a learning rate scheduler with warmup and exponential decay."""
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            # Linear warmup
+            return float(current_step) / float(max(1, warmup_steps))
+        else:
+            # Exponential decay after warmup
+            decay_factor = (current_step - warmup_steps) / decay_steps
+            return decay_rate ** decay_factor
+    
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def huber_loss_(targets, predictions, batch):
@@ -464,8 +478,8 @@ class PerturbedH5ImageDataset(data.Dataset):
         orig = torch.from_numpy(orig).float()
         pert = torch.from_numpy(pert).float()
         mags = torch.tensor(mags, dtype=torch.float32)
-        inds = torch.tensor(inds, dtype=torch.long)
-        props = torch.tensor(props, dtype=torch.long)
+        inds = torch.tensor(inds, dtype=torch.int8)
+        props = torch.tensor(props, dtype=torch.int8)
 
         return orig, pert, mags, inds, props
 

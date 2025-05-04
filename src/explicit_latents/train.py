@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.nn.functional import mse_loss # TODO change this to MSELoss
 
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
+from src.utils import PerturbedSlotSequenceDataset, get_config_argument, get_lr_schedule, load_config, log_progress, set_seed, DEVICE
 
 
 
@@ -229,20 +229,6 @@ def initialize_model(args, slots_dim):
         raise ValueError("Select a valid optimizer.")
     
     return model, optimizer
-
-
-def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
-    """ Creates a learning rate scheduler with warmup and exponential decay."""
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            # Linear warmup
-            return float(current_step) / float(max(1, warmup_steps))
-        else:
-            # Exponential decay after warmup
-            decay_factor = (current_step - warmup_steps) / decay_steps
-            return decay_rate ** decay_factor
-    
-    return LambdaLR(optimizer, lr_lambda)
 
 
 if __name__ == "__main__":

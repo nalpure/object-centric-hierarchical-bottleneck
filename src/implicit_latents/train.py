@@ -8,11 +8,9 @@ import torch
 from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
-from torch.optim.lr_scheduler import LambdaLR
 
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
-from src.utils import PerturbedH5ImageDataset, get_config_argument, load_config, log_progress, set_seed, DEVICE
-
+from src.utils import PerturbedH5ImageDataset, get_config_argument, load_config, log_progress, set_seed, get_lr_schedule, DEVICE
 
 
 def main():
@@ -75,13 +73,12 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     for epoch in range(1, num_epochs + 1): 
         epoch_loss = 0
         
-        for batch_idx, batch in enumerate(train_dataloader):
+        for batch in train_dataloader:
             batch_loss = 0
 
             orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
-            # TODO: remove hardcoded 4
-            orig_seq = orig_seq[:, :4, :, :].to(DEVICE)
-            pert_seq = pert_seq[:, :4, :, :].to(DEVICE)
+            orig_seq = orig_seq.to(DEVICE)
+            pert_seq = pert_seq.to(DEVICE)
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
@@ -178,20 +175,6 @@ def initialize_model(args, explicit_dim):
         raise ValueError("Select a valid optimizer.")
     
     return model, optimizer
-
-
-def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
-    """ Creates a learning rate scheduler with warmup and exponential decay."""
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            # Linear warmup
-            return float(current_step) / float(max(1, warmup_steps))
-        else:
-            # Exponential decay after warmup
-            decay_factor = (current_step - warmup_steps) / decay_steps
-            return decay_rate ** decay_factor
-    
-    return LambdaLR(optimizer, lr_lambda)
 
 
 if __name__ == "__main__":
