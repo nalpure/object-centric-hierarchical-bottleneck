@@ -45,7 +45,8 @@ def main():
         num_workers=8,
         pin_memory=True,
         prefetch_factor=2,
-        persistent_workers=True
+        persistent_workers=True,
+        drop_last=True
     )
     print(f"Finished loading all {config['batch_size'] * len(dataloader)} training samples.")
     print(f"Saving slots to {output_path}")
