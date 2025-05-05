@@ -1,6 +1,7 @@
 from torch.utils import data
 import torch
 import matplotlib.pyplot as plt
+from os.path import exists
 
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, separate_slots
@@ -27,10 +28,8 @@ def main():
     test_dataset = PerturbedH5ImageDataset(h5_path=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=True)
 
-    # TODO: remove hardcoded 4
-    obs = next(iter(test_dataloader))[0][:, :4, :, :, :].to(DEVICE)
-    seq_len = 4
-    #seq_len = obs.shape[1]
+    obs = next(iter(test_dataloader))[0].to(DEVICE)
+    seq_len = obs.shape[1]
 
     print("Loading model:", ckpt_path_SA)
     model_SA = SlotAttentionAutoEncoder(
@@ -72,13 +71,26 @@ def main():
     model_implicit.eval()
     model_implicit.load_state_dict(torch.load(ckpt_path_implicit, weights_only=True)['model_state_dict'], strict=True)
 
+    norm_stats_path = config_implicit["train_path"].replace(".h5", "_norm_stats.pt")
+    mean = torch.zeros(1, device=DEVICE)
+    std = torch.ones(1, device=DEVICE)
+
+    print(norm_stats_path)
+    if exists(norm_stats_path):
+        print("Loading normalization stats from", norm_stats_path)
+        stats = torch.load(norm_stats_path, weights_only=True)
+        mean = stats["mean"].to(DEVICE)
+        std = stats["std"].to(DEVICE)
+        print(f"mean: {mean}, std: {std}")
+
 
     with torch.no_grad():
         # ENCODING
         active_slots, background_slots = encode_obs(obs, model_SA)
         z_explicit = encode_slots(active_slots, model_explicit)
-        z_implicit = encode_explicit_latents(z_explicit, model_implicit)
-        print("z_explicit:", z_explicit[0, :, 0, :])
+        z_explicit_norm = torch.clone(z_explicit)
+        z_explicit_norm = (z_explicit - mean) / std
+        z_implicit = encode_explicit_latents(z_explicit_norm, model_implicit)
         
         # DECODING
         recon_SA = decode_slots(active_slots, background_slots, model_SA)
@@ -87,27 +99,40 @@ def main():
             background_slots, 
             model_SA
         )
-        z_explicit_recon = decode_implicit_latents(z_implicit, model_implicit)
-        print("z_explicit_recon:", z_explicit_recon[0, :, 0, :])
+        z_explicit_norm_recon = decode_implicit_latents(z_implicit, model_implicit) 
+        z_explicit_recon = z_explicit_norm_recon * std + mean
         recon_implicit = decode_slots(
-            decode_explicit_latents(
-                decode_implicit_latents(z_implicit, model_implicit), 
-                model_explicit
-            ),
+            decode_explicit_latents(z_explicit_recon, model_explicit),
             background_slots,
             model_SA
         )
+
+        loss = torch.nn.functional.mse_loss(z_explicit_norm, z_explicit_norm_recon).item()
+        z_explicit_norm_recon = z_explicit_norm_recon.detach().cpu().numpy()
+        z_explicit_norm = z_explicit_norm.detach().cpu().numpy()
         
         # PLOTTING
         for i in range(NUM_OUTPUT_FIGS):
+            print(f"------- FIGURE {i} -------")
+            for t in range(seq_len):
+                print(f"--- time t={t} ---")
+                for obj in range(active_slots.shape[2]):
+                    target_str = ", ".join([f"{val:.3f}" for val in z_explicit_norm[i, t, obj, :]])
+                    recon_str = ", ".join([f"{val:.3f}" for val in z_explicit_norm_recon[i, t, obj, :]])
+                    print(f"obj {obj + 1}: [{target_str}] -> [{recon_str}]")
+                print()
+            print()
             save_path = f"{OUTPUT_DIR}recons_{i}.png"
             plot_recons(
                 obs[i], 
                 recon_SA[i], 
                 recon_explicit[i], 
                 recon_implicit[i], 
+                recon_SA[i] - recon_implicit[i],
                 save_path=save_path
             )
+
+        print(f"Reconstruction loss: {loss}")    
 
 
 def encode_obs(obs, model_SA: SlotAttentionAutoEncoder):
@@ -189,42 +214,37 @@ def decode_slots(active_slots, background_slots, model_SA: SlotAttentionAutoEnco
     return obs_recon      
 
 
-def plot_recons(orig, slot_attention, explicit_latent, full_latent, save_path="output.png"):
-    """
-    Plots original frames, combined reconstructions, and masks for each slot.
-
-    Args:
-    - orig (torch.Tensor): Original frames of shape [num_frames, 3, height, width]
-    - slot_attention (torch.Tensor): Slot attention reconstructions of shape [num_frames, 3, height, width]
-    - explicit_latent (torch.Tensor): Explicit latent reconstructions of shape [num_frames, 3, height, width]
-    - full_latent (torch.Tensor): Full latent reconstructions of shape [num_frames, 3, height, width]
-    - save_path (str): Path to save the output image
-    """
-    assert orig.shape == slot_attention.shape == explicit_latent.shape == full_latent.shape, "Shape mismatch!"
+def plot_recons(orig, slot_attention, explicit_latent, full_latent, diff, save_path="output.png"):
     num_frames = orig.shape[0]
+    all_imgs = [orig, slot_attention, explicit_latent, full_latent, diff]
+    row_titles = ["Original", "Slot Attention", "Explicit Latents", "Implicit Latents", "Difference"]
 
-    all_imgs = [orig, slot_attention, explicit_latent, full_latent]
-    row_titles = ["Original", "Slot Attention", "Explicit Latents", "Implicit Latents"]
-
-    fig, axes = plt.subplots(4, num_frames, figsize=(4 * num_frames, 4 * 4))
+    fig, axes = plt.subplots(len(all_imgs), num_frames, figsize=(4 * num_frames, 4 * len(all_imgs)))
 
     if num_frames == 1:
-        axes = axes.reshape(4, 1)
+        axes = axes.reshape(len(all_imgs), 1)
 
     for row_idx, images in enumerate(all_imgs):
         for col_idx in range(num_frames):
             img = images[col_idx]
             if hasattr(img, "detach"):
                 img = img.detach().cpu().numpy()
-            img = img.transpose(1, 2, 0)
-            axes[row_idx, col_idx].imshow(img.clip(0, 1))
+
+            if img.shape[0] == 1:
+                img = img[0]  # shape: [H, W]
+                cmap = "gray"
+            else:
+                img = img.transpose(1, 2, 0)  # shape: [H, W, 3]
+                cmap = None
+
+            axes[row_idx, col_idx].imshow(img.clip(0, 1), cmap=cmap)
             axes[row_idx, col_idx].axis("off")
             if row_idx == 0:
                 axes[row_idx, col_idx].set_title(f"Frame {col_idx+1}", fontsize=12)
 
     # Manually add row titles on the left
     for row_idx, title in enumerate(row_titles):
-        fig.text(0.1, 0.8 - row_idx * 0.19, title, va='center', ha='right', fontsize=14, weight='bold')
+        fig.text(0.1, 0.8 - row_idx * 0.76 / len(all_imgs), title, va='center', ha='right', fontsize=14, weight='bold')
 
     plt.subplots_adjust(wspace=0.05, hspace=0.05)
     plt.savefig(save_path, bbox_inches='tight')

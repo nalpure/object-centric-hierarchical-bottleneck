@@ -10,36 +10,51 @@ from torch.amp import GradScaler
 from torch.utils import data
 
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
-from src.utils import PerturbedH5ImageDataset, get_config_argument, load_config, log_progress, set_seed, get_lr_schedule, DEVICE
+from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, get_lr_schedule, DEVICE
 
 
 def main():
     print("Running on", DEVICE)
     config_name = get_config_argument()
-    config = load_config(config_name)["implicit_latents"]
-
-    for key, value in config.items():
-        print(f"{key}: {value}")
-    set_seed(config['seed'])
+    config_impl = load_config(config_name)["implicit_latents"]
     
+
+    for key, value in config_impl.items():
+        print(f"{key}: {value}")
+    set_seed(config_impl['seed'])
+    
+    mean = None
+    std = None
+    norm_stats_path = config_impl["train_path"].replace(".h5", "_norm_stats.pt")
+    print()
+    if exists(norm_stats_path):
+        print("Loading normalization stats from", norm_stats_path)
+        stats = torch.load(norm_stats_path)
+        mean = stats["mean"]
+        std = stats["std"]
+        print(f"mean: {mean}, std: {std}")
+
     print("Loading training data...")
-    dataset = PerturbedH5ImageDataset(h5_path=config["train_path"])
-    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
-    print(f"Finished loading all {config['batch_size'] * len(train_dataloader)} training samples.")
+    dataset = PerturbedSlotSequenceDataset(hdf5_file=config_impl["train_path"], feature_mean=mean, feature_std=std, normalize=True)
+    if not exists(norm_stats_path):
+        print("Saving normalization stats to", norm_stats_path)
+        torch.save({"mean": dataset.feature_mean, "std": dataset.feature_std}, norm_stats_path)
+    train_dataloader = data.DataLoader(dataset, batch_size=config_impl["batch_size"], shuffle=True, drop_last=True)
+    print(f"Finished loading all {config_impl['batch_size'] * len(train_dataloader)} training samples.")
 
     explicit_dim = next(iter(train_dataloader))[0].shape[-1]
 
-    ckpt_path = config["ckpt_path"]
+    ckpt_path = config_impl["ckpt_path"]
     print("Loading model:", ckpt_path)
-    model, optimizer = initialize_model(config, explicit_dim)
+    model, optimizer = initialize_model(config_impl, explicit_dim)
     
     print("Training slot attention model...")
     train(model, optimizer, train_dataloader,
-        config["num_epochs"],
-        config["warmup_epochs"],
-        config["decay_epochs"],
-        config["decay_rate"],
-        config["mixed_precision"],
+        config_impl["num_epochs"],
+        config_impl["warmup_epochs"],
+        config_impl["decay_epochs"],
+        config_impl["decay_rate"],
+        config_impl["mixed_precision"],
         ckpt_path
     )
 

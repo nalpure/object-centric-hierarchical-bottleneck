@@ -536,13 +536,40 @@ class ImageDataset(BaseDataset):
 
 
 class PerturbedSlotSequenceDataset(data.Dataset):
-    def __init__(self, hdf5_file):
+    """
+    Dataset for loading perturbed slot sequences from a HDF5 file.
+    Assumes the HDF5 file contains the following datasets:
+        - 'orig_seq': Original slot sequences
+        - 'pert_seq': Perturbed slot sequences
+        - 'magnitude': Magnitude of perturbations
+        - 'obj_index': Object indices
+        - 'prop_index': Property indices
+
+    The dataset can be normalized using the provided feature mean and standard deviation.
+    If normalization is enabled but feature mean and standard deviation are not provided,
+    the mean and standard deviation will be computed from the data.
+    """
+    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True):
         self.hdf5_file = hdf5_file
+        self.normalize = normalize
+        self.eps = 1e-8
+
+        # Load all data into memory
         self.original, self.perturbed, self.magnitude, self.obj_index, self.prop_index = self._load_slots_data()
         self.num_samples = len(self.original)
 
+        if self.normalize:
+            if feature_mean is None or feature_std is None:
+                self.feature_mean, self.feature_std = self._compute_mean_std()
+            else:
+                self.feature_mean = feature_mean
+                self.feature_std = feature_std
+            self.original = self._normalize_tensor(self.original)
+            self.perturbed = self._normalize_tensor(self.perturbed)
+
+
     def _load_slots_data(self):
-        data_dict = {
+        data = {
             'orig_seq': [],
             'pert_seq': [],
             'magnitude': [],
@@ -552,20 +579,37 @@ class PerturbedSlotSequenceDataset(data.Dataset):
 
         with h5py.File(self.hdf5_file, 'r') as f:
             for key in f.keys():
-                for data_key in data_dict:
-                    if data_key in key:
-                        data_dict[data_key].extend(f[key][:])  # Flatten the batches
-                        break  # Exit inner loop once a match is found
+                for k in data:
+                    if k in key:
+                        data[k].append(f[key][...])
+                        break
 
-        return tuple(data_dict.values())  # Unpack values as return tuple
+        # Stack all data into single tensors
+        orig_seq = torch.tensor(np.concatenate(data['orig_seq']), dtype=torch.float32)
+        pert_seq = torch.tensor(np.concatenate(data['pert_seq']), dtype=torch.float32)
+        magnitude = torch.tensor(np.concatenate(data['magnitude']), dtype=torch.float32)
+        obj_index = torch.tensor(np.concatenate(data['obj_index']), dtype=torch.int64)
+        prop_index = torch.tensor(np.concatenate(data['prop_index']), dtype=torch.int64)
+
+        return orig_seq, pert_seq, magnitude, obj_index, prop_index
+
+    def _compute_mean_std(self):
+        with torch.no_grad():
+            all_data = torch.tensor(np.concatenate([self.original, self.perturbed], axis=0), dtype=torch.float32)
+            flat = all_data.reshape(-1, all_data.shape[-1])  # Shape: [B*T*O, E]
+            mean = flat.mean(dim=0)  # Shape: [E]
+            std = flat.std(dim=0)    # Shape: [E]
+            return mean, std
+
+    def _normalize_tensor(self, x):
+        return (x - self.feature_mean) / self.feature_std
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        slots_original = torch.tensor(self.original[idx], dtype=torch.float32)
-        slots_perturbed = torch.tensor(self.perturbed[idx], dtype=torch.float32)
-        magnitude = torch.tensor(self.magnitude[idx], dtype=torch.float32)
-        obj_index = torch.tensor(self.obj_index[idx], dtype=torch.int64)
-        prop_index = torch.tensor(self.prop_index[idx], dtype=torch.int64)
-        return slots_original, slots_perturbed, magnitude, obj_index, prop_index
+        return (self.original[idx],
+                self.perturbed[idx],
+                self.magnitude[idx],
+                self.obj_index[idx],
+                self.prop_index[idx])
