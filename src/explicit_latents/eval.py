@@ -7,7 +7,7 @@ from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
 
-PERTURBATION_MAGNITUDE = 0.1
+PERTURBATION_MAGNITUDE = 0.5
 NUM_OUTPUT_FIGS = 5
 OUTPUT_DIR = "data/figures/"
 
@@ -56,46 +56,54 @@ def main():
     test_dataset = ImageDataset(hdf5_file=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=True)
 
-    batch = next(iter(test_dataloader))
-    obs = batch.to(DEVICE)
-
     with torch.no_grad():
-        recon_SA, _, _, slots_orig, slot_background = model_SA(obs)
-        active_slots_recon, z = model_disentangle(slots_orig)
-        all_slots_recon = torch.cat((active_slots_recon, slot_background), dim=1)
-        print("slots recon", all_slots_recon.shape)
-        recon_latent, _, _ = model_SA.decode(all_slots_recon)
-        
-        object_index = 0
-        recon_perturbed_list = []
-        
-        print("z")
-        print(z[0])
-        for l in range(config_latent['latent_dim']):
-            z_perturbed = z.clone()
-            z_perturbed[:, object_index, l] += PERTURBATION_MAGNITUDE
-            print(f"z_pert#{l}")
-            print(z_perturbed[0])
-            active_slots_perturbed = model_disentangle.decode(z_perturbed)
-            all_slots_perturbed = torch.concat((active_slots_perturbed, slot_background), dim=1)
-            recon_perturbed, _, _ = model_SA.decode(all_slots_perturbed)
-            recon_perturbed_list.append(recon_perturbed)
+        loss_list = []
+        for batch_idx, batch in enumerate(test_dataloader):
+            obs = batch.to(DEVICE)
+            recon_SA, _, _, slots_orig, slot_background = model_SA(obs)
+            active_slots_recon, z = model_disentangle(slots_orig)
+            criterion = torch.nn.MSELoss()
+            loss = criterion(slots_orig, active_slots_recon)
+            loss_list.append(loss.item())
 
-        print("--- z's ---")
-        
-        for i in range(NUM_OUTPUT_FIGS):
-            print(f"z_{i}:\n{z[i].cpu().numpy()}")
-        print("-----------")
-        
-        for i in range(NUM_OUTPUT_FIGS):
-            # plot image row: original, reconstructed (SA), reconstructed (from latent dim), reconstructions with latent perturbations
-            imgs = [obs[i], recon_SA[i], recon_latent[i]]
-            labels = ["Original", "Reconstructed (SA)", "Reconstructed (from latent dim)"]
-            for j, recon_perturbed in enumerate(recon_perturbed_list):
-                imgs.append(recon_perturbed[i])
-                labels.append(f"Pert #{j}")
-            save_path = f"{OUTPUT_DIR}output_{i}.png"
-            plot_images(imgs, save_path, labels=labels)
+            if batch_idx == 0:
+                all_slots_recon = torch.cat((active_slots_recon, slot_background), dim=1)
+                print("slots recon", all_slots_recon.shape)
+                recon_latent, _, _ = model_SA.decode(all_slots_recon)
+                
+                object_index = 0
+                recon_perturbed_list = []
+                
+                print("z")
+                print(z[0])
+                for l in range(config_latent['latent_dim']):
+                    z_perturbed = z.clone()
+                    z_perturbed[:, object_index, l] += PERTURBATION_MAGNITUDE
+                    print(f"z_pert#{l}")
+                    print(z_perturbed[0])
+                    active_slots_perturbed = model_disentangle.decode(z_perturbed)
+                    all_slots_perturbed = torch.concat((active_slots_perturbed, slot_background), dim=1)
+                    recon_perturbed, _, _ = model_SA.decode(all_slots_perturbed)
+                    recon_perturbed_list.append(recon_perturbed)
+
+                print("--- z's ---")
+                
+                for i in range(NUM_OUTPUT_FIGS):
+                    print(f"z_{i}:\n{z[i].cpu().numpy()}")
+                print("-----------")
+                
+                for i in range(NUM_OUTPUT_FIGS):
+                    # plot image row: original, reconstructed (SA), reconstructed (from latent dim), reconstructions with latent perturbations
+                    imgs = [obs[i], recon_SA[i], recon_latent[i]]
+                    labels = ["Original", "Reconstructed (SA)", "Reconstructed (from latent dim)"]
+                    for j, recon_perturbed in enumerate(recon_perturbed_list):
+                        imgs.append(recon_perturbed[i])
+                        labels.append(f"Pert #{j}")
+                    save_path = f"{OUTPUT_DIR}output_{i}.png"
+                    plot_images(imgs, save_path, labels=labels)
+
+        print(f"Average loss: {np.mean(loss_list):.8f}")
+        print(f"Standard deviation of loss: {np.std(loss_list):.8f}")
 
 def plot_frames(orig, masks, combined_recons, save_path="output.png"):
     """

@@ -1,6 +1,7 @@
 {
     "slot_attention":{
         "train_path": "data/observations/separated/4F_stitched.h5",
+        "test_path": "/mnt/ifi/iis/benedikt.schenk/4F_100ep_s99.h5",
         "ckpt_path": "checkpoints/slot_attention/full2.ckpt",
         "save_path": "data/slots/4F_stitched_slots.h5",
 
@@ -18,27 +19,27 @@
     },
     "explicit_latents": {
         "train_path": "data/slots/4F_stitched_slots.h5",
-        "ckpt_path": "checkpoints/explicit_latents/full2.ckpt",
+        "ckpt_path": "checkpoints/explicit_latents/full2_new.ckpt",
         "save_path": "data/explicit_latents/4F_stitched_expl.h5",
         
-        "batch_size": 128,
+        "batch_size": 2048,
         "num_epochs": 500,
-        "learning_rate": 0.004,
+        "learning_rate": 0.0004,
         "warmup_epochs": 0,
-        "decay_epochs": 500,
-        "decay_rate": 0.5,
+        "decay_epochs": 30,
+        "decay_rate": 0.8,
         
         "latent_dim": 3,
         "rec_loss_mult": 100
     },
     "implicit_latents": {
         "train_path": "data/explicit_latents/4F_stitched_expl.h5",
-        "ckpt_path": "checkpoints/implicit_latents/4F.ckpt",
+        "ckpt_path": "checkpoints/implicit_latents/4F_norm.ckpt",
 
         "batch_size": 256,
         "num_epochs": 500,
-        "learning_rate": 0.0003,
-        "warmup_epochs": 0,
+        "learning_rate": 0.0005,
+        "warmup_epochs": 30,
         "decay_epochs": 100,
         "decay_rate": 0.8,
         

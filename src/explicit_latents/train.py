@@ -9,10 +9,10 @@ from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
-from torch.nn.functional import mse_loss # TODO change this to MSELoss
+from torch.nn import MSELoss
 
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import PerturbedSlotSequenceDataset, get_config_argument, get_lr_schedule, load_config, log_progress, set_seed, DEVICE
+from src.utils import SlotDataset, get_config_argument, get_lr_schedule, load_config, log_progress, set_seed, DEVICE
 
 
 
@@ -26,27 +26,27 @@ def main():
     set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = PerturbedSlotSequenceDataset(hdf5_file=config["train_path"])
-    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
-    print(f"Finished loading all {config['batch_size'] * len(train_dataloader)} training samples.")
+    dataset = SlotDataset(hdf5_file=config["train_path"])
+    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=8)
+    print(f"Finished loading all {len(train_dataloader)}x{config['batch_size']} training samples.")
 
-    slots_dim = next(iter(train_dataloader))[0].shape[-1]
+    slots_dim = dataset[0].shape[-1]
     model, optim = initialize_model(config, slots_dim)
+    print(f"Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     ckpt_path = config["ckpt_path"]
     
-    print("Training slot attention model...")
+    print("Training explicit latent autoencoder...")
     train(model, optim, train_dataloader,
         config["num_epochs"],
         config["warmup_epochs"],
         config["decay_epochs"],
         config["decay_rate"],
         config["mixed_precision"],
-        ckpt_path,
-        config["rec_loss_mult"]
+        ckpt_path
     )
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, rec_loss_mult, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, verbose=True, criterion=MSELoss()):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -73,39 +73,22 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     print("Training started at", start.ctime())
     
     for epoch in range(1, num_epochs + 1): 
-        epoch_recon_loss = 0
-        epoch_dis_loss = 0
+        epoch_loss = 0
         
         for batch in train_dataloader:
             batch_loss = 0
 
-            slots_orig, slots_pert, magnitude, obj_index, prop_index = batch
-            slots_orig = slots_orig.to(DEVICE)
-            slots_pert = slots_pert.to(DEVICE)
-            magnitude = magnitude.to(DEVICE)
+            slot_true = batch[0].to(DEVICE)
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
-            num_timesteps = slots_orig.shape[1]
             
             with context_manager:
-                recon_loss = 0
-                for timestep in range(num_timesteps):
-                    slots_orig_reconstructed, z_orig = model(slots_orig[:, timestep])
-                    slots_pert_reconstructed, z_pert = model(slots_pert[:, timestep])
-                    recon_loss += mse_loss(slots_orig[:, timestep], slots_orig_reconstructed)
-                    recon_loss += mse_loss(slots_pert[:, timestep], slots_pert_reconstructed)
-                    if timestep == 0:
-                        dis_loss = disentanglement_loss_magnitude(z_orig, z_pert, magnitude)
-                
-                recon_loss *= rec_loss_mult # Account for the loss multiplier
-                recon_loss /= 2 # Account for the two reconstructions
-                recon_loss /= num_timesteps # Account for the number of timesteps
+                slot_recon, _ = model(slot_true)
+                recon_loss = criterion(slot_true, slot_recon)
+                    
                 batch_loss += recon_loss
-                epoch_recon_loss += recon_loss.item()
-
-                batch_loss += dis_loss
-                epoch_dis_loss += dis_loss.item()
+                epoch_loss += recon_loss.item()
 
             optimizer.zero_grad()
             current_step += 1
@@ -121,23 +104,19 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         scheduler.step() # Adjust the learning rates
         current_lr = scheduler.get_last_lr()
 
-        epoch_recon_loss /= len(train_dataloader)
-        epoch_dis_loss /= len(train_dataloader)
-        epoch_total_loss = epoch_recon_loss + epoch_dis_loss
-        loss_list.append(epoch_total_loss)
+        epoch_loss /= len(train_dataloader)
+        loss_list.append(epoch_loss)
 
         if verbose:
             additional_msg = (
-                f'Slot diff: {epoch_recon_loss:.6f}, '
-                f'Disentanglement: {epoch_dis_loss:.6f}, '
-                f'Total: {epoch_total_loss:.6f}, '
+                f'Slot diff: {epoch_loss:.6f}, '
                 f'lr: {current_lr[0]:.6f}'
             )
             log_progress(epoch, num_epochs, start, additional_msg)
 
         # Save the best model and optimizer state
-        if epoch_total_loss < best_loss:
-            best_loss = epoch_total_loss
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
             best_epoch = epoch
 
             torch.save({
@@ -151,57 +130,6 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         print(f'Best epoch was #{best_epoch} with a loss of {best_loss:.6f}. Saved at \'{ckpt_path}\'.')
 
     return model, loss_list
-
-
-def disentanglement_loss(latents_original, latents_perturbed, eps=1e-8):
-    """
-    Exactly one feature of exactly one object should be changed. 
-    This loss sums the L1 differences between the corresponding slot latent vectors,
-    but excludes the slot that shows the maximum difference (assumed to be the one that
-    was intentionally perturbed). The loss is then averaged over slots for each batch.
-
-    @param latents_original: torch.Tensor of shape [B, O, D]
-        The latent representation of the original observation.
-    @param latents_perturbed: torch.Tensor of shape [B, O, D]
-        The latent representation of the perturbed observation.
-    @param eps: float
-        A small epsilon to avoid numerical issues.
-    @return: torch.Tensor of shape [B, 1]
-        The sum of differences (L1 norm) between the original and perturbed latents,
-        excluding the slot with the maximum difference, for each sample in the batch.
-    """
-    # Compute the L1 difference between the original and perturbed latents
-    diff = torch.abs(latents_original - latents_perturbed) # [B, O, D]
-    max_diff = diff.amax(dim=(-2,-1)) # [B]    
-    total_diff = diff.sum(dim=-1).sum(dim=-1) # [B]
-    
-    # Exclude the maximum difference by subtracting it from the total difference.
-    loss = total_diff - max_diff
-
-    # Normalize the loss by the sum of all original latents
-    batch_loss = loss.sum()
-    batch_loss = batch_loss / (torch.abs(latents_original).sum(dim=-1).sum(dim=-1).sum(dim=-1) + eps)
-    
-    return batch_loss
-
-
-def disentanglement_loss_magnitude(latents_original, latents_perturbed, magnitude, eps=1e-8):
-    # Compute the L1 difference between the original and perturbed latents
-    diff = torch.abs(latents_original - latents_perturbed) # [B, O, D]
-    total_diff = diff.sum(dim=-1).sum(dim=-1) # [B]
-
-    # Assume the maximum difference to be the perturbed feature of the perturbed object
-    max_diff = diff.amax(dim=(-2,-1)) # [B]    
-    magnitude_diff = torch.abs(torch.abs(magnitude) - max_diff)
-    
-    # Exclude the maximum difference by subtracting it from the total difference.
-    loss = total_diff - max_diff + magnitude_diff
-
-    # Normalize the loss by the sum of all original latents
-    batch_loss = loss.sum()
-    batch_loss = batch_loss / (torch.abs(latents_original).sum(dim=-1).sum(dim=-1).sum(dim=-1) + eps)
-    
-    return batch_loss
 
 
 def initialize_model(args, slots_dim):

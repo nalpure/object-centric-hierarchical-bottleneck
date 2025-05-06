@@ -613,3 +613,44 @@ class PerturbedSlotSequenceDataset(data.Dataset):
                 self.magnitude[idx],
                 self.obj_index[idx],
                 self.prop_index[idx])
+    
+
+class SlotDataset(data.Dataset):
+    """
+    Loads slots from orig_seq and pert_seq (shape [N, T, O, S]) in a HDF5 file.
+    Flattens all slots across time and objects, returning one randomly chosen slot
+    (either original or perturbed) per __getitem__ call.
+    """
+    def __init__(self, hdf5_file):
+        self.hdf5_file = hdf5_file
+        self.slots = self._load_slots_data()
+
+    def _load_slots_data(self):
+        data = {
+            'orig_seq': [],
+            'pert_seq': []
+        }
+
+        with h5py.File(self.hdf5_file, 'r') as f:
+            for key in f.keys():
+                for k in data:
+                    if k in key:
+                        data[k].append(f[key][...])
+                        break
+
+        # Stack all data into single tensors
+        orig_seq = torch.tensor(np.concatenate(data['orig_seq']), dtype=torch.float32)
+        #TODO deal with pert_seq
+        #pert_seq = torch.tensor(np.concatenate(data['pert_seq']), dtype=torch.float32)
+        #sequences = torch.cat((orig_seq, pert_seq), dim=0)
+        # Flatten the sequences across time and objects
+        slots = orig_seq.reshape(-1, orig_seq.shape[-1])  # Shape: [B*T*O, S]
+        return slots
+        
+
+    def __len__(self):
+        return self.slots.shape[0]
+
+    def __getitem__(self, idx):
+        # Select a random slot regardless of whether it was original or perturbed
+        return self.slots[idx]

@@ -72,12 +72,12 @@ class ExplicitLatentAutoEncoder(nn.Module):
     def forward(self, slots):
         """
         Args:
-            slots: torch.Tensor of shape [batch_size, num_slots, slot_dim]
+            slots: torch.Tensor of shape [batch_size, slot_dim]
                 The active slots
         Returns:
-            torch.Tensor of shape [batch_size, num_slots, latent_dim]:
+            torch.Tensor of shape [batch_size, latent_dim]:
                 The reconstructed active slots after latent decoding
-            torch.Tensor of shape [batch_size, num_slots, latent_dim]:
+            torch.Tensor of shape [batch_size, latent_dim]:
                 The latents of the active slots
         """
         z = self.encode(slots)
@@ -87,36 +87,26 @@ class ExplicitLatentAutoEncoder(nn.Module):
     def encode(self, slots):
         """
         Args:
-            slots: torch.Tensor of shape [batch_size, num_slots, slots_dim]
+            slots: torch.Tensor of shape [batch_size,, slots_dim]
                 The active slots
         Returns:
-            torch.Tensor of shape [batch_size, num_slots, latent_dim]:
+            torch.Tensor of shape [batch_size, latent_dim]:
                 The latents of the active slots
         """
-        batch_size, num_slots, slots_dim = slots.shape
-        latent_dim = self.latent_dim
-
-        slots_flat = slots.reshape(batch_size * num_slots, slots_dim)
-        z_flat = self.object_encoder(slots_flat)
-        z = z_flat.reshape(batch_size, num_slots, latent_dim)
+        z = self.object_encoder(slots)
         return z
 
     
     def decode(self, z):
         """
         Args:
-            z: torch.Tensor of shape [batch_size, num_slots, latent_dim]
+            z: torch.Tensor of shape [batch_size, latent_dim]
                 The latents of the active slots
         Returns:
-            torch.Tensor of shape [batch_size, num_slots, slots_dim]:
+            torch.Tensor of shape [batch_size, slots_dim]:
                 The reconstructed active slots after latent decoding
         """
-        batch_size, num_slots, latent_dim = z.shape
-        slots_dim = self.slots_dim
-
-        z_flat = z.reshape(batch_size * num_slots, latent_dim)
-        slots_reconstructed_flat = self.object_decoder(z_flat)
-        slots_reconstructed = slots_reconstructed_flat.view(batch_size, num_slots, slots_dim)
+        slots_reconstructed = self.object_decoder(z)
         return slots_reconstructed
 
 
