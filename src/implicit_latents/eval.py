@@ -1,3 +1,4 @@
+import numpy as np
 from torch.utils import data
 import torch
 import matplotlib.pyplot as plt
@@ -26,10 +27,8 @@ def main():
 
     print(f"Loading observation test dataset: {config_SA['test_path']}")
     test_dataset = PerturbedH5ImageDataset(h5_path=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
-    test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=True)
-
-    obs = next(iter(test_dataloader))[0].to(DEVICE)
-    seq_len = obs.shape[1]
+    test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=False, drop_last=True)
+    seq_len = next(iter(test_dataloader))[0].shape[1]
 
     print("Loading model:", ckpt_path_SA)
     model_SA = SlotAttentionAutoEncoder(
@@ -71,68 +70,110 @@ def main():
     model_implicit.eval()
     model_implicit.load_state_dict(torch.load(ckpt_path_implicit, weights_only=True)['model_state_dict'], strict=True)
 
-    norm_stats_path = config_implicit["train_path"].replace(".h5", "_norm_stats.pt")
-    mean = torch.zeros(1, device=DEVICE)
-    std = torch.ones(1, device=DEVICE)
+    normalize = config_implicit["normalize"]
+    if normalize:
+        norm_stats_path = config_implicit["train_path"].replace(".h5", "_norm_stats.pt")
+        if exists(norm_stats_path):
+            print("Loading normalization stats from", norm_stats_path)
+            stats = torch.load(norm_stats_path, weights_only=True)
+            mean = stats["mean"].to(DEVICE)
+            std = stats["std"].to(DEVICE)
+            print(f"mean: {mean}, std: {std}")
+        else:
+            raise FileNotFoundError(f"Normalization stats file not found: {norm_stats_path}")
 
-    print(norm_stats_path)
-    if exists(norm_stats_path):
-        print("Loading normalization stats from", norm_stats_path)
-        stats = torch.load(norm_stats_path, weights_only=True)
-        mean = stats["mean"].to(DEVICE)
-        std = stats["std"].to(DEVICE)
-        print(f"mean: {mean}, std: {std}")
+    loss_implicit_to_explicit = []
+    loss_implicit_to_slot = []
+    loss_implicit_to_obs = []
+    loss_explicit_to_slot = []
+    loss_explicit_to_obs = []
+    loss_slot_to_obs = []
+    criterion = torch.nn.MSELoss(reduction="mean")
 
+    for batch_idx, batch in enumerate(test_dataloader):
+        obs = batch[0].to(DEVICE)
 
-    with torch.no_grad():
-        # ENCODING
-        active_slots, background_slots = encode_obs(obs, model_SA)
-        z_explicit = encode_slots(active_slots, model_explicit)
-        z_explicit_norm = torch.clone(z_explicit)
-        z_explicit_norm = (z_explicit - mean) / std
-        z_implicit = encode_explicit_latents(z_explicit_norm, model_implicit)
+        with torch.no_grad():
+            # ENCODING
+            active_slots, background_slots = encode_obs(obs, model_SA)  # obs -> slots
+            z_explicit = encode_slots(active_slots, model_explicit)     # slots -> explicit
+            z_explicit_norm = (torch.clone(z_explicit) - mean) / std if normalize else z_explicit
+            z_implicit = encode_explicit_latents(z_explicit_norm, model_implicit)   # explicit -> implicit
+            
+            # DECODING
+            # slot -> obs
+            obs_recon_SA = decode_slots(active_slots, background_slots, model_SA)
+
+            # explicit -> slot -> obs
+            slot_recon_explicit = decode_explicit_latents(z_explicit, model_explicit)
+            obs_recon_explicit = decode_slots(slot_recon_explicit, background_slots, model_SA)
+
+            # implicit -> explicit -> slot -> obs
+            z_explicit_norm_recon = decode_implicit_latents(z_implicit, model_implicit) 
+            z_explicit_recon = z_explicit_norm_recon * std + mean if normalize else z_explicit_norm_recon
+            slot_recon_implicit = decode_explicit_latents(z_explicit_recon, model_explicit)
+            obs_recon_implicit = decode_slots(slot_recon_implicit, background_slots, model_SA)
         
-        # DECODING
-        recon_SA = decode_slots(active_slots, background_slots, model_SA)
-        recon_explicit = decode_slots(
-            decode_explicit_latents(z_explicit, model_explicit), 
-            background_slots, 
-            model_SA
-        )
-        z_explicit_norm_recon = decode_implicit_latents(z_implicit, model_implicit) 
-        z_explicit_recon = z_explicit_norm_recon * std + mean
-        recon_implicit = decode_slots(
-            decode_explicit_latents(z_explicit_recon, model_explicit),
-            background_slots,
-            model_SA
-        )
+        for i in range(len(obs)):
+            loss_implicit_to_explicit.append(criterion(z_explicit_norm[i], z_explicit_norm_recon[i]).item())
+            loss_implicit_to_slot.append(criterion(active_slots[i], slot_recon_implicit[i]).item())
+            loss_explicit_to_slot.append(criterion(active_slots[i], slot_recon_explicit[i]).item())    
+            loss_implicit_to_obs.append(criterion(obs[i], obs_recon_implicit[i]).item())
+            loss_explicit_to_obs.append(criterion(obs[i], obs_recon_explicit[i]).item())
+            loss_slot_to_obs.append(criterion(obs[i], obs_recon_SA[i]).item())
 
-        loss = torch.nn.functional.mse_loss(z_explicit_norm, z_explicit_norm_recon).item()
-        z_explicit_norm_recon = z_explicit_norm_recon.detach().cpu().numpy()
-        z_explicit_norm = z_explicit_norm.detach().cpu().numpy()
-        
-        # PLOTTING
-        for i in range(NUM_OUTPUT_FIGS):
-            print(f"------- FIGURE {i} -------")
-            for t in range(seq_len):
-                print(f"--- time t={t} ---")
-                for obj in range(active_slots.shape[2]):
-                    target_str = ", ".join([f"{val:.3f}" for val in z_explicit_norm[i, t, obj, :]])
-                    recon_str = ", ".join([f"{val:.3f}" for val in z_explicit_norm_recon[i, t, obj, :]])
-                    print(f"obj {obj + 1}: [{target_str}] -> [{recon_str}]")
+        if batch_idx == 0:
+            z_explicit_norm_recon = z_explicit_norm_recon.detach().cpu().numpy()
+            z_explicit_norm = z_explicit_norm.detach().cpu().numpy()
+            
+            # PLOTTING
+            for i in range(NUM_OUTPUT_FIGS):
+                print(f"------- FIGURE {i} -------")
+                for t in range(seq_len):
+                    print(f"--- time t={t} ---")
+                    for obj in range(active_slots.shape[2]):
+                        target_str = ", ".join([f"{val:.3f}" for val in z_explicit_norm[i, t, obj, :]])
+                        recon_str = ", ".join([f"{val:.3f}" for val in z_explicit_norm_recon[i, t, obj, :]])
+                        print(f"obj {obj + 1}: [{target_str}] -> [{recon_str}]")
+                    print()
                 print()
-            print()
-            save_path = f"{OUTPUT_DIR}recons_{i}.png"
-            plot_recons(
-                obs[i], 
-                recon_SA[i], 
-                recon_explicit[i], 
-                recon_implicit[i], 
-                recon_SA[i] - recon_implicit[i],
-                save_path=save_path
-            )
+                save_path = f"{OUTPUT_DIR}recons_{i}.png"
+                plot_recons(
+                    obs[i], 
+                    obs_recon_SA[i], 
+                    obs_recon_explicit[i], 
+                    obs_recon_implicit[i], 
+                    obs_recon_SA[i] - obs_recon_implicit[i],
+                    save_path=save_path
+                )
 
-        print(f"Reconstruction loss: {loss}")    
+    # scatter plot with logarithmic axes
+    fig, ax = plt.subplots()
+    ax.scatter(loss_implicit_to_explicit, loss_implicit_to_slot, marker='x')
+    
+    # Add additional datapoint
+    avg_explicit_loss = np.mean(loss_implicit_to_explicit)
+    avg_slot_loss = np.mean(loss_implicit_to_slot)
+    ax.scatter(avg_explicit_loss, avg_slot_loss, marker='o', color='red', label='Average')
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Explicit latent reconstruction loss")
+    ax.set_ylabel("Slot reconstruction loss")
+    ax.legend()
+    plt.savefig(f"{OUTPUT_DIR}implicit_vs_explicit.png")
+    plt.close(fig)
+
+    print("Losses per sample, samples include all time steps and objects.")
+    print("-----------------------------------------------------")
+    print(f"{'Loss Type':<26}{'Mean':<15}{'Std Dev':<15}")
+    print("-" * 55)
+    print(f"{'loss_implicit_to_explicit':<26}{np.mean(loss_implicit_to_explicit):<15.6f}{np.std(loss_implicit_to_explicit):<15.6f}")
+    print(f"{'loss_implicit_to_slot':<26}{np.mean(loss_implicit_to_slot):<15.6f}{np.std(loss_implicit_to_slot):<15.6f}")
+    print(f"{'loss_implicit_to_obs':<26}{np.mean(loss_implicit_to_obs):<15.6f}{np.std(loss_implicit_to_obs):<15.6f}")
+    print(f"{'loss_explicit_to_slot':<26}{np.mean(loss_explicit_to_slot):<15.6f}{np.std(loss_explicit_to_slot):<15.6f}")
+    print(f"{'loss_explicit_to_obs':<26}{np.mean(loss_explicit_to_obs):<15.6f}{np.std(loss_explicit_to_obs):<15.6f}")
+    print(f"{'loss_slot_to_obs':<26}{np.mean(loss_slot_to_obs):<15.6f}{np.std(loss_slot_to_obs):<15.6f}")
 
 
 def encode_obs(obs, model_SA: SlotAttentionAutoEncoder):

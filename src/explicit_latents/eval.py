@@ -54,35 +54,40 @@ def main():
 
     print(f"Loading observation test dataset: {config_SA['test_path']}")
     test_dataset = ImageDataset(hdf5_file=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
-    test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=True)
+    test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=False, drop_last=False)
+    print(f"Number of test samples: {len(test_dataset) * config_SA['batch_size']}")
 
     with torch.no_grad():
-        loss_list = []
+        explicit_loss_list = []
+        SA_loss_list = []
+        SA_explicit_loss_list = []
+
         for batch_idx, batch in enumerate(test_dataloader):
-            obs = batch.to(DEVICE)
-            recon_SA, _, _, slots_orig, slot_background = model_SA(obs)
-            active_slots_recon, z = model_disentangle(slots_orig)
+            obs_true = batch.to(DEVICE)
+            # ENCODE
+            obs_recon_SA, _, _, slots_active_true, slot_background = model_SA(obs_true)
+            slots_active_recon, z = model_disentangle(slots_active_true)
+
+            # DECODE
+            slots_recon_all = torch.cat((slots_active_recon, slot_background), dim=1)
+            obs_recon_explicit, _, _ = model_SA.decode(slots_recon_all)
+
             criterion = torch.nn.MSELoss()
-            loss = criterion(slots_orig, active_slots_recon)
-            loss_list.append(loss.item())
+
+            for i in range(len(obs_true)):
+                explicit_loss_list.append(criterion(slots_active_recon[i], slots_active_true[i]).item())
+                SA_loss_list.append(criterion(obs_recon_SA[i], obs_true[i]).item())
+                SA_explicit_loss_list.append(criterion(obs_recon_explicit[i], obs_true[i]).item())
 
             if batch_idx == 0:
-                all_slots_recon = torch.cat((active_slots_recon, slot_background), dim=1)
-                print("slots recon", all_slots_recon.shape)
-                recon_latent, _, _ = model_SA.decode(all_slots_recon)
-                
                 object_index = 0
                 recon_perturbed_list = []
                 
-                print("z")
-                print(z[0])
                 for l in range(config_latent['latent_dim']):
                     z_perturbed = z.clone()
                     z_perturbed[:, object_index, l] += PERTURBATION_MAGNITUDE
-                    print(f"z_pert#{l}")
-                    print(z_perturbed[0])
-                    active_slots_perturbed = model_disentangle.decode(z_perturbed)
-                    all_slots_perturbed = torch.concat((active_slots_perturbed, slot_background), dim=1)
+                    slots_active_recon_perturbed = model_disentangle.decode(z_perturbed)
+                    all_slots_perturbed = torch.concat((slots_active_recon_perturbed, slot_background), dim=1)
                     recon_perturbed, _, _ = model_SA.decode(all_slots_perturbed)
                     recon_perturbed_list.append(recon_perturbed)
 
@@ -94,76 +99,43 @@ def main():
                 
                 for i in range(NUM_OUTPUT_FIGS):
                     # plot image row: original, reconstructed (SA), reconstructed (from latent dim), reconstructions with latent perturbations
-                    imgs = [obs[i], recon_SA[i], recon_latent[i]]
+                    imgs = [obs_true[i], obs_recon_SA[i], obs_recon_explicit[i]]
+                    loss = criterion(slots_active_true[i], slots_active_recon[i])
+                    loss_str = f"{loss.item():.6f}".replace('.', '') # remove decimal point for filename
                     labels = ["Original", "Reconstructed (SA)", "Reconstructed (from latent dim)"]
                     for j, recon_perturbed in enumerate(recon_perturbed_list):
                         imgs.append(recon_perturbed[i])
                         labels.append(f"Pert #{j}")
-                    save_path = f"{OUTPUT_DIR}output_{i}.png"
+                    save_path = f"{OUTPUT_DIR}explicit_{loss:.2E}.png"
                     plot_images(imgs, save_path, labels=labels)
+        
+        # scatter plot with logarithmic axes
+        fig, ax = plt.subplots()
+        ax.scatter(explicit_loss_list, SA_explicit_loss_list, marker='x')
+        
+        # Add additional datapoint
+        avg_explicit_loss = np.mean(explicit_loss_list)
+        avg_SA_explicit_loss = np.mean(SA_explicit_loss_list)
+        ax.scatter(avg_explicit_loss, avg_SA_explicit_loss, marker='o', color='red', label='Average')
 
-        print(f"Average loss: {np.mean(loss_list):.8f}")
-        print(f"Standard deviation of loss: {np.std(loss_list):.8f}")
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("Slot reconstruction loss (log scale)")
+        ax.set_ylabel("Observation reconstruction loss (log scale)")
+        ax.legend()
+        plt.savefig(f"{OUTPUT_DIR}explicit_vs_SA.png")
+        plt.close(fig)
 
-def plot_frames(orig, masks, combined_recons, save_path="output.png"):
-    """
-    Plots original frames, combined reconstructions, and masks for each slot.
-
-    Args:
-    - orig (numpy.ndarray or torch.Tensor): Original frames of shape [num_frames, 3, height, width].
-    - masks (numpy.ndarray or torch.Tensor): Masks of shape [num_frames, slots, height, width].
-    - combined_recons (numpy.ndarray or torch.Tensor): Combined reconstructions of shape [num_frames, 3, height, width].
-    - save_path (str): File path to save the plot.
-    """
-
-    # Convert torch tensors to numpy if necessary
-    if hasattr(orig, 'detach'):
-        orig = orig.detach().cpu().numpy()
-    if hasattr(masks, 'detach'):
-        masks = masks.detach().cpu().numpy()
-    if hasattr(combined_recons, 'detach'):
-        combined_recons = combined_recons.detach().cpu().numpy()
-
-    if len(masks.shape) == 3:
-        masks = masks.reshape(1, *masks.shape)
-
-    if len(orig.shape) == 3:
-        orig = orig.reshape(1, *orig.shape)
-
-    if len(combined_recons.shape) == 3:
-        combined_recons = combined_recons.reshape(1, *combined_recons.shape)
-
-    num_frames, num_slots, height, width = masks.shape
-    total_rows = num_slots + 2  # Original, reconstructions, and masks per slot
-
-    fig, axes = plt.subplots(total_rows, num_frames, figsize=(num_frames * 2, total_rows * 2))
-    
-    if num_frames == 1:
-        axes = axes.reshape(total_rows, 1) 
-
-    for f in range(num_frames):
-        # Plot original frames (First row)
-        axes[0, f].imshow(np.clip(orig[f].transpose(1, 2, 0), 0, 1))
-        axes[0, f].axis('off')
-        if f == 0:
-            axes[0, f].set_ylabel("Original", fontsize=12, fontweight="bold")
-
-        # Plot combined reconstructions (Second row)
-        axes[1, f].imshow(np.clip(combined_recons[f].transpose(1, 2, 0), 0, 1))
-        axes[1, f].axis('off')
-        if f == 0:
-            axes[1, f].set_ylabel("Reconstructed", fontsize=12, fontweight="bold")
-
-        # Plot masks for each slot (Remaining rows)
-        for s in range(num_slots):
-            axes[s + 2, f].imshow(masks[f, s], cmap="gray")
-            axes[s + 2, f].axis('off')
-            if f == 0:
-                axes[s + 2, f].set_ylabel(f"Slot {s+1}", fontsize=12, fontweight="bold")
-
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
+        print()
+        print("--- Slot Attention ---")
+        print(f"Average loss: {np.mean(SA_loss_list):.8f}")
+        print(f"Standard deviation of loss: {np.std(SA_loss_list):.8f}")
+        print("--- Explicit Autoencoder ---")
+        print(f"Average loss: {np.mean(explicit_loss_list):.8f}")
+        print(f"Standard deviation of loss: {np.std(explicit_loss_list):.8f}")
+        print("--- Slot Attention + Explicit Autoencoder ---")
+        print(f"Average loss: {np.mean(SA_explicit_loss_list):.8f}")
+        print(f"Standard deviation of loss: {np.std(SA_explicit_loss_list):.8f}")
 
 
 if __name__ == '__main__':
