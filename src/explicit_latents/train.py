@@ -27,7 +27,7 @@ def main():
     
     print("Loading training data...")
     dataset = SlotDataset(hdf5_file=config["train_path"])
-    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=8)
+    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=8, prefetch_factor=8)
     print(f"Finished loading all {len(train_dataloader)}x{config['batch_size']} training samples.")
 
     slots_dim = dataset[0].shape[-1]

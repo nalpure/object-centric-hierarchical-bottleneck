@@ -95,7 +95,8 @@ DEFAULT_CONFIG = {
         "decay_rate": 0.5,
         # Further model parameters
         "latent_dim": 5,
-        "hidden_dim": 128
+        "hidden_dim": 128,
+        "normalize": True
     }
 }
 
@@ -640,11 +641,10 @@ class SlotDataset(data.Dataset):
 
         # Stack all data into single tensors
         orig_seq = torch.tensor(np.concatenate(data['orig_seq']), dtype=torch.float32)
-        #TODO deal with pert_seq
-        #pert_seq = torch.tensor(np.concatenate(data['pert_seq']), dtype=torch.float32)
-        #sequences = torch.cat((orig_seq, pert_seq), dim=0)
+        pert_seq = torch.tensor(np.concatenate(data['pert_seq']), dtype=torch.float32)
+        sequences = torch.cat((orig_seq, pert_seq), dim=0)
         # Flatten the sequences across time and objects
-        slots = orig_seq.reshape(-1, orig_seq.shape[-1])  # Shape: [B*T*O, S]
+        slots = sequences.reshape(-1, orig_seq.shape[-1])  # Shape: [B*T*O, S]
         return slots
         
 

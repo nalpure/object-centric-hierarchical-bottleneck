@@ -12,6 +12,7 @@ from torch.utils import data
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, get_lr_schedule, DEVICE
 
+NUM_WORKERS = 0
 
 def main():
     print("Running on", DEVICE)
@@ -26,36 +27,38 @@ def main():
     mean = None
     std = None
     norm_stats_path = config_impl["train_path"].replace(".h5", "_norm_stats.pt")
+    normalize = config_impl["normalize"]
     print()
-    if exists(norm_stats_path):
+    
+    if normalize and exists(norm_stats_path):
         print("Loading normalization stats from", norm_stats_path)
-        stats = torch.load(norm_stats_path)
+        stats = torch.load(norm_stats_path, weights_only=True)
         mean = stats["mean"]
         std = stats["std"]
         print(f"mean: {mean}, std: {std}")
 
     print("Loading training data...")
-    dataset = PerturbedSlotSequenceDataset(hdf5_file=config_impl["train_path"], feature_mean=mean, feature_std=std, normalize=True)
-    if not exists(norm_stats_path):
+    dataset = PerturbedSlotSequenceDataset(hdf5_file=config_impl["train_path"], feature_mean=mean, feature_std=std, normalize=config_impl["normalize"])
+    if config_impl["normalize"] and not exists(norm_stats_path):
+        print(f"mean: {dataset.feature_mean}, std: {dataset.feature_std}")
         print("Saving normalization stats to", norm_stats_path)
         torch.save({"mean": dataset.feature_mean, "std": dataset.feature_std}, norm_stats_path)
-    train_dataloader = data.DataLoader(dataset, batch_size=config_impl["batch_size"], shuffle=True, drop_last=True)
+    train_dataloader = data.DataLoader(dataset, batch_size=config_impl["batch_size"], shuffle=True, drop_last=True, num_workers=NUM_WORKERS)
     print(f"Finished loading all {config_impl['batch_size'] * len(train_dataloader)} training samples.")
 
     explicit_dim = next(iter(train_dataloader))[0].shape[-1]
 
-    ckpt_path = config_impl["ckpt_path"]
-    print("Loading model:", ckpt_path)
     model, optimizer = initialize_model(config_impl, explicit_dim)
+    print(f"Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
-    print("Training slot attention model...")
+    print("Training implicit autoencoder...")
     train(model, optimizer, train_dataloader,
         config_impl["num_epochs"],
         config_impl["warmup_epochs"],
         config_impl["decay_epochs"],
         config_impl["decay_rate"],
         config_impl["mixed_precision"],
-        ckpt_path
+        config_impl["ckpt_path"]
     )
 
 
