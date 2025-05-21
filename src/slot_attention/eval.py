@@ -1,3 +1,6 @@
+import os
+import random
+import numpy as np
 from torch.utils import data
 import torch
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
@@ -41,30 +44,51 @@ def main():
     
     print(f"Loading observation test dataset: {config['test_path']}")
     test_dataset = ImageDataset(hdf5_file=config["test_path"], hdf5_format=config["hdf5_format"])
-    test_dataloader = data.DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=True, drop_last=True)
+    test_dataloader = data.DataLoader(test_dataset, batch_size=config['batch_size'])
+    print(f"Finished loading {len(test_dataset)} samples.")
 
-    batch = next(iter(test_dataloader))
-    obs = batch.to(DEVICE)
+    all_outputs = []
 
     with torch.no_grad():
-        recon_combined, _, masks, _, _ = model(obs)          
+        for batch in test_dataloader:
+            obs = batch.to(DEVICE)
+            recon_combined, _, masks, _, _ = model(obs)
+            for i in range(len(obs)):
+                loss = criterion(obs[i], recon_combined[i]).item()
+                all_outputs.append((loss, obs[i].cpu(), recon_combined[i].cpu(), masks[i].cpu()))
 
-    # shape of recon_combined is [B, stacked_frames, 3, H, W] 
-    for i in range(NUM_OUTPUT_FIGS):
-        imgs_dict = {
-            "observation": obs[i], 
-            "combined recon": recon_combined[i]
-        }
-        for mask_idx, mask in enumerate(masks[i]):
-            imgs_dict[f"mask {mask_idx}"] = mask
+    # Sort by loss
+    all_outputs.sort(key=lambda x: x[0])
+    figs_per_category = NUM_OUTPUT_FIGS // 3
+    best = all_outputs[: figs_per_category]
+    worst = all_outputs[- figs_per_category :]
+    random_outputs = random.sample(all_outputs, figs_per_category + NUM_OUTPUT_FIGS % 3)
 
-        grayscale_indices = [idx for idx in range(2, 2 + config['num_slots'])]
-        save_path = OUTPUT_DIR + f"sample{i}.png"
-        plot_images(imgs_dict.values(), save_path, labels=imgs_dict.keys(), grayscale_indices=grayscale_indices)
-        print(f"Loss {i}:", criterion(obs[i], recon_combined[i]).item())
+    # Combine and label
+    categories = [('best', best), ('random', random_outputs), ('worst', worst)]
 
-    print("Overall loss: ", criterion(obs, recon_combined).item())
+    for tag, samples in categories:
+        for i, (loss, obs, recon, masks) in enumerate(samples):
+            imgs_dict = {
+                "observation": obs,
+                "combined recon": recon,
+                "diff": obs - recon,
+            }
+            for mask_idx, mask in enumerate(masks):
+                imgs_dict[f"mask {mask_idx}"] = mask
 
+            grayscale_indices = [idx for idx in range(3, 3 + config['num_slots'])]
+            loss_str = f"{loss:.6f}".replace('.', ',')
+            save_path = os.path.join(OUTPUT_DIR, f"{tag}_{i}.png")
+            plot_images(imgs_dict.values(), save_path, labels=imgs_dict.keys(), grayscale_indices=grayscale_indices, title=f"Loss: {loss:.6f}")
+
+
+    losses = np.array([loss for loss, _, _, _ in all_outputs])
+    print()
+    print(f"Mean loss: {np.mean(losses):.8f}")
+    print(f"Std loss: {np.std(losses):.8f}")
+    print(f"Min loss: {np.min(losses):.8f}")
+    print(f"Max loss: {np.max(losses):.8f}")
 
 if __name__ == '__main__':
     main()

@@ -31,6 +31,7 @@ def main():
     print(f"Finished loading {batch_size * num_batches} ({num_batches} * {batch_size}) training samples.")
     
     model, optim = initialize_model(config)
+    print(f"Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
     print("Training slot attention model...")
     train(model, optim, train_dataloader, 

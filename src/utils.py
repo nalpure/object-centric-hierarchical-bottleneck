@@ -375,7 +375,7 @@ def set_seed(seed, deterministic_cudnn=False):
         torch.backends.cudnn.benchmark = False
 
 
-def plot_images(images, save_path, labels=None, grayscale_indices=[]):
+def plot_images(images, save_path, labels=None, grayscale_indices=[], title=None):
     """
     Displays all images in a single row and saves the resulting plot.
 
@@ -410,6 +410,9 @@ def plot_images(images, save_path, labels=None, grayscale_indices=[]):
     if labels is not None:
         for ax, label in zip(axes, labels):
             ax.set_title(label)
+
+    if title is not None:
+        plt.suptitle(title, fontsize=16)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust the rect parameter to add padding at the top
     plt.savefig(save_path)
