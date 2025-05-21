@@ -3,7 +3,7 @@ from torch.utils import data
 import torch
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
-from src.utils import PerturbedH5ImageDataset, PerturbedH5ImageDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE, IMG_CHANNELS
+from src.utils import PerturbedImageSequenceDataset, PerturbedImageSequenceDataset, get_config_argument, load_config, save_dict_h5py, set_seed, DEVICE, IMG_CHANNELS
 
 
 def main():
@@ -37,7 +37,7 @@ def main():
         raise KeyError(f"Unexpected keys: {unexpected_keys}")
 
     print(f"Loading observation training dataset: {config['train_path']}")
-    dataset = PerturbedH5ImageDataset(h5_path=config["train_path"], hdf5_format=config["hdf5_format"])
+    dataset = PerturbedImageSequenceDataset(h5_path=config["train_path"], hdf5_format=config["hdf5_format"])
     dataloader = data.DataLoader(
         dataset,
         batch_size=config["batch_size"],

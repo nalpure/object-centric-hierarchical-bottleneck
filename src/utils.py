@@ -420,17 +420,84 @@ def plot_images(images, save_path, labels=None, grayscale_indices=[], title=None
     plt.close()
 
 
-class PerturbedH5ImageDataset(data.Dataset):
+class ImageDataset(data.Dataset):
+    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW', only_first=False, only_original=False):
+        """
+        Streaming dataset over a single .h5 file.
+        Assumes structure:
+              /<episode_idx>/
+                obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
+                perturbed      same shape
+        Returns individual images of shape (C,H,W) or (H,W,C). 
+        If only_first is True, returns only the first image of each episode.
+        If only_original is True, returns only the original images.
+        """
+        self.h5_path = hdf5_file
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
+        self.only_first = only_first
+        self.only_original = only_original
+
+        with h5py.File(self.h5_path, "r") as f:
+            self.episodes = sorted(int(k) for k in f.keys())
+            # assume every episode has same T
+            first = f[str(self.episodes[0])]["obs"]
+            self.num_seq = first.shape[0]
+            self.seq_len = first.shape[1]
+            
+        self.idx2ep = []
+        for ep in self.episodes:
+            for seq in range(self.num_seq):
+                if self.only_first:
+                    self.idx2ep.append((ep, seq, 0, False))
+                    if not self.only_original:
+                        self.idx2ep.append((ep, seq, 0, True))
+                else:
+                    for t in range(self.seq_len):
+                        self.idx2ep.append((ep, seq, t, False))
+                        if not self.only_original:
+                            self.idx2ep.append((ep, seq, t, True))
+    
+    def __len__(self):
+        return len(self.idx2ep)
+    
+    def __getitem__(self, idx):
+        # open per worker (lazy)
+        if not hasattr(self, "_h5"):
+            self._h5 = h5py.File(self.h5_path, "r")
+
+        ep, seq, t, is_perturbation = self.idx2ep[idx]
+        grp = self._h5[str(ep)]
+
+        if is_perturbation:
+            img = grp["perturbed"][seq][t]
+        else:
+            img = grp["obs"][seq][t]
+
+        # optional transpose
+        if self.hdf5_format == "HWC" and self.output_format == "CHW":
+            img = np.transpose(img, (2, 0, 1))
+        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
+            img = np.transpose(img, (1, 2, 0))
+
+        # convert to torch
+        img = torch.from_numpy(img).float()
+
+        return img
+    
+
+class PerturbedImageSequenceDataset(data.Dataset):
     def __init__(self, h5_path, hdf5_format="HWC", output_format="CHW"):
         """
-        Streaming dataset over a single large .h5 file.
+        Streaming dataset over a single .h5 file.
         Assumes structure:
            /<episode_idx>/
-               obs            shape: (T, H, W, C) or (T, C, H, W)
+               obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
                perturbed      same shape
-               magnitudes     shape: (T,) or ()
-               indices        shape: (T,) or ()
-               properties     shape: (T,) or ()
+               magnitudes     shape: (P,)
+               indices        shape: (P,)
+               properties     shape: (P,)
+        Returns whole time series for each observation/perturbation-pair.
         """
         self.h5_path = h5_path
         self.hdf5_format = hdf5_format
@@ -441,13 +508,13 @@ class PerturbedH5ImageDataset(data.Dataset):
             self.episodes = sorted(int(k) for k in f.keys())
             # assume every episode has same T
             first = f[str(self.episodes[0])]["obs"]
-            self.seq_len = first.shape[0]
+            num_pairs = first.shape[0]
 
         # Build (episode, step) lookup
         self.idx2ep = []
         for ep in self.episodes:
-            for t in range(self.seq_len):
-                self.idx2ep.append((ep, t))
+            for p in range(num_pairs):
+                self.idx2ep.append((ep, p))
 
     def __len__(self):
         return len(self.idx2ep)
@@ -457,12 +524,15 @@ class PerturbedH5ImageDataset(data.Dataset):
         if not hasattr(self, "_h5"):
             self._h5 = h5py.File(self.h5_path, "r")
 
-        ep, t = self.idx2ep[idx]
+        ep, p = self.idx2ep[idx]
         grp = self._h5[str(ep)]
 
         # Load on‐demand
-        orig = grp["obs"][t]         # (T,H,W,C) or (T,C,H,W)
-        pert = grp["perturbed"][t]
+        orig = grp["obs"][p]         # (T,H,W,C) or (T,C,H,W)
+        pert = grp["perturbed"][p]
+        mags = grp["magnitudes"][p]
+        inds = grp["indices"][p]
+        props = grp["properties"][p]
 
         # optional transpose
         if self.hdf5_format == "HWC" and self.output_format == "CHW":
@@ -472,13 +542,8 @@ class PerturbedH5ImageDataset(data.Dataset):
         elif self.hdf5_format == "CHW" and self.output_format == "HWC":
             orig = np.transpose(orig, (0,2,3,1))
             pert = np.transpose(pert, (0,2,3,1))
-        # else assume formats match
 
-        mags = grp["magnitudes"][t]
-        inds = grp["indices"][t]
-        props = grp["properties"][t]
-
-        # convert to torch if desired
+        # convert to torch
         orig = torch.from_numpy(orig).float()
         pert = torch.from_numpy(pert).float()
         mags = torch.tensor(mags, dtype=torch.float32)
@@ -496,47 +561,44 @@ class PerturbedH5ImageDataset(data.Dataset):
                 pass
 
 
-class BaseDataset(data.Dataset):
-    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
-        self.experience_buffer = load_list_dict_h5py(hdf5_file)
-        self.hdf5_format = hdf5_format
-        self.output_format = output_format
-        self.idx2episode = list()
-    
-    def get_episode_step(self, idx):
-        return self.idx2episode[idx]
-    
+class SlotDataset(data.Dataset):
+    """
+    Loads slots from orig_seq and pert_seq (shape [N, T, O, S]) in a HDF5 file.
+    Flattens all slots across time and objects, returning one randomly chosen slot
+    (either original or perturbed) per __getitem__ call.
+    """
+    def __init__(self, hdf5_file):
+        self.hdf5_file = hdf5_file
+        self.slots = self._load_slots_data()
+
+    def _load_slots_data(self):
+        data = {
+            'orig_seq': [],
+            'pert_seq': []
+        }
+
+        with h5py.File(self.hdf5_file, 'r') as f:
+            for key in f.keys():
+                for k in data:
+                    if k in key:
+                        data[k].append(f[key][...])
+                        break
+
+        # Stack all data into single tensors
+        orig_seq = torch.tensor(np.concatenate(data['orig_seq']), dtype=torch.float32)
+        pert_seq = torch.tensor(np.concatenate(data['pert_seq']), dtype=torch.float32)
+        sequences = torch.cat((orig_seq, pert_seq), dim=0)
+        # Flatten the sequences across time and objects
+        slots = sequences.reshape(-1, orig_seq.shape[-1])  # Shape: [B*T*O, S]
+        return slots
+        
+
     def __len__(self):
-        return len(self.idx2episode)
+        return self.slots.shape[0]
 
-
-class ImageDataset(BaseDataset):
-    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW'):
-        super().__init__(hdf5_file, hdf5_format, output_format)
-
-        if not self.experience_buffer[0]['obs'].ndim == 5:
-            raise ValueError(f"Expected 5D tensor for 'obs', got {self.experience_buffer[0]['obs'].ndim}.")
-
-        # Build table for conversion between linear idx -> episode/pair/sequence/perturbation idx
-        # List of tuples: [(0, 0, 0, False), (0, 0, 0, True), ..., (num_episodes - 1, num_steps - 1, sequence_length - 1, True)]
-        for ep in range(len(self.experience_buffer)):
-            num_steps = len(self.experience_buffer[ep]['obs'])
-            for step in range(num_steps):
-                seq_length = len(self.experience_buffer[ep]['obs'][step])
-                idx_tuple_obs = [(ep, step, seq, False) for seq in range(seq_length)]
-                self.idx2episode.extend(idx_tuple_obs)
-                idx_tuple_pert = [(ep, step, seq, True) for seq in range(seq_length)]
-                self.idx2episode.extend(idx_tuple_pert)
-    
     def __getitem__(self, idx):
-        ep, step, seq, is_perturbation = self.get_episode_step(idx)
-        if is_perturbation:
-            img = self.experience_buffer[ep]['perturbed'][step][seq]
-        else:
-            img = self.experience_buffer[ep]['obs'][step][seq]
-        img = to_float(img)
-        img = convert_image_format(img, self.hdf5_format, self.output_format)
-        return img
+        # Select a random slot regardless of whether it was original or perturbed
+        return self.slots[idx]
 
 
 class PerturbedSlotSequenceDataset(data.Dataset):
@@ -617,43 +679,3 @@ class PerturbedSlotSequenceDataset(data.Dataset):
                 self.magnitude[idx],
                 self.obj_index[idx],
                 self.prop_index[idx])
-    
-
-class SlotDataset(data.Dataset):
-    """
-    Loads slots from orig_seq and pert_seq (shape [N, T, O, S]) in a HDF5 file.
-    Flattens all slots across time and objects, returning one randomly chosen slot
-    (either original or perturbed) per __getitem__ call.
-    """
-    def __init__(self, hdf5_file):
-        self.hdf5_file = hdf5_file
-        self.slots = self._load_slots_data()
-
-    def _load_slots_data(self):
-        data = {
-            'orig_seq': [],
-            'pert_seq': []
-        }
-
-        with h5py.File(self.hdf5_file, 'r') as f:
-            for key in f.keys():
-                for k in data:
-                    if k in key:
-                        data[k].append(f[key][...])
-                        break
-
-        # Stack all data into single tensors
-        orig_seq = torch.tensor(np.concatenate(data['orig_seq']), dtype=torch.float32)
-        pert_seq = torch.tensor(np.concatenate(data['pert_seq']), dtype=torch.float32)
-        sequences = torch.cat((orig_seq, pert_seq), dim=0)
-        # Flatten the sequences across time and objects
-        slots = sequences.reshape(-1, orig_seq.shape[-1])  # Shape: [B*T*O, S]
-        return slots
-        
-
-    def __len__(self):
-        return self.slots.shape[0]
-
-    def __getitem__(self, idx):
-        # Select a random slot regardless of whether it was original or perturbed
-        return self.slots[idx]

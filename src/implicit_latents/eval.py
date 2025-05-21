@@ -7,7 +7,7 @@ from os.path import exists
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, separate_slots
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import IMG_CHANNELS, PerturbedH5ImageDataset, get_config_argument, load_config, set_seed, DEVICE
+from src.utils import IMG_CHANNELS, PerturbedImageSequenceDataset, get_config_argument, load_config, set_seed, DEVICE
 
 NUM_OUTPUT_FIGS = 5
 OUTPUT_DIR = "data/figures/"
@@ -26,7 +26,7 @@ def main():
     ckpt_path_implicit = config_implicit["ckpt_path"]
 
     print(f"Loading observation test dataset: {config_SA['test_path']}")
-    test_dataset = PerturbedH5ImageDataset(h5_path=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
+    test_dataset = PerturbedImageSequenceDataset(h5_path=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=False, drop_last=True)
     seq_len = next(iter(test_dataloader))[0].shape[1]
 
