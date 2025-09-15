@@ -7,7 +7,7 @@ from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
 from src.utils import ImageDataset, load_config, get_config_argument, plot_images, set_seed, DEVICE, IMG_CHANNELS
 
 
-NUM_OUTPUT_FIGS = 5
+NUM_OUTPUT_FIGS = 15
 OUTPUT_DIR = "data/figures/"
 
 
@@ -78,7 +78,6 @@ def main():
                 imgs_dict[f"mask {mask_idx}"] = mask
 
             grayscale_indices = [idx for idx in range(3, 3 + config['num_slots'])]
-            loss_str = f"{loss:.6f}".replace('.', ',')
             save_path = os.path.join(OUTPUT_DIR, f"{tag}_{i}.png")
             plot_images(imgs_dict.values(), save_path, labels=imgs_dict.keys(), grayscale_indices=grayscale_indices, title=f"Loss: {loss:.6f}")
 

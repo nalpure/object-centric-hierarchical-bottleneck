@@ -7,11 +7,13 @@ import torch
 from torch import optim, autocast
 from torch.amp import GradScaler
 from torch.utils import data
-from torch.optim.lr_scheduler import LambdaLR
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
 from src.utils import ImageDataset, get_lr_schedule, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
 
+ONLY_ORIGINAL = False
+ONLY_FIRST = False
+NUM_WORKERS = 8
 
 def main():
     print("Running on", DEVICE)
@@ -24,8 +26,8 @@ def main():
     set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = ImageDataset(hdf5_file=config["train_path"], hdf5_format=config["hdf5_format"])
-    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True)
+    dataset = ImageDataset(hdf5_file=config["train_path"], hdf5_format=config["hdf5_format"], only_first=ONLY_FIRST, only_original=ONLY_ORIGINAL)
+    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=NUM_WORKERS)
     batch_size = config['batch_size']
     num_batches = len(train_dataloader)
     print(f"Finished loading {batch_size * num_batches} ({num_batches} * {batch_size}) training samples.")

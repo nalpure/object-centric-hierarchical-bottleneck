@@ -3,12 +3,12 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder     # or autoencoder_old (TODO: remove old)
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
 
 PERTURBATION_MAGNITUDE = 0.5
-NUM_OUTPUT_FIGS = 5
+NUM_OUTPUT_FIGS = 64
 OUTPUT_DIR = "data/figures/"
 
 
@@ -57,11 +57,11 @@ def main():
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=False, drop_last=False)
     print(f"Number of test samples: {len(test_dataset) * config_SA['batch_size']}")
 
+    explicit_loss_list = []
+    SA_loss_list = []
+    SA_explicit_loss_list = []
+    
     with torch.no_grad():
-        explicit_loss_list = []
-        SA_loss_list = []
-        SA_explicit_loss_list = []
-
         for batch_idx, batch in enumerate(test_dataloader):
             obs_true = batch.to(DEVICE)
             # ENCODE
@@ -100,14 +100,17 @@ def main():
                 for i in range(NUM_OUTPUT_FIGS):
                     # plot image row: original, reconstructed (SA), reconstructed (from latent dim), reconstructions with latent perturbations
                     imgs = [obs_true[i], obs_recon_SA[i], obs_recon_explicit[i]]
-                    loss = criterion(slots_active_true[i], slots_active_recon[i])
-                    loss_str = f"{loss.item():.6f}".replace('.', '') # remove decimal point for filename
+                    obs_loss = criterion(obs_true[i], obs_recon_SA[i])
+                    slot_loss = criterion(slots_active_true[i], slots_active_recon[i])
+                    total_loss = criterion(obs_true[i], obs_recon_explicit[i])
+                    loss_str = f"{slot_loss.item():.6f}".replace('.', ',')
+                    title = f"Losses: {obs_loss.item():6f} / {slot_loss.item():.6f} / {total_loss.item():.6f}"
                     labels = ["Original", "Reconstructed (SA)", "Reconstructed (from latent dim)"]
                     for j, recon_perturbed in enumerate(recon_perturbed_list):
                         imgs.append(recon_perturbed[i])
                         labels.append(f"Pert #{j}")
-                    save_path = f"{OUTPUT_DIR}explicit_{loss:.2E}.png"
-                    plot_images(imgs, save_path, labels=labels)
+                    save_path = f"{OUTPUT_DIR}explicit_{loss_str}.png"
+                    plot_images(imgs, save_path, labels, title=title)
         
         # scatter plot with logarithmic axes
         fig, ax = plt.subplots()
