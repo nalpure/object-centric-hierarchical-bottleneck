@@ -135,7 +135,8 @@ class SlotAttentionAutoEncoder(nn.Module):
     def forward(self, image, slots_init=None):
         slots, attention_scores = self.encode(image, slots_init)
         active_slots, background_slot = separate_slots(slots, attention_scores)
-        recon_combined, recons, masks = self.decode(slots)
+        sorted_slots = torch.cat([background_slot, active_slots], dim=1)
+        recon_combined, recons, masks = self.decode(sorted_slots)
         return recon_combined, recons, masks, active_slots, background_slot
 
     def encode(self, image, slots_init=None):
@@ -185,10 +186,9 @@ class SlotAttentionAutoEncoder(nn.Module):
         # Recombine image.
         recon_combined = torch.sum(recons * masks, dim=1)  
         recon_combined = recon_combined.permute(0,3,1,2)
-        # `recon_combined` has shape: [batch_size, num_channels, width, height].
+        # `recon_combined` has shape: [batch_size, num_slots, width, height, num_channels].
 
-        masks = masks.squeeze()  # [batch_size, width, height]
-
+        masks = masks.squeeze()  # [batch_size, num_slots, width, height]
         return recon_combined, recons, masks
     
 
