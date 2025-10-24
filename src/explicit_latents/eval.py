@@ -5,12 +5,13 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from src.slot_attention.autoencoder import SlotAttentionAutoEncoder     # or autoencoder_old (TODO: remove old)
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots     # or autoencoder_old (TODO: remove old)
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, set_seed, plot_images, DEVICE
+from src.utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, plot_grid, set_seed, plot_images, DEVICE
 
-PERTURBATION_MAGNITUDE = 0.5
-NUM_OUTPUT_FIGS = 14
+PERTURBATION_MAGNITUDES = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+NUM_RANDOM_SAMPLES = 50
+NUM_WORST_SAMPLES = 10
 OUTPUT_DIR = "data/figures/"
 
 
@@ -20,7 +21,7 @@ def main():
     config_SA = config["slot_attention"]
     config_latent = config["explicit_latents"]
     
-    set_seed(config_latent["seed"])
+    generator = set_seed(config_latent["seed"])
     ckpt_path_SA = config_SA["ckpt_path"]
     ckpt_path_disentangle = config_latent["ckpt_path"]
 
@@ -56,12 +57,8 @@ def main():
 
     print(f"Loading observation test dataset: {config_SA['test_path']}")
     test_dataset = ImageDataset(hdf5_file=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
-    test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, drop_last=False)
+    test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, generator=generator, drop_last=False)
     print(f"Number of test samples: {len(test_dataloader) * config_SA['batch_size']}")
-
-    # Memory-efficient data structures
-    num_categories = 2  # first and worst
-    figs_per_category = max(1, NUM_OUTPUT_FIGS // num_categories)  # ensure at least 1 per category
     
     # Loss lists
     SA_loss_list = []
@@ -70,8 +67,7 @@ def main():
     
     # Sample collectors
     first_samples = []  # collect first x samples
-    first_samples_count = figs_per_category + NUM_OUTPUT_FIGS % num_categories
-    worst_samples_heap = []  # min-heap for worst samples
+    worst_samples = []  # min-heap for worst samples
     
     criterion = torch.nn.MSELoss()
     
@@ -79,12 +75,43 @@ def main():
         for batch_idx, batch in enumerate(test_dataloader):
             obs_true = batch.to(DEVICE)
             # ENCODE
-            obs_recon_SA, _, _, slots_active_true, slot_background = model_SA(obs_true)
+            slots, attn = model_SA.encode(obs_true)
+            slots, attn = order_slots(slots, attn)
+            slot_background = slots[:, :1, :]  # (B, 1, D)
+            slots_active_true = slots[:, 1:, :]  # (B, O, D)
+
             slots_active_recon, z = model_explicit(slots_active_true)
 
             # DECODE
             slots_recon_all = torch.cat((slots_active_recon, slot_background), dim=1)
             obs_recon_explicit, _, _ = model_SA.decode(slots_recon_all)
+            obs_recon_SA, _, masks_recon_SA = model_SA.decode(slots)
+
+            if batch_idx == 0:
+                for obj_idx in range(z.shape[1]):
+                    all_rows = []
+                    for latent_idx in range(z.shape[2]):
+                        image_row = []
+                        for mag in PERTURBATION_MAGNITUDES:
+                            z_perturbed = z[0].clone()
+                            z_perturbed[obj_idx][latent_idx] += mag
+                            z_perturbed = z_perturbed.unsqueeze(0)
+                            slots_perturbed = model_explicit.decode(z_perturbed)
+                            slots_perturbed_all = torch.cat((slots_perturbed, slot_background[0].unsqueeze(0)), dim=1)
+                            obs_perturbed, _, _ = model_SA.decode(slots_perturbed_all)
+                            image_row.append(obs_perturbed[0].cpu())
+                        all_rows.append(image_row)
+
+                    title = f"Object {obj_idx} Explicit Latent Manipulation"
+                    row_titles = [f"Latent {i}" for i in range(z.shape[2])]
+                    column_titles = [f"Magnitude {mag}" for mag in PERTURBATION_MAGNITUDES]
+                    save_path = os.path.join(OUTPUT_DIR, f"manipulation_obj{obj_idx}.png")
+                    plot_grid(all_rows, row_titles, column_titles, save_path)
+
+                print("--- example z's ---")
+                for i in range(min(3, batch.shape[0])):
+                    print(f"sample_{i}:\n{z[i].cpu().numpy()}")
+                print("-----------")
 
             for i in range(len(obs_true)):
                 explicit_loss = criterion(slots_active_recon[i], slots_active_true[i]).item()
@@ -98,41 +125,35 @@ def main():
                 
                 # Create sample tuple with CPU tensors
                 sample = (SA_loss, explicit_loss, SA_explicit_loss, 
-                         obs_true[i].cpu(), obs_recon_SA[i].cpu(), obs_recon_explicit[i].cpu())
+                         obs_true[i].cpu(), obs_recon_SA[i].cpu(), obs_recon_explicit[i].cpu(), masks_recon_SA[i].cpu())
                 
                 # Collect first x samples
-                if len(first_samples) < first_samples_count:
+                if len(first_samples) < NUM_RANDOM_SAMPLES:
                     first_samples.append(sample)
                 
                 # Maintain worst samples heap (min heap to keep track of worst samples)
-                if len(worst_samples_heap) < figs_per_category:
-                    heapq.heappush(worst_samples_heap, (SA_explicit_loss, sample))
-                elif SA_explicit_loss > worst_samples_heap[0][0]:
-                    heapq.heapreplace(worst_samples_heap, (SA_explicit_loss, sample))
-
-            if batch_idx == 0:
-                print("--- z's ---")
-                for i in range(NUM_OUTPUT_FIGS):
-                    print(f"z_{i}:\n{z[i].cpu().numpy()}")
-                print("-----------")
+                if len(worst_samples) < NUM_WORST_SAMPLES:
+                    heapq.heappush(worst_samples, (SA_explicit_loss, sample))
+                elif SA_explicit_loss > worst_samples[0][0]:
+                    heapq.heapreplace(worst_samples, (SA_explicit_loss, sample))
 
     # Extract samples from collectors
-    worst_samples = [sample for _, sample in worst_samples_heap]
+    worst_samples = [sample for _, sample in worst_samples]
     
     # Combine and label
-    categories = [('first', first_samples), ('worst', worst_samples)]
+    categories = [('random', first_samples), ('worst', worst_samples)]
 
     for tag, samples in categories:
-        for i, (obs_loss, slot_loss, total_loss, obs_true, obs_recon_SA, obs_recon_explicit) in enumerate(samples):
+        for i, (obs_loss, slot_loss, total_loss, obs_true, obs_recon_SA, obs_recon_explicit, masks) in enumerate(samples):
             imgs_dict = {
                 "Original": obs_true,
                 "Reconstructed (SA)": obs_recon_SA,
                 "Reconstructed (from latent dim)": obs_recon_explicit
             }
-            #for j, recon_perturbed in enumerate(recon_perturbed_list):
-            #    imgs_dict[f"Pert #{j}"] = recon_perturbed[i]
+            for mask_idx, mask in enumerate(masks):
+                imgs_dict[f"mask {mask_idx}"] = mask
 
-            title = f"Losses: {obs_loss:.6f} / {slot_loss:.6f} / {total_loss:.6f}"
+            title = f"Losses: {obs_loss:.6f} / {slot_loss:.6f} / {total_loss:.6f} (obs / slot / total)"
             save_path = os.path.join(OUTPUT_DIR, f"{tag}_{i}.png")
             plot_images(imgs_dict.values(), save_path, imgs_dict.keys(), title=title)
 
@@ -165,6 +186,15 @@ def main():
     print(f"Average loss: {np.mean(SA_explicit_loss_list):.8f}")
     print(f"Standard deviation of loss: {np.std(SA_explicit_loss_list):.8f}")
 
+    plt.figure(figsize=(8, 5))
+    plt.hist(explicit_loss_list, bins=50, color='skyblue', edgecolor='black')
+    plt.title('Distribution of Latent Losses')
+    plt.yscale("log")
+    plt.xlabel('MSE Loss')
+    plt.ylabel('Frequency')
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "loss_distribution.png"))
+    plt.close()
 
 if __name__ == '__main__':
     main()
