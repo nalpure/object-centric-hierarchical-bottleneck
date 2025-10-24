@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
         "ckpt_path": "checkpoints/slot_attention/checkpoint.ckpt",
         "slot_save_path": "data/slots/slots.h5",
         "seed": 0,
+        "num_workers": 8,
         # Image parameters
         "hdf5_format": "HWC",
         "resolution": [64, 64],
@@ -65,6 +66,7 @@ DEFAULT_CONFIG = {
         "ckpt_path": "checkpoints/explicit_latents/checkpoint.ckpt",
         "save_path": "data/explicit_latents/expl_latents.h5",
         "seed": 0,
+        "num_workers": 4,
         # Training parameters
         "batch_size": 128,
         "optimizer": "adam",
@@ -84,6 +86,7 @@ DEFAULT_CONFIG = {
         "init_ckpt": None,
         "ckpt_path": "checkpoints/implicit_latents/checkpoint.ckpt",
         "seed": 0,
+        "num_workers": 0,
         # Training parameters
         "batch_size": 128,
         "optimizer": "adam",
@@ -202,47 +205,33 @@ def weights_init(m):
         nn.init.zeros_(m.bias)
 
 
-def save_dict_h5py(array_dict, fname, mode):
-    """Save dictionary containing numpy arrays to h5py file.
-    If the file exists, append to it; otherwise, create a new file."""
-
+def save_dict_h5py(array_dict, fname, mode="w"):
+    """Save list of dictionaries containing numpy arrays and strings to h5py file.
+    If mode="a", append new groups with consecutive indices.
+    """
     # Ensure directory exists
     directory = os.path.dirname(fname)
-    if not os.path.exists(directory):
+    if directory and not os.path.exists(directory):
         os.makedirs(directory)
 
     with h5py.File(fname, mode) as hf:
-        for key in array_dict.keys():
-            if key in hf:
-                raise ValueError(f"Key '{key}' already exists in the file. Cannot overwrite existing data.")
-            value = array_dict[key]
-            if isinstance(value, torch.Tensor):
-                value = value.cpu().numpy()
-            hf.create_dataset(key, data=value)
-
+        for key, value in array_dict.items():
+            hf.create_dataset(key, data=value, compression="gzip", compression_opts=9)
+            
 
 def load_dict_h5py(fname):
-    """Restore dictionary containing numpy arrays from h5py file."""
-    array_dict = dict()
-    with h5py.File(fname, 'r') as hf:
-        for key in hf.keys():
-            array_dict[key] = hf[key][:]
+    """Restore list of dictionaries containing numpy arrays from h5py file."""
+    array_dict = list()
+    with h5py.File(fname, "r") as hf:
+        for i, grp in enumerate(hf.keys()):
+            array_dict.append(dict())
+            for key in hf[grp].keys():
+                if hf[grp][key].shape == ():
+                    array_dict[i][key] = hf[grp][key][()]
+                else:
+                    array_dict[i][key] = hf[grp][key][:]
+
     return array_dict
-
-
-def save_list_dict_h5py(array_dict, fname):
-    """Save list of dictionaries containing numpy arrays to h5py file."""
-
-    # Ensure directory exists
-    directory = os.path.dirname(fname)
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-
-    with h5py.File(fname, 'w') as hf:
-        for i in range(len(array_dict)):
-            grp = hf.create_group(str(i))
-            for key in array_dict[i].keys():
-                grp.create_dataset(key, data=array_dict[i][key])
 
 
 def load_list_dict_h5py(fname):
@@ -362,10 +351,12 @@ def log_progress(current_step, total_steps, start_time, additional_msg=''):
     print(msg)
 
 
-def set_seed(seed, deterministic_cudnn=False):
+def set_seed(seed: int, deterministic_cudnn: bool = False) -> torch.Generator:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    g = torch.Generator()
+    g.manual_seed(seed)
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -374,8 +365,10 @@ def set_seed(seed, deterministic_cudnn=False):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+    return g
 
-def plot_images(images, save_path, labels=None, grayscale_indices=[], title=None):
+
+def plot_images(images, save_path, labels=None, title=None):
     """
     Displays all images in a single row and saves the resulting plot.
 
@@ -383,17 +376,24 @@ def plot_images(images, save_path, labels=None, grayscale_indices=[], title=None
         images (iterable): An iterable of images. Each image should be of shape [3, H, W].
         save_path (str): File path to save the plotted image.
         labels (iterable): An iterable of labels for each image.
-        grayscale_indices (iterable): An iterable of indices for images that should be displayed in grayscale.
     """
     num_images = len(images)
     images = list(images)
-
     for i in range(num_images):
         if hasattr(images[i], 'detach'):
             images[i] = images[i].detach().cpu().numpy()
-        if i not in grayscale_indices:
-            images[i] = images[i].transpose(1, 2, 0)
+        
         images[i] = np.clip(images[i], 0, 1)
+
+        # check if it is a grayscale image
+        if images[i].shape[0] == 1:
+            images[i] = images[i].squeeze(0)  # shape: [H, W]
+            cmap = 'gray'
+        elif images[i].ndim == 2:
+            cmap = 'gray'
+        else:
+            images[i] = images[i].transpose(1, 2, 0)  # shape: [H, W, 3]
+            cmap = None
     
     # Create a figure with one row and as many columns as there are images.
     fig, axes = plt.subplots(1, num_images, figsize=(4 * num_images, 4))
@@ -404,7 +404,7 @@ def plot_images(images, save_path, labels=None, grayscale_indices=[], title=None
     
     # Loop over images and display each one.
     for idx, img in enumerate(images):
-        axes[idx].imshow(img, cmap='gray' if idx in grayscale_indices else None)
+        axes[idx].imshow(img, cmap=cmap)
         axes[idx].axis('off')
     
     if labels is not None:
@@ -417,6 +417,48 @@ def plot_images(images, save_path, labels=None, grayscale_indices=[], title=None
     plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust the rect parameter to add padding at the top
     plt.savefig(save_path)
     plt.show()
+    plt.close()
+
+
+def plot_grid(rows, row_titles, column_titles, save_path="output.png"):
+    num_columns = len(column_titles)
+    
+    if not num_columns == len(rows[0]):
+        raise ValueError(f"Number of column titles ({num_columns}) must match number of columns in rows ({len(rows[0])}).")
+    if not len(row_titles) == len(rows):
+        raise ValueError(f"Number of row titles ({len(row_titles)}) must match number of rows ({len(rows)}).")
+    
+    fig, axes = plt.subplots(len(rows), num_columns, figsize=(4 * num_columns, 4 * len(rows)))
+
+    if num_columns == 1:
+        axes = axes.reshape(len(rows), 1)
+
+    for row_idx, images in enumerate(rows):
+        for col_idx in range(num_columns):
+            img = images[col_idx]
+            if hasattr(img, "detach"):
+                img = img.detach().cpu().numpy()
+
+            if img.shape[0] == 1:
+                img = img.squeeze(0)  # shape: [H, W]
+                cmap = "gray"
+            elif img.ndim == 2:
+                cmap = "gray"
+            else:
+                img = img.transpose(1, 2, 0)  # shape: [H, W, 3]
+                cmap = None
+
+            axes[row_idx, col_idx].imshow(img.clip(0, 1), cmap=cmap)
+            axes[row_idx, col_idx].axis("off")
+            if row_idx == 0:
+                axes[row_idx, col_idx].set_title(column_titles[col_idx], fontsize=12)
+
+    # Manually add row titles on the left
+    for row_idx, title in enumerate(row_titles):
+        fig.text(0.1, 0.8 - row_idx * 0.76 / len(rows), title, va='center', ha='right', fontsize=14, weight='bold')
+
+    plt.subplots_adjust(wspace=0.05, hspace=0.05)
+    plt.savefig(save_path, bbox_inches='tight')
     plt.close()
 
 
