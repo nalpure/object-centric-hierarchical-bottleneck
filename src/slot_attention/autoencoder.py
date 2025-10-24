@@ -132,12 +132,18 @@ class SlotAttentionAutoEncoder(nn.Module):
             eps = 1e-8, 
             mlp_hidden_size = 128)
 
-    def forward(self, image, slots_init=None):
-        slots, attention_scores = self.encode(image, slots_init)
-        active_slots, background_slot = separate_slots(slots, attention_scores)
-        sorted_slots = torch.cat([background_slot, active_slots], dim=1)
-        recon_combined, recons, masks = self.decode(sorted_slots)
-        return recon_combined, recons, masks, active_slots, background_slot
+    def forward(self, image):
+        slots, attn = self.encode(image)       
+        recon_combined, recons, masks = self.decode(slots)
+        return recon_combined, recons, masks, attn
+    
+
+        """     
+        if prev_slots is None or prev_attention is None:
+            sorted_slots, sorted_attn = order_slots(slots, attention_scores)
+        else:
+            sorted_slots, sorted_attn, _ = match_active_slots(prev_slots, slots, prev_attention, attention_scores)"""
+    
 
     def encode(self, image, slots_init=None):
         # `image` has shape: [batch_size, num_channels, width, height].
@@ -185,32 +191,124 @@ class SlotAttentionAutoEncoder(nn.Module):
         
         # Recombine image.
         recon_combined = torch.sum(recons * masks, dim=1)  
-        recon_combined = recon_combined.permute(0,3,1,2)
-        # `recon_combined` has shape: [batch_size, num_slots, width, height, num_channels].
-
-        masks = masks.squeeze()  # [batch_size, num_slots, width, height]
+        
+        recon_combined = recon_combined.permute(0,3,1,2)    # [batch_size, num_channels, width, height].
+        recons = recons.permute(0,1,4,2,3)                  # [batch_size, num_slots, num_channels, width, height].
+        masks = masks.squeeze()                             # [batch_size, num_slots, width, height]
+        
         return recon_combined, recons, masks
     
 
-def separate_slots(slots, attention_scores):
-        """
-        Separates slots into active slots and background slot based on standard deviation of attention scores.
-        @param slots: torch.Tensor of shape [batch_size, num_slots, slot_dim]
-        @param attention_scores: torch.Tensor of shape [batch_size, num_slots, height * width]
-        @return: 
-            active_slots: torch.Tensor of shape [batch_size, num_active_slots, slot_dim]
-            background_slot: torch.Tensor of shape [batch_size, 1, slot_dim]
-        """
-        batch_size, n_slots, slot_dim = slots.shape
+def order_slots(slots, attention_scores, prev_slots=None, prev_attention=None):
+    """
+    Orders slots by matching them to previous slots using a weighted
+    combination of slot-vector and attention-map similarity.
 
-        # Find mask with least standard deviation
-        background_slot_indices = torch.argmin(torch.std(attention_scores, dim=-1), dim=-1)
-        background_slot_mask = torch.nn.functional.one_hot(background_slot_indices, num_classes=n_slots).bool()
+    Args:
+        slots: [B, N, D]
+        attention_scores: [B, N, H*W]
+        prev_slots: [B, N, D]
+        prev_attention: [B, N, H*W]
+    Returns:
+        ordered_slots: [B, N, D]
+        ordered_attention: [B, N, H*W]
+    """
+    if prev_slots is None or prev_attention is None:
+        slots_active, slot_bg, attn_active, attn_bg = identify_background(slots, attention_scores)
+        slots = torch.cat([slot_bg, slots_active], dim=1)
+        attn = torch.cat([attn_bg, attn_active], dim=1)
+    else:
+        slots_active, slot_bg, attn_active, attn_bg = identify_background(slots, attention_scores)
+        slots_active_prev = prev_slots[:, 1:, :]
+        attn_active_prev = prev_attention[:, 1:, :]
+        slots_active, attn_active, _ = match_slots(
+            slots_active_prev, slots_active, attn_active_prev, attn_active)
+        slots = torch.cat([slot_bg, slots_active], dim=1)
+        attn = torch.cat([attn_bg, attn_active], dim=1)
+    
+    return slots, attn
 
-        active_slots = slots[~background_slot_mask]
-        background_slot = slots[background_slot_mask]
-        
-        active_slots = active_slots.view(batch_size, n_slots-1, slot_dim)
-        background_slot = background_slot.view(batch_size, 1, slot_dim)
 
-        return active_slots, background_slot
+def identify_background(slots, attention_scores):
+    """
+    Separates slots into active and background components while preserving
+    the order of active slots within each batch.
+
+    Args:
+        slots: torch.Tensor of shape [B, N, D]
+        attention_scores: torch.Tensor of shape [B, N, H*W]
+
+    Returns:
+        active_slots:      [B, N-1, D]
+        background_slot:   [B, 1, D]
+        active_attn:       [B, N-1, H*W]
+        background_attn:   [B, 1, H*W]
+    """
+    B, N, D = slots.shape
+    _, _, HW = attention_scores.shape
+
+    # 1. Identify background slot per batch (lowest spatial std)
+    background_idx = torch.argmin(torch.std(attention_scores, dim=-1), dim=-1)  # [B]
+
+    # 2. Gather background slot and its attention
+    batch_idx = torch.arange(B, device=slots.device)
+    background_slot = slots[batch_idx, background_idx].unsqueeze(1)      # [B,1,D]
+    background_attn = attention_scores[batch_idx, background_idx].unsqueeze(1)  # [B,1,HW]
+
+    # 3. Build mask and select active slots/attentions (preserve order)
+    all_idx = torch.arange(N, device=slots.device).unsqueeze(0)          # [1,N]
+    active_mask = all_idx != background_idx.unsqueeze(1)                 # [B,N]
+
+    active_slots = slots[active_mask].view(B, N-1, D)
+    active_attn  = attention_scores[active_mask].view(B, N-1, HW)
+
+    return active_slots, background_slot, active_attn, background_attn
+
+
+from scipy.optimize import linear_sum_assignment
+
+def match_slots(prev_slots, curr_slots, prev_attn, curr_attn, w_slot=0.3, w_attn=0.7):
+    """
+    Matches active slots between two timesteps (prev -> curr) using a weighted
+    combination of slot-vector and attention-map similarity.
+
+    Args:
+        prev_slots: [B, S, D]
+        curr_slots: [B, S, D]
+        prev_attn:  [B, S, HW]
+        curr_attn:  [B, S, HW]
+        w_slot: weight for slot-vector similarity
+        w_attn: weight for attention similarity
+    Returns:
+        curr_slots_reordered: [B, S, D]
+        curr_attn_reordered:  [B, S, HW]
+        assignment: LongTensor [B, S] (curr index assigned to each prev slot)
+    """
+    B, S, D = prev_slots.shape
+
+    # Normalize
+    prev_slots_n = F.normalize(prev_slots, dim=-1)
+    curr_slots_n = F.normalize(curr_slots, dim=-1)
+    prev_attn_n = F.normalize(prev_attn, dim=-1)
+    curr_attn_n = F.normalize(curr_attn, dim=-1)
+
+    reordered_slots = torch.zeros_like(curr_slots)
+    reordered_attn = torch.zeros_like(curr_attn)
+    assignments = torch.zeros((B, S), dtype=torch.long, device=curr_slots.device)
+
+    for b in range(B):
+        # [S, S] similarities
+        sim_slot = prev_slots_n[b] @ curr_slots_n[b].T           # cosine sim
+        sim_attn = prev_attn_n[b] @ curr_attn_n[b].T             # spatial overlap
+        sim = w_slot * sim_slot + w_attn * sim_attn              # weighted combo
+
+        # Hungarian assignment (maximize sim -> minimize -sim)
+        row_ind, col_ind = linear_sum_assignment(-sim.cpu().numpy())
+        perm = torch.tensor(col_ind, device=curr_slots.device)
+
+        # Apply permutation
+        reordered_slots[b] = curr_slots[b, perm]
+        reordered_attn[b] = curr_attn[b, perm]
+        assignments[b] = perm
+
+    return reordered_slots, reordered_attn, assignments
