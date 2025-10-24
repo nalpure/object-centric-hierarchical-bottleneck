@@ -12,14 +12,11 @@ from torch.utils import data
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, set_seed, get_lr_schedule, DEVICE
 
-NUM_WORKERS = 0
-
 def main():
     print("Running on", DEVICE)
     config_name = get_config_argument()
     config_impl = load_config(config_name)["implicit_latents"]
     
-
     for key, value in config_impl.items():
         print(f"{key}: {value}")
     set_seed(config_impl['seed'])
@@ -43,7 +40,7 @@ def main():
         print(f"mean: {dataset.feature_mean}, std: {dataset.feature_std}")
         print("Saving normalization stats to", norm_stats_path)
         torch.save({"mean": dataset.feature_mean, "std": dataset.feature_std}, norm_stats_path)
-    train_dataloader = data.DataLoader(dataset, batch_size=config_impl["batch_size"], shuffle=True, drop_last=True, num_workers=NUM_WORKERS)
+    train_dataloader = data.DataLoader(dataset, batch_size=config_impl["batch_size"], shuffle=True, drop_last=True, num_workers=config_impl["num_workers"])
     print(f"Finished loading all {config_impl['batch_size'] * len(train_dataloader)} training samples.")
 
     explicit_dim = next(iter(train_dataloader))[0].shape[-1]

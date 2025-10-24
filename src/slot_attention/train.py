@@ -13,7 +13,6 @@ from src.utils import ImageDataset, get_lr_schedule, load_config, log_progress, 
 
 ONLY_ORIGINAL = False
 ONLY_FIRST = False
-NUM_WORKERS = 8
 
 def main():
     print("Running on", DEVICE)
@@ -27,7 +26,7 @@ def main():
     
     print("Loading training data...")
     dataset = ImageDataset(hdf5_file=config["train_path"], hdf5_format=config["hdf5_format"], only_first=ONLY_FIRST, only_original=ONLY_ORIGINAL)
-    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=NUM_WORKERS)
+    train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=config["num_workers"])
     batch_size = config['batch_size']
     num_batches = len(train_dataloader)
     print(f"Finished loading {batch_size * num_batches} ({num_batches} * {batch_size}) training samples.")
