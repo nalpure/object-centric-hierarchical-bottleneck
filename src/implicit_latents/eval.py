@@ -5,11 +5,11 @@ import matplotlib.pyplot as plt
 from os.path import exists
 
 from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
-from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, separate_slots
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, identify_background, order_slots
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import IMG_CHANNELS, PerturbedImageSequenceDataset, get_config_argument, load_config, set_seed, DEVICE
+from src.utils import IMG_CHANNELS, PerturbedImageSequenceDataset, get_config_argument, load_config, plot_grid, set_seed, DEVICE
 
-NUM_OUTPUT_FIGS = 5
+NUM_OUTPUT_FIGS = 15
 OUTPUT_DIR = "data/figures/"
 
 
@@ -94,25 +94,31 @@ def main():
         obs = batch[0].to(DEVICE)
 
         with torch.no_grad():
-            # ENCODING
-            active_slots, background_slots = encode_obs(obs, model_SA)  # obs -> slots
-            z_explicit = encode_slots(active_slots, model_explicit)     # slots -> explicit
+            # ----- SLOT ATTENTION ENCODING / DECODING ------
+            # obs -> slots
+            active_slots, background_slots = encode_obs(obs, model_SA)
+            # slots -> obs
+            obs_SA, _ = decode_slots(active_slots, background_slots, model_SA)
+
+            # ----- EXPLICIT LATENT ENCODING / DECODING ------
+            # slots -> explicit
+            z_explicit = encode_slots(active_slots, model_explicit)
             z_explicit_norm = (torch.clone(z_explicit) - mean) / std if normalize else z_explicit
-            z_implicit = encode_explicit_latents(z_explicit_norm, model_implicit)   # explicit -> implicit
-            
-            # DECODING
-            # slot -> obs
-            obs_recon_SA = decode_slots(active_slots, background_slots, model_SA)
 
             # explicit -> slot -> obs
             slot_recon_explicit = decode_explicit_latents(z_explicit, model_explicit)
-            obs_recon_explicit = decode_slots(slot_recon_explicit, background_slots, model_SA)
-
+            obs_recon_explicit, masks_explicit = decode_slots(slot_recon_explicit, background_slots, model_SA)
+            
+            
+            # ----- IMPLICIT LATENT ENCODING / DECODING ------
+            # explicit -> implicit
+            z_implicit = model_implicit.encode(z_explicit_norm)   
+            
             # implicit -> explicit -> slot -> obs
-            z_explicit_norm_recon = decode_implicit_latents(z_implicit, model_implicit) 
+            z_explicit_norm_recon = model_implicit.decode(z_implicit)
             z_explicit_recon = z_explicit_norm_recon * std + mean if normalize else z_explicit_norm_recon
             slot_recon_implicit = decode_explicit_latents(z_explicit_recon, model_explicit)
-            obs_recon_implicit = decode_slots(slot_recon_implicit, background_slots, model_SA)
+            obs_recon_implicit, masks_implicit = decode_slots(slot_recon_implicit, background_slots, model_SA)
         
         for i in range(len(obs)):
             loss_implicit_to_explicit.append(criterion(z_explicit_norm[i], z_explicit_norm_recon[i]).item())
@@ -120,14 +126,14 @@ def main():
             loss_explicit_to_slot.append(criterion(active_slots[i], slot_recon_explicit[i]).item())    
             loss_implicit_to_obs.append(criterion(obs[i], obs_recon_implicit[i]).item())
             loss_explicit_to_obs.append(criterion(obs[i], obs_recon_explicit[i]).item())
-            loss_slot_to_obs.append(criterion(obs[i], obs_recon_SA[i]).item())
+            loss_slot_to_obs.append(criterion(obs[i], obs_SA[i]).item())
 
         if batch_idx == 0:
             z_explicit_norm_recon = z_explicit_norm_recon.detach().cpu().numpy()
             z_explicit_norm = z_explicit_norm.detach().cpu().numpy()
             
             # PLOTTING
-            for i in range(NUM_OUTPUT_FIGS):
+            for i in range(min(NUM_OUTPUT_FIGS, obs.shape[0])):
                 print(f"------- FIGURE {i} -------")
                 for t in range(seq_len):
                     print(f"--- time t={t} ---")
@@ -137,15 +143,21 @@ def main():
                         print(f"obj {obj + 1}: [{target_str}] -> [{recon_str}]")
                     print()
                 print()
-                save_path = f"{OUTPUT_DIR}recons_{i}.png"
-                plot_recons(
+                save_path = f"{OUTPUT_DIR}random_{i}.png"
+                fig_rows = [
                     obs[i], 
-                    obs_recon_SA[i], 
+                    obs_SA[i], 
                     obs_recon_explicit[i], 
-                    obs_recon_implicit[i], 
-                    obs_recon_SA[i] - obs_recon_implicit[i],
-                    save_path=save_path
-                )
+                    obs_recon_implicit[i],
+                    torch.abs(obs[i] - obs_recon_implicit[i])
+                ]
+                for m in range(masks_implicit.shape[1]):
+                    fig_rows.append(masks_implicit[i, :, m])
+
+                row_titles = ["Original", "Slot Attention", "Explicit Latents", "Implicit Latents", "Difference"]
+                row_titles += [f"Mask {m+1}" for m in range(masks_implicit.shape[1])]
+                column_titles = [f"t={t+1}" for t in range(seq_len)]
+                plot_grid(fig_rows, row_titles, column_titles, save_path)
 
     # scatter plot with logarithmic axes
     fig, ax = plt.subplots()
@@ -186,14 +198,25 @@ def encode_obs(obs, model_SA: SlotAttentionAutoEncoder):
     - active_slots (torch.Tensor): Active slots of shape [batch_size, seq_len, num_objects, slots_dim]
     - background_slot (torch.Tensor): Background slots of shape [batch_size, seq_len, 1, slots_dim]
     """
-    batch_size, seq_len, channels, height, width = obs.shape
-    obs = obs.view(batch_size * seq_len, channels, height, width)
-    slots, attention_scores = model_SA.encode(obs)
-    active_slots, background_slot = separate_slots(slots, attention_scores)
-    num_objects = active_slots.shape[1]
-    active_slots = active_slots.view(batch_size, seq_len, num_objects, model_SA.slots_dim)
-    background_slot = background_slot.view(batch_size, seq_len, 1, model_SA.slots_dim)
-    return active_slots, background_slot
+    B, T, C, H, W = obs.shape
+    O = model_SA.num_slots - 1
+    active_slots = torch.empty((B, T, O, model_SA.slots_dim), device=DEVICE)
+    background_slots = torch.empty((B, T, 1, model_SA.slots_dim), device=DEVICE)
+
+    prev_slots = None
+    prev_attn = None
+
+    for t in range(T):
+        # Encode / decode one frame
+        slots_t, attn_t = model_SA.encode(obs[:, t], prev_slots)
+        slots_t, attn_t = order_slots(slots_t, attn_t, prev_slots, prev_attn)
+        
+        active_slots[:, t] = slots_t[:, 1:]
+        background_slots[:, t] = slots_t[:, :1]
+
+        prev_slots, prev_attn = slots_t, attn_t
+
+    return active_slots, background_slots
 
 
 def encode_slots(slots, model_explicit: ExplicitLatentAutoEncoder):
@@ -212,12 +235,24 @@ def encode_slots(slots, model_explicit: ExplicitLatentAutoEncoder):
     return z_explicit
 
 
-def encode_explicit_latents(z_explicit, model_implicit: ImplicitLatentAutoEncoder):
-    return model_implicit.encode(z_explicit)
+def decode_slots(active_slots, background_slots, model_SA: SlotAttentionAutoEncoder):
+    """
+    Decodes the slots into images.
+    Args:
+    - slots (torch.Tensor): Active slots of shape [batch_size, seq_len, num_objects, slots_dim]
+    - background_slots (torch.Tensor): Background slots of shape [batch_size, seq_len, 1, slots_dim]
+    - model_SA (SlotAttentionAutoEncoder): Slot Attention AutoEncoder model
+    Returns:
+    - obs_recon (torch.Tensor): Reconstructed images of shape [batch_size, seq_len, channels, height, width]
+    """
+    batch_size, seq_len, num_objects, slots_dim = active_slots.shape
 
-
-def decode_implicit_latents(z_implicit, model_implicit: ImplicitLatentAutoEncoder):
-    return model_implicit.decode(z_implicit)
+    slots = torch.concat((active_slots, background_slots), dim=2)
+    slots = slots.view(batch_size * seq_len, num_objects + 1, slots_dim)
+    obs_recon, _, masks = model_SA.decode(slots)
+    obs_recon = obs_recon.view(batch_size, seq_len, IMG_CHANNELS, *model_SA.resolution)
+    masks = masks.view(batch_size, seq_len, num_objects + 1, *model_SA.resolution)
+    return obs_recon, masks
 
 
 def decode_explicit_latents(z_explicit, model_explicit: ExplicitLatentAutoEncoder):
@@ -233,64 +268,7 @@ def decode_explicit_latents(z_explicit, model_explicit: ExplicitLatentAutoEncode
     z_explicit = z_explicit.reshape(batch_size * seq_len, num_objects, explicit_dim)
     slots_recon = model_explicit.decode(z_explicit)
     slots_recon = slots_recon.view(batch_size, seq_len, num_objects, model_explicit.slots_dim)
-    return slots_recon
-
-
-def decode_slots(active_slots, background_slots, model_SA: SlotAttentionAutoEncoder):
-    """
-    Decodes the slots into images.
-    Args:
-    - slots (torch.Tensor): Active slots of shape [batch_size, seq_len, num_objects, slots_dim]
-    - background_slots (torch.Tensor): Background slots of shape [batch_size, seq_len, 1, slots_dim]
-    - model_SA (SlotAttentionAutoEncoder): Slot Attention AutoEncoder model
-    Returns:
-    - obs_recon (torch.Tensor): Reconstructed images of shape [batch_size, seq_len, channels, height, width]
-    """
-    batch_size, seq_len, num_objects, slots_dim = active_slots.shape
-
-    slots = torch.concat((active_slots, background_slots), dim=2)
-    slots = slots.view(batch_size * seq_len, num_objects + 1, slots_dim)
-    obs_recon = model_SA.decode(slots)[0]
-    obs_recon = obs_recon.view(batch_size, seq_len, IMG_CHANNELS, *model_SA.resolution)
-    return obs_recon      
-
-
-def plot_recons(orig, slot_attention, explicit_latent, full_latent, diff, save_path="output.png"):
-    num_frames = orig.shape[0]
-    all_imgs = [orig, slot_attention, explicit_latent, full_latent, diff]
-    row_titles = ["Original", "Slot Attention", "Explicit Latents", "Implicit Latents", "Difference"]
-
-    fig, axes = plt.subplots(len(all_imgs), num_frames, figsize=(4 * num_frames, 4 * len(all_imgs)))
-
-    if num_frames == 1:
-        axes = axes.reshape(len(all_imgs), 1)
-
-    for row_idx, images in enumerate(all_imgs):
-        for col_idx in range(num_frames):
-            img = images[col_idx]
-            if hasattr(img, "detach"):
-                img = img.detach().cpu().numpy()
-
-            if img.shape[0] == 1:
-                img = img[0]  # shape: [H, W]
-                cmap = "gray"
-            else:
-                img = img.transpose(1, 2, 0)  # shape: [H, W, 3]
-                cmap = None
-
-            axes[row_idx, col_idx].imshow(img.clip(0, 1), cmap=cmap)
-            axes[row_idx, col_idx].axis("off")
-            if row_idx == 0:
-                axes[row_idx, col_idx].set_title(f"Frame {col_idx+1}", fontsize=12)
-
-    # Manually add row titles on the left
-    for row_idx, title in enumerate(row_titles):
-        fig.text(0.1, 0.8 - row_idx * 0.76 / len(all_imgs), title, va='center', ha='right', fontsize=14, weight='bold')
-
-    plt.subplots_adjust(wspace=0.05, hspace=0.05)
-    plt.savefig(save_path, bbox_inches='tight')
-    plt.close()
-
+    return slots_recon    
 
 
 if __name__ == '__main__':
