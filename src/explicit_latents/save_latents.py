@@ -26,8 +26,21 @@ def main():
         os.makedirs(os.path.dirname(output_path))
         print(f"Created output directory: {os.path.dirname(output_path)}")
     
-    print(f"Loading observation training dataset: {train_path}")
-    orig_dataset = PerturbedSlotSequenceDataset(train_path, normalize=False)
+    print(f"Loading slot sequences dataset: {train_path}")
+
+    normalize = config_EL["normalize"]
+    if normalize:
+        norm_stats_path = train_path.replace(".h5", "_norm_stats.pt")
+        if os.path.exists(norm_stats_path):
+            print("Loading normalization stats from", norm_stats_path)
+            stats = torch.load(norm_stats_path)
+        mean = stats["mean"].to(DEVICE)
+        std = stats["std"].to(DEVICE)
+        print(f"mean: {mean}, std: {std}")
+    else:
+        raise FileNotFoundError(f"Normalization stats not found at {norm_stats_path}, but normalization is enabled.")
+
+    orig_dataset = PerturbedSlotSequenceDataset(train_path, mean, std, normalize)
     dataloader = data.DataLoader(orig_dataset, batch_size=config_SA['batch_size'], shuffle=False, drop_last=True, num_workers=num_workers)
     print(f"Finished loading all {len(dataloader) * config_SA['batch_size']} observation samples.")
 
