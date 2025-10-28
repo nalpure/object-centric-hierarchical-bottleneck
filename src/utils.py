@@ -78,7 +78,8 @@ DEFAULT_CONFIG = {
         "decay_rate": 0.5,
         # Further model parameters
         "latent_dim": 3,
-        "rec_loss_mult": 100 # Multiplier for the reconstruction loss
+        "normalize": True,
+        "noise": 0.0
     },
     "implicit_latents": {
         # General parameters
@@ -605,13 +606,24 @@ class PerturbedImageSequenceDataset(data.Dataset):
 
 class SlotDataset(data.Dataset):
     """
-    Loads slots from orig_seq and pert_seq (shape [N, T, O, S]) in a HDF5 file.
+    Loads slots from orig_seq and pert_seq (shape [B, T, O, S]) in a HDF5 file.
     Flattens all slots across time and objects, returning one randomly chosen slot
     (either original or perturbed) per __getitem__ call.
     """
-    def __init__(self, hdf5_file):
+    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True):
         self.hdf5_file = hdf5_file
+        self.normalize = normalize
         self.slots = self._load_slots_data()
+
+        if normalize:
+            if feature_mean is None or feature_std is None:
+                self.feature_mean = self.slots.mean(dim=0)  # Shape: [S]
+                self.feature_std = self.slots.std(dim=0)    # Shape: [S]
+            else:
+                self.feature_mean = feature_mean
+                self.feature_std = feature_std
+            self.slots = (self.slots - self.feature_mean) / self.feature_std
+
 
     def _load_slots_data(self):
         data = {
@@ -633,6 +645,13 @@ class SlotDataset(data.Dataset):
         # Flatten the sequences across time and objects
         slots = sequences.reshape(-1, orig_seq.shape[-1])  # Shape: [B*T*O, S]
         return slots
+    
+    def _compute_mean_std(self):
+        all_data = torch.tensor(np.concatenate([self.original, self.perturbed], axis=0), dtype=torch.float32)
+        flat = all_data.reshape(-1, all_data.shape[-1])  # Shape: [B*T*O, E]
+        mean = flat.mean(dim=0)  # Shape: [E]
+        std = flat.std(dim=0)    # Shape: [E]
+        return mean, std
         
 
     def __len__(self):
@@ -660,7 +679,6 @@ class PerturbedSlotSequenceDataset(data.Dataset):
     def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True):
         self.hdf5_file = hdf5_file
         self.normalize = normalize
-        self.eps = 1e-8
 
         # Load all data into memory
         self.original, self.perturbed, self.magnitude, self.obj_index, self.prop_index = self._load_slots_data()

@@ -1,4 +1,5 @@
 from torch import nn
+import torch
 import torch.nn.functional as F
 
     
@@ -87,7 +88,7 @@ class ExplicitLatentAutoEncoder(nn.Module):
     def encode(self, slots):
         """
         Args:
-            slots: torch.Tensor of shape [batch_size,, slots_dim]
+            slots: torch.Tensor of shape [batch_size, slots_dim]
                 The active slots
         Returns:
             torch.Tensor of shape [batch_size, latent_dim]:
