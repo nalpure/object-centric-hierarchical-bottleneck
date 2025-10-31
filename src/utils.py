@@ -604,6 +604,68 @@ class PerturbedImageSequenceDataset(data.Dataset):
                 pass
 
 
+class ImageSequencePairDataset(data.Dataset):
+    """
+    Streaming dataset over a single .h5 file that returns *pairs* of consecutive
+    observations from each sequence.
+
+    For a sequence of length T=4, this yields pairs (1,2), (2,3), (3,4).
+    Each pair corresponds to the original (non-perturbed) observations.
+
+    Structure assumed in HDF5:
+       /<episode_idx>/
+           obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
+           perturbed      same shape (ignored here)
+           magnitudes     shape: (P,)
+           indices        shape: (P,)
+           properties     shape: (P,)
+    """
+
+    def __init__(self, h5_path, hdf5_format="HWC", output_format="CHW"):
+        self.h5_path = h5_path
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
+
+        # Read once to determine sequence length (T) and counts
+        with h5py.File(self.h5_path, "r") as f:
+            self.episodes = sorted(int(k) for k in f.keys())
+            first_obs = f[str(self.episodes[0])]["obs"]
+            num_pairs = first_obs.shape[0]
+            self.seq_len = first_obs.shape[1]  # T
+
+        # Build index map: (episode, pair_index, t)
+        # For each sequence of T timesteps, there are (T-1) pairs
+        self.idx2pair = []
+        for ep in self.episodes:
+            for p in range(num_pairs):
+                for t in range(self.seq_len - 1):
+                    self.idx2pair.append((ep, p, t))
+
+    def __len__(self):
+        return len(self.idx2pair)
+
+    def __getitem__(self, idx):
+        if not hasattr(self, "_h5"):
+            self._h5 = h5py.File(self.h5_path, "r")
+
+        ep, p, t = self.idx2pair[idx]
+        grp = self._h5[str(ep)]
+
+        # Load only the two consecutive frames
+        orig = grp["obs"][p, t:t+2]  # shape: (2, H, W, C) or (2, C, H, W)
+
+        # optional transpose
+        if self.hdf5_format == "HWC" and self.output_format == "CHW":
+            orig = np.transpose(orig, (0, 3, 1, 2))
+        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
+            orig = np.transpose(orig, (0, 2, 3, 1))
+
+        orig = torch.from_numpy(orig).float()  # shape [2, C, H, W]
+
+        return orig  # (two-frame pair)
+
+
+
 class SlotDataset(data.Dataset):
     """
     Loads slots from orig_seq and pert_seq (shape [B, T, O, S]) in a HDF5 file.

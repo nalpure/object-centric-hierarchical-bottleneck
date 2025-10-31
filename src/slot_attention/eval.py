@@ -53,7 +53,7 @@ def main():
     with torch.no_grad():
         for batch in test_dataloader:
             obs = batch.to(DEVICE)
-            recon_combined, recons, masks, _, _ = model(obs)
+            recon_combined, recons, masks, _ = model(obs)
             for i in range(len(obs)):
                 loss = criterion(obs[i], recon_combined[i]).item()
                 all_outputs.append((loss, obs[i].cpu(), recon_combined[i].cpu(), masks[i].cpu(), recons[i].cpu()))
@@ -81,9 +81,8 @@ def main():
             for slot_idx, rec in enumerate(recons):
                 imgs_dict[f"recon {slot_idx}"] = rec
 
-            grayscale_indices = [idx for idx in range(3, 3 + config['num_slots'])]
             save_path = os.path.join(OUTPUT_DIR, f"{tag}_{i}.png")
-            plot_images(imgs_dict.values(), save_path, labels=imgs_dict.keys(), grayscale_indices=grayscale_indices, title=f"Loss: {loss:.6f}")
+            plot_images(imgs_dict.values(), save_path, labels=imgs_dict.keys(), title=f"Loss: {loss:.6f}")
 
 
     losses = np.array([loss for loss, _, _, _, _ in all_outputs])
