@@ -267,7 +267,7 @@ def identify_background(slots, attention_scores):
 
 from scipy.optimize import linear_sum_assignment
 
-def match_slots(prev_slots, curr_slots, prev_attn, curr_attn, w_slot=0.3, w_attn=0.7):
+def match_slots(prev_slots, curr_slots, prev_attn, curr_attn, w_slot=1.0, w_attn=0.0):
     """
     Matches active slots between two timesteps (prev -> curr) using a weighted
     combination of slot-vector and attention-map similarity.
@@ -296,17 +296,18 @@ def match_slots(prev_slots, curr_slots, prev_attn, curr_attn, w_slot=0.3, w_attn
     reordered_attn = torch.zeros_like(curr_attn)
     assignments = torch.zeros((B, S), dtype=torch.long, device=curr_slots.device)
 
+    
     for b in range(B):
-        # [S, S] similarities
-        sim_slot = prev_slots_n[b] @ curr_slots_n[b].T           # cosine sim
-        sim_attn = prev_attn_n[b] @ curr_attn_n[b].T             # spatial overlap
-        sim = w_slot * sim_slot + w_attn * sim_attn              # weighted combo
+        with torch.no_grad():
+            # [S, S] similarities
+            sim_slot = prev_slots_n[b] @ curr_slots_n[b].T           # cosine sim
+            sim_attn = prev_attn_n[b] @ curr_attn_n[b].T             # spatial overlap
+            sim = w_slot * sim_slot + w_attn * sim_attn              # weighted combo
 
-        # Hungarian assignment (maximize sim -> minimize -sim)
-        row_ind, col_ind = linear_sum_assignment(-sim.cpu().numpy())
-        perm = torch.tensor(col_ind, device=curr_slots.device)
+            # Hungarian assignment (maximize sim -> minimize -sim)
+            row_ind, col_ind = linear_sum_assignment(-sim.cpu().numpy())
+            perm = torch.tensor(col_ind, device=curr_slots.device)
 
-        # Apply permutation
         reordered_slots[b] = curr_slots[b, perm]
         reordered_attn[b] = curr_attn[b, perm]
         assignments[b] = perm
