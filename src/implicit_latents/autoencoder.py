@@ -47,7 +47,7 @@ class NodeDecoder(nn.Module):
         x = F.relu(self.ln2(self.fc2(x)))
         x = F.relu(self.ln3(self.fc3(x)))
         x = self.fc4(x)
-        # x: [B, explicit_dim]
+        # x: [B, output_dim]
         return x
     
 
@@ -116,13 +116,14 @@ class ImplicitLatentAutoEncoder(nn.Module):
         self.implicit_dim = implicit_dim
         self.hidden_dim = hidden_dim
         self.seq_len = seq_len
-        latent_dim = explicit_dim + implicit_dim
-        
-        self.node_encoder = NodeEncoder(explicit_dim * seq_len + hidden_dim, latent_dim, hidden_dim)
-        self.node_decoder = NodeDecoder(latent_dim + hidden_dim, seq_len * explicit_dim, hidden_dim)
+        self.latent_dim = explicit_dim + implicit_dim
+
+        self.criterion = nn.MSELoss()
+        self.node_encoder = NodeEncoder(explicit_dim * seq_len + hidden_dim, self.latent_dim, hidden_dim)
+        self.node_decoder = NodeDecoder(self.latent_dim + hidden_dim, seq_len * explicit_dim, hidden_dim)
         self.edge_encoder = EdgeEncoder(explicit_dim * seq_len, hidden_dim)
-        self.edge_decoder = EdgeDecoder(latent_dim, hidden_dim)
-        
+        self.edge_decoder = EdgeDecoder(self.latent_dim, hidden_dim)
+
 
     def forward(self, x):
         return self.decode(self.encode(x))
@@ -227,3 +228,22 @@ class ImplicitLatentAutoEncoder(nn.Module):
 
         # 9) reshape → [B, O, T, E] then permute to [B, T, O, E]
         return flat_x.view(B, O, T, E).permute(0, 2, 1, 3)
+
+    
+    def _disentangle_loss(self, z_orig, z_pert, perturbed_obj, perturbed_dim, magnitude):
+        """
+        Compute disentanglement loss.
+        Args:
+            z_orig: [B, O, E + I]
+            z_pert: [B, O, E + I]
+            magnitude: float
+            index: int
+        Returns:
+            loss: scalar
+        """
+        diff = z_pert - z_orig  # [B, O, E + I]     
+        target_diff = torch.zeros_like(diff)
+        target_diff[:, perturbed_obj, perturbed_dim] += magnitude
+        loss = self.criterion(diff, target_diff)
+
+        return loss

@@ -36,15 +36,16 @@ def main():
 
     print("Loading training data...")
     dataset = PerturbedSlotSequenceDataset(hdf5_file=config_impl["train_path"], feature_mean=mean, feature_std=std, normalize=config_impl["normalize"])
+    
     if config_impl["normalize"] and not exists(norm_stats_path):
         print(f"mean: {dataset.feature_mean}, std: {dataset.feature_std}")
         print("Saving normalization stats to", norm_stats_path)
         torch.save({"mean": dataset.feature_mean, "std": dataset.feature_std}, norm_stats_path)
+    
     train_dataloader = data.DataLoader(dataset, batch_size=config_impl["batch_size"], shuffle=True, drop_last=True, num_workers=config_impl["num_workers"])
     print(f"Finished loading all {config_impl['batch_size'] * len(train_dataloader)} training samples.")
 
     explicit_dim = next(iter(train_dataloader))[0].shape[-1]
-
     model, optimizer = initialize_model(config_impl, explicit_dim)
     print(f"Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
@@ -55,11 +56,13 @@ def main():
         config_impl["decay_epochs"],
         config_impl["decay_rate"],
         config_impl["mixed_precision"],
-        config_impl["ckpt_path"]
+        config_impl["ckpt_path"],
+        config_impl["noise"],
+        config_impl["disentangle"]
     )
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, noise, disentangle, criterion=torch.nn.MSELoss(), verbose=True):
     """
     Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
 
@@ -87,21 +90,34 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     
     for epoch in range(1, num_epochs + 1): 
         epoch_loss = 0
+        epoch_disentangle_loss = 0
         
         for batch in train_dataloader:
             batch_loss = 0
+            orig_seq, pert_seq, magnitude, obj_index, prop_index = (a.to(DEVICE) for a in batch)
 
-            orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
-            orig_seq = orig_seq.to(DEVICE)
-            pert_seq = pert_seq.to(DEVICE)
+            if noise > 0.0:
+                orig_seq = orig_seq + torch.randn_like(orig_seq) * noise
+                pert_seq = pert_seq + torch.randn_like(pert_seq) * noise
+
 
             # Use autocast if enabled, otherwise use a no-op context
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
 
             with context_manager:
-                orig_seq_reconstructed = model(orig_seq)
-                #loss = criterion(orig_seq, orig_seq_reconstructed)
-                loss = criterion(orig_seq, orig_seq_reconstructed)
+                all_z = model.encode(torch.cat([orig_seq, pert_seq], dim=0))
+                all_recon = model.decode(all_z)
+
+                orig_seq_reconstructed = all_recon[:orig_seq.shape[0]]
+                pert_seq_reconstructed = all_recon[orig_seq.shape[0]:]
+                loss = (criterion(orig_seq, orig_seq_reconstructed) + criterion(pert_seq, pert_seq_reconstructed)) / 2.0
+
+                if disentangle:
+                    z_orig = all_z[:orig_seq.shape[0]]
+                    z_pert = all_z[orig_seq.shape[0]:]
+                    disentangle_loss = model._disentangle_loss(z_orig, z_pert, obj_index, prop_index, magnitude)
+                    batch_loss += disentangle_loss
+                    epoch_disentangle_loss += disentangle_loss.item()
 
                 batch_loss += loss
                 epoch_loss += loss.item()
@@ -136,13 +152,22 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         current_lr = scheduler.get_last_lr()
 
         epoch_loss /= len(train_dataloader)
+        epoch_disentangle_loss /= len(train_dataloader)
         loss_list.append(epoch_loss)
 
         if verbose:
-            additional_msg = (
-                f'Loss: {epoch_loss:.6f}, '
-                f'lr: {current_lr[0]:.6f}'
-            )
+            if disentangle:
+                additional_msg = (
+                    f'Loss: {epoch_loss:.6f}, '
+                    f'Disentangle Loss: {epoch_disentangle_loss:.6f}, '
+                    f'Total Loss: {epoch_loss + epoch_disentangle_loss:.6f}, '
+                    f'lr: {current_lr[0]:.6f}'
+                )
+            else:
+                additional_msg = (
+                    f'Loss: {epoch_loss:.6f}, '
+                    f'lr: {current_lr[0]:.6f}'
+                )
             log_progress(epoch, num_epochs, start, additional_msg)
 
         # Save the best model and optimizer state
