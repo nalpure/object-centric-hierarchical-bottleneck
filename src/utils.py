@@ -38,11 +38,11 @@ DEFAULT_CONFIG = {
         "train_path": "data/observations/training_data.h5",
         "init_ckpt": None,
         "ckpt_path": "checkpoints/slot_attention/checkpoint.ckpt",
-        "slot_save_path": "data/slots/slots.h5",
+        "save_path": "data/slots/slots.h5",
         "seed": 0,
         "num_workers": 8,
         # Image parameters
-        "hdf5_format": "HWC",
+        "in_format": "HWC",
         "resolution": [64, 64],
         # Slot Attention parameters
         "num_slots": 4,
@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
         "mixed_precision": False,
         "num_epochs": 100,
         "learning_rate": 0.0003,
+        "rec_loss_mult": 10000,
         "warmup_epochs": 20,
         "decay_epochs": 80,
         "decay_rate": 0.5
@@ -100,7 +101,9 @@ DEFAULT_CONFIG = {
         # Further model parameters
         "latent_dim": 5,
         "hidden_dim": 128,
-        "normalize": True
+        "normalize": True,
+        "noise": 0.0,
+        "disentangle": False
     }
 }
 
@@ -385,6 +388,7 @@ def plot_images(images, save_path, labels=None, title=None):
             images[i] = images[i].detach().cpu().numpy()
         
         images[i] = np.clip(images[i], 0, 1)
+        cmap = None
 
         # check if it is a grayscale image
         if images[i].shape[0] == 1:
@@ -392,9 +396,8 @@ def plot_images(images, save_path, labels=None, title=None):
             cmap = 'gray'
         elif images[i].ndim == 2:
             cmap = 'gray'
-        else:
+        elif images[i].shape[0] == 3:
             images[i] = images[i].transpose(1, 2, 0)  # shape: [H, W, 3]
-            cmap = None
     
     # Create a figure with one row and as many columns as there are images.
     fig, axes = plt.subplots(1, num_images, figsize=(4 * num_images, 4))
@@ -463,207 +466,151 @@ def plot_grid(rows, row_titles, column_titles, save_path="output.png"):
     plt.close()
 
 
-class ImageDataset(data.Dataset):
-    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW', only_first=False, only_original=False):
-        """
-        Streaming dataset over a single .h5 file.
-        Assumes structure:
-              /<episode_idx>/
-                obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
-                perturbed      same shape
-        Returns individual images of shape (C,H,W) or (H,W,C). 
-        If only_first is True, returns only the first image of each episode.
-        If only_original is True, returns only the original images.
-        """
-        self.h5_path = hdf5_file
-        self.hdf5_format = hdf5_format
-        self.output_format = output_format
-        self.only_first = only_first
-        self.only_original = only_original
+def create_trail(img_seq, highlight="last"):
+    """
+    Creates a trailing effect by blending the highlighted image with
+    a series of trailing images.
 
-        with h5py.File(self.h5_path, "r") as f:
-            self.episodes = sorted(int(k) for k in f.keys())
-            # assume every episode has same T
-            first = f[str(self.episodes[0])]["obs"]
-            self.num_seq = first.shape[0]
-            self.seq_len = first.shape[1]
-            
-        self.idx2ep = []
-        for ep in self.episodes:
-            for seq in range(self.num_seq):
-                if self.only_first:
-                    self.idx2ep.append((ep, seq, 0, False))
-                    if not self.only_original:
-                        self.idx2ep.append((ep, seq, 0, True))
-                else:
-                    for t in range(self.seq_len):
-                        self.idx2ep.append((ep, seq, t, False))
-                        if not self.only_original:
-                            self.idx2ep.append((ep, seq, t, True))
-    
+    Args:
+        img_seq: numpy array of shape [T, H, W, C]
+        highlight: 'last' or 'first' - which frame to highlight
+    Returns:
+        final_img: numpy array of shape [H, W, C]
+    """
+    if highlight == "last":
+        highlighted_img = img_seq[-1]
+    elif highlight == "first":
+        highlighted_img = img_seq[0]
+    else:
+        raise ValueError(f"Unknown highlight mode: {highlight}")
+
+    trail_length = img_seq.shape[1] - 1
+    final_img = np.copy(highlighted_img) / 2.0
+
+    for trail_img in img_seq[:-1]:
+        final_img += (
+            np.minimum(final_img, trail_img) / trail_length / 2.0
+        )
+
+    return final_img
+
+
+def _transpose_array(arr, in_fmt: str, out_fmt: str):
+    """
+    Handles conversion between 'HWC' and 'CHW' formats for both
+    single frames and sequences.
+    """
+    if in_fmt == out_fmt:
+        return arr
+
+    if in_fmt == "HWC" and out_fmt == "CHW":
+        if arr.ndim == 3:
+            return np.transpose(arr, (2, 0, 1))
+        elif arr.ndim == 4:
+            return np.transpose(arr, (0, 3, 1, 2))
+        elif arr.ndim == 5:
+            return np.transpose(arr, (0, 1, 4, 2, 3))
+    elif in_fmt == "CHW" and out_fmt == "HWC":
+        if arr.ndim == 3:
+            return np.transpose(arr, (1, 2, 0))
+        elif arr.ndim == 4:
+            return np.transpose(arr, (0, 2, 3, 1))
+        elif arr.ndim == 5:
+            return np.transpose(arr, (0, 1, 2, 3, 4))
+
+    raise ValueError(f"Unsupported transpose for shape {arr.shape} ({in_fmt}→{out_fmt})")
+
+
+class ImageDataset(data.Dataset):
+    def __init__(self, npz_path, in_format="HWC", out_format="CHW",
+                 only_first=False, only_original=False):
+        """
+        Dataset over flat .npz arrays:
+            img_o: (N, T, H, W, C)
+            img_p: (N, T, H, W, C)
+        Returns individual images.
+        """
+        data = np.load(npz_path)
+        self.img_o = data["img_o"]
+        self.img_p = data["img_p"]
+        self.in_format, self.out_format = in_format, out_format
+        self.only_first, self.only_original = only_first, only_original
+
+        if self.img_o.max() > 1.0:
+            self.img_o = self.img_o.astype(np.float32) / 255.0
+            self.img_p = self.img_p.astype(np.float32) / 255.0
+
+        N, T = self.img_o.shape[:2]
+        self.idx2ep = [
+            (n, t, pert)
+            for n in range(N)
+            for t in ([0] if only_first else range(T))
+            for pert in ([False] if only_original else [False, True])
+        ]
+
     def __len__(self):
         return len(self.idx2ep)
-    
+
     def __getitem__(self, idx):
-        # open per worker (lazy)
-        if not hasattr(self, "_h5"):
-            self._h5 = h5py.File(self.h5_path, "r")
+        n, t, is_pert = self.idx2ep[idx]
+        img = self.img_p[n, t] if is_pert else self.img_o[n, t]
+        img = _transpose_array(img, self.in_format, self.out_format)
+        return torch.from_numpy(img).float()
 
-        ep, seq, t, is_perturbation = self.idx2ep[idx]
-        grp = self._h5[str(ep)]
-
-        if is_perturbation:
-            img = grp["perturbed"][seq][t]
-        else:
-            img = grp["obs"][seq][t]
-
-        # optional transpose
-        if self.hdf5_format == "HWC" and self.output_format == "CHW":
-            img = np.transpose(img, (2, 0, 1))
-        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
-            img = np.transpose(img, (1, 2, 0))
-
-        # convert to torch
-        img = torch.from_numpy(img).float()
-
-        return img
-    
 
 class PerturbedImageSequenceDataset(data.Dataset):
-    def __init__(self, h5_path, hdf5_format="HWC", output_format="CHW"):
+    def __init__(self, npz_path, in_format="HWC", out_format="CHW"):
         """
-        Streaming dataset over a single .h5 file.
-        Assumes structure:
-           /<episode_idx>/
-               obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
-               perturbed      same shape
-               magnitudes     shape: (P,)
-               indices        shape: (P,)
-               properties     shape: (P,)
-        Returns whole time series for each observation/perturbation-pair.
+        Loads full observation/perturbation sequences:
+            img_o, img_p: (N, T, H, W, C)
+            magnitudes, indices, properties: (N,)
         """
-        self.h5_path = h5_path
-        self.hdf5_format = hdf5_format
-        self.output_format = output_format
+        data = np.load(npz_path)
+        self.img_o = data["img_o"]
+        self.img_p = data["img_p"]
+        self.mags = data["magnitudes"]
+        self.inds = data["indices"]
+        self.props = data["properties"]
+        self.in_format, self.out_format = in_format, out_format
 
-        # Read once to build idx mapping
-        with h5py.File(self.h5_path, "r") as f:
-            self.episodes = sorted(int(k) for k in f.keys())
-            # assume every episode has same T
-            first = f[str(self.episodes[0])]["obs"]
-            num_pairs = first.shape[0]
-
-        # Build (episode, step) lookup
-        self.idx2ep = []
-        for ep in self.episodes:
-            for p in range(num_pairs):
-                self.idx2ep.append((ep, p))
+        if self.img_o.max() > 1.0:
+            self.img_o = self.img_o.astype(np.float32) / 255.0
+            self.img_p = self.img_p.astype(np.float32) / 255.0
 
     def __len__(self):
-        return len(self.idx2ep)
+        return self.img_o.shape[0]
 
     def __getitem__(self, idx):
-        # open per worker (lazy)
-        if not hasattr(self, "_h5"):
-            self._h5 = h5py.File(self.h5_path, "r")
-
-        ep, p = self.idx2ep[idx]
-        grp = self._h5[str(ep)]
-
-        # Load on‐demand
-        orig = grp["obs"][p]         # (T,H,W,C) or (T,C,H,W)
-        pert = grp["perturbed"][p]
-        mags = grp["magnitudes"][p]
-        inds = grp["indices"][p]
-        props = grp["properties"][p]
-
-        # optional transpose
-        if self.hdf5_format == "HWC" and self.output_format == "CHW":
-            # orig: (T,H,W,C) -> (T,C,H,W)
-            orig = np.transpose(orig, (0,3,1,2))
-            pert = np.transpose(pert, (0,3,1,2))
-        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
-            orig = np.transpose(orig, (0,2,3,1))
-            pert = np.transpose(pert, (0,2,3,1))
-
-        # convert to torch
-        orig = torch.from_numpy(orig).float()
-        pert = torch.from_numpy(pert).float()
-        mags = torch.tensor(mags, dtype=torch.float32)
-        inds = torch.tensor(inds, dtype=torch.int8)
-        props = torch.tensor(props, dtype=torch.int8)
-
-        return orig, pert, mags, inds, props
-
-    def __del__(self):
-        # ensure file closes on worker shutdown
-        if hasattr(self, "_h5"):
-            try:
-                self._h5.close()
-            except:
-                pass
+        orig = _transpose_array(self.img_o[idx], self.in_format, self.out_format)
+        pert = _transpose_array(self.img_p[idx], self.in_format, self.out_format)
+        return (
+            torch.from_numpy(orig).float(),
+            torch.from_numpy(pert).float(),
+            torch.tensor(self.mags[idx], dtype=torch.float32),
+            torch.tensor(self.inds[idx], dtype=torch.int8),
+            torch.tensor(self.props[idx], dtype=torch.int8),
+        )
 
 
 class ImageSequencePairDataset(data.Dataset):
     """
-    Streaming dataset over a single .h5 file that returns *pairs* of consecutive
-    observations from each sequence.
-
-    For a sequence of length T=4, this yields pairs (1,2), (2,3), (3,4).
-    Each pair corresponds to the original (non-perturbed) observations.
-
-    Structure assumed in HDF5:
-       /<episode_idx>/
-           obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
-           perturbed      same shape (ignored here)
-           magnitudes     shape: (P,)
-           indices        shape: (P,)
-           properties     shape: (P,)
+    Returns consecutive frame pairs (t, t+1) from the 'img_o' sequences.
     """
-
-    def __init__(self, h5_path, hdf5_format="HWC", output_format="CHW"):
-        self.h5_path = h5_path
-        self.hdf5_format = hdf5_format
-        self.output_format = output_format
-
-        # Read once to determine sequence length (T) and counts
-        with h5py.File(self.h5_path, "r") as f:
-            self.episodes = sorted(int(k) for k in f.keys())
-            first_obs = f[str(self.episodes[0])]["obs"]
-            num_pairs = first_obs.shape[0]
-            self.seq_len = first_obs.shape[1]  # T
-
-        # Build index map: (episode, pair_index, t)
-        # For each sequence of T timesteps, there are (T-1) pairs
-        self.idx2pair = []
-        for ep in self.episodes:
-            for p in range(num_pairs):
-                for t in range(self.seq_len - 1):
-                    self.idx2pair.append((ep, p, t))
+    def __init__(self, npz_path, in_format="HWC", out_format="CHW"):
+        data = np.load(npz_path)
+        self.img_o = data["img_o"]
+        self.in_format, self.out_format = in_format, out_format
+        N, T = self.img_o.shape[:2]
+        self.idx2pair = [(n, t) for n in range(N) for t in range(T - 1)]
 
     def __len__(self):
         return len(self.idx2pair)
 
     def __getitem__(self, idx):
-        if not hasattr(self, "_h5"):
-            self._h5 = h5py.File(self.h5_path, "r")
-
-        ep, p, t = self.idx2pair[idx]
-        grp = self._h5[str(ep)]
-
-        # Load only the two consecutive frames
-        orig = grp["obs"][p, t:t+2]  # shape: (2, H, W, C) or (2, C, H, W)
-
-        # optional transpose
-        if self.hdf5_format == "HWC" and self.output_format == "CHW":
-            orig = np.transpose(orig, (0, 3, 1, 2))
-        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
-            orig = np.transpose(orig, (0, 2, 3, 1))
-
-        orig = torch.from_numpy(orig).float()  # shape [2, C, H, W]
-
-        return orig  # (two-frame pair)
-
+        n, t = self.idx2pair[idx]
+        pair = self.img_o[n, t:t + 2]
+        pair = _transpose_array(pair, self.in_format, self.out_format)
+        return torch.from_numpy(pair).float()
 
 
 class SlotDataset(data.Dataset):
@@ -752,6 +699,7 @@ class PerturbedSlotSequenceDataset(data.Dataset):
             else:
                 self.feature_mean = feature_mean
                 self.feature_std = feature_std
+
             self.original = self._normalize_tensor(self.original)
             self.perturbed = self._normalize_tensor(self.perturbed)
 
@@ -790,6 +738,8 @@ class PerturbedSlotSequenceDataset(data.Dataset):
             return mean, std
 
     def _normalize_tensor(self, x):
+        self.feature_mean = self.feature_mean.to(x.device)
+        self.feature_std = self.feature_std.to(x.device)
         return (x - self.feature_mean) / self.feature_std
 
     def __len__(self):
@@ -801,3 +751,211 @@ class PerturbedSlotSequenceDataset(data.Dataset):
                 self.magnitude[idx],
                 self.obj_index[idx],
                 self.prop_index[idx])
+    
+
+
+
+
+
+
+
+class ImageDatasetLegacy(data.Dataset):
+    def __init__(self, hdf5_file, hdf5_format='HWC', output_format='CHW', only_first=False, only_original=False):
+        """
+        Streaming dataset over a single .h5 file.
+        Assumes structure:
+              /<episode_idx>/
+                obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
+                perturbed      same shape
+        Returns individual images of shape (C,H,W) or (H,W,C). 
+        If only_first is True, returns only the first image of each episode.
+        If only_original is True, returns only the original images.
+        """
+        self.h5_path = hdf5_file
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
+        self.only_first = only_first
+        self.only_original = only_original
+
+        with h5py.File(self.h5_path, "r") as f:
+            self.episodes = sorted(int(k) for k in f.keys())
+            # assume every episode has same T
+            first = f[str(self.episodes[0])]["obs"]
+            self.num_seq = first.shape[0]
+            self.seq_len = first.shape[1]
+            
+        self.idx2ep = []
+        for ep in self.episodes:
+            for seq in range(self.num_seq):
+                if self.only_first:
+                    self.idx2ep.append((ep, seq, 0, False))
+                    if not self.only_original:
+                        self.idx2ep.append((ep, seq, 0, True))
+                else:
+                    for t in range(self.seq_len):
+                        self.idx2ep.append((ep, seq, t, False))
+                        if not self.only_original:
+                            self.idx2ep.append((ep, seq, t, True))
+    
+    def __len__(self):
+        return len(self.idx2ep)
+    
+    def __getitem__(self, idx):
+        # open per worker (lazy)
+        if not hasattr(self, "_h5"):
+            self._h5 = h5py.File(self.h5_path, "r")
+
+        ep, seq, t, is_perturbation = self.idx2ep[idx]
+        grp = self._h5[str(ep)]
+
+        if is_perturbation:
+            img = grp["perturbed"][seq][t]
+        else:
+            img = grp["obs"][seq][t]
+
+        # optional transpose
+        if self.hdf5_format == "HWC" and self.output_format == "CHW":
+            img = np.transpose(img, (2, 0, 1))
+        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
+            img = np.transpose(img, (1, 2, 0))
+
+        # convert to torch
+        img = torch.from_numpy(img).float()
+
+        return img
+    
+
+class PerturbedImageSequenceDatasetLegacy(data.Dataset):
+    def __init__(self, h5_path, hdf5_format="HWC", output_format="CHW"):
+        """
+        Streaming dataset over a single .h5 file.
+        Assumes structure:
+           /<episode_idx>/
+               obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
+               perturbed      same shape
+               magnitudes     shape: (P,)
+               indices        shape: (P,)
+               properties     shape: (P,)
+        Returns whole time series for each observation/perturbation-pair.
+        """
+        self.h5_path = h5_path
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
+
+        # Read once to build idx mapping
+        with h5py.File(self.h5_path, "r") as f:
+            self.episodes = sorted(int(k) for k in f.keys())
+            # assume every episode has same T
+            first = f[str(self.episodes[0])]["obs"]
+            num_pairs = first.shape[0]
+
+        # Build (episode, step) lookup
+        self.idx2ep = []
+        for ep in self.episodes:
+            for p in range(num_pairs):
+                self.idx2ep.append((ep, p))
+
+    def __len__(self):
+        return len(self.idx2ep)
+
+    def __getitem__(self, idx):
+        # open per worker (lazy)
+        if not hasattr(self, "_h5"):
+            self._h5 = h5py.File(self.h5_path, "r")
+
+        ep, p = self.idx2ep[idx]
+        grp = self._h5[str(ep)]
+
+        # Load on‐demand
+        orig = grp["obs"][p]         # (T,H,W,C) or (T,C,H,W)
+        pert = grp["perturbed"][p]
+        mags = grp["magnitudes"][p]
+        inds = grp["indices"][p]
+        props = grp["properties"][p]
+
+        # optional transpose
+        if self.hdf5_format == "HWC" and self.output_format == "CHW":
+            # orig: (T,H,W,C) -> (T,C,H,W)
+            orig = np.transpose(orig, (0,3,1,2))
+            pert = np.transpose(pert, (0,3,1,2))
+        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
+            orig = np.transpose(orig, (0,2,3,1))
+            pert = np.transpose(pert, (0,2,3,1))
+
+        # convert to torch
+        orig = torch.from_numpy(orig).float()
+        pert = torch.from_numpy(pert).float()
+        mags = torch.tensor(mags, dtype=torch.float32)
+        inds = torch.tensor(inds, dtype=torch.int8)
+        props = torch.tensor(props, dtype=torch.int8)
+
+        return orig, pert, mags, inds, props
+
+    def __del__(self):
+        # ensure file closes on worker shutdown
+        if hasattr(self, "_h5"):
+            try:
+                self._h5.close()
+            except:
+                pass
+
+
+class ImageSequencePairDatasetLegacy(data.Dataset):
+    """
+    Streaming dataset over a single .h5 file that returns *pairs* of consecutive
+    observations from each sequence.
+
+    For a sequence of length T=4, this yields pairs (1,2), (2,3), (3,4).
+    Each pair corresponds to the original (non-perturbed) observations.
+
+    Structure assumed in HDF5:
+       /<episode_idx>/
+           obs            shape: (P, T, H, W, C) or (P, T, C, H, W)
+           perturbed      same shape (ignored here)
+           magnitudes     shape: (P,)
+           indices        shape: (P,)
+           properties     shape: (P,)
+    """
+
+    def __init__(self, h5_path, hdf5_format="HWC", output_format="CHW"):
+        self.h5_path = h5_path
+        self.hdf5_format = hdf5_format
+        self.output_format = output_format
+
+        # Read once to determine sequence length (T) and counts
+        with h5py.File(self.h5_path, "r") as f:
+            self.episodes = sorted(int(k) for k in f.keys())
+            first_obs = f[str(self.episodes[0])]["obs"]
+            num_pairs = first_obs.shape[0]
+            self.seq_len = first_obs.shape[1]  # T
+
+        # Build index map: (episode, pair_index, t)
+        # For each sequence of T timesteps, there are (T-1) pairs
+        self.idx2pair = []
+        for ep in self.episodes:
+            for p in range(num_pairs):
+                for t in range(self.seq_len - 1):
+                    self.idx2pair.append((ep, p, t))
+
+    def __len__(self):
+        return len(self.idx2pair)
+
+    def __getitem__(self, idx):
+        if not hasattr(self, "_h5"):
+            self._h5 = h5py.File(self.h5_path, "r")
+
+        ep, p, t = self.idx2pair[idx]
+        grp = self._h5[str(ep)]
+
+        # Load only the two consecutive frames
+        orig = grp["obs"][p, t:t+2]  # shape: (2, H, W, C) or (2, C, H, W)
+
+        # optional transpose
+        if self.hdf5_format == "HWC" and self.output_format == "CHW":
+            orig = np.transpose(orig, (0, 3, 1, 2))
+        elif self.hdf5_format == "CHW" and self.output_format == "HWC":
+            orig = np.transpose(orig, (0, 2, 3, 1))
+
+        orig = torch.from_numpy(orig).float()  # shape [2, C, H, W]
+
+        return orig  # (two-frame pair)
