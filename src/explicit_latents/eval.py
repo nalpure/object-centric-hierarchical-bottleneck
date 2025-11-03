@@ -12,7 +12,7 @@ from src.utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_conf
 
 PERTURBATION_MAGNITUDES = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 NUM_RANDOM_SAMPLES = 20
-NUM_WORST_SAMPLES = 2
+NUM_WORST_SAMPLES = 10
 OUTPUT_DIR = "data/figures/"
 
 
@@ -59,7 +59,7 @@ model_explicit.eval()
 model_explicit.load_state_dict(torch.load(ckpt_path_disentangle, weights_only=True)['model_state_dict'], strict=True)
 
 print(f"Loading observation test dataset: {config_SA['test_path']}")
-test_dataset = ImageDataset(hdf5_file=config_SA["test_path"], hdf5_format=config_SA["hdf5_format"])
+test_dataset = ImageDataset(config_SA["test_path"], config_SA["in_format"])
 test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=True, generator=generator, drop_last=False)
 print(f"Number of test samples: {len(test_dataloader) * config_SA['batch_size']}")   
 

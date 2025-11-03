@@ -3,12 +3,13 @@ import random
 import numpy as np
 from torch.utils import data
 import torch
-from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
 from src.utils import ImageDataset, load_config, get_config_argument, plot_images, set_seed, DEVICE, IMG_CHANNELS
 import matplotlib.pyplot as plt
 
 
-NUM_OUTPUT_FIGS = 60
+RANDOM_SAMPLES = 5
+WORST_SAMPLES = 0
 OUTPUT_DIR = "data/figures/"
 
 
@@ -44,26 +45,27 @@ def main():
         raise KeyError(f"Unexpected keys: {unexpected_keys}")
     
     print(f"Loading observation test dataset: {config['test_path']}")
-    test_dataset = ImageDataset(hdf5_file=config["test_path"], hdf5_format=config["hdf5_format"])
+    test_dataset = ImageDataset(config["test_path"], config["in_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=config['batch_size'])
     print(f"Finished loading {len(test_dataset)} samples.")
 
     all_outputs = []
 
     with torch.no_grad():
-        for batch in test_dataloader:
+        for batch_idx, batch in enumerate(test_dataloader):
             obs = batch.to(DEVICE)
-            recon_combined, recons, masks, _ = model(obs)
+            slots, attn = model.encode(obs)
+            slots, attn = order_slots(slots, attn)
+            recon_combined, recons, masks = model.decode(slots)
             for i in range(len(obs)):
                 loss = criterion(obs[i], recon_combined[i]).item()
-                all_outputs.append((loss, obs[i].cpu(), recon_combined[i].cpu(), masks[i].cpu(), recons[i].cpu()))
+                if WORST_SAMPLES > 0 or batch_idx == 0:
+                    all_outputs.append((loss, obs[i].cpu(), recon_combined[i].cpu(), masks[i].cpu(), recons[i].cpu()))
 
     # Sort by loss
     all_outputs.sort(key=lambda x: x[0])
-    num_categories = 2  # random and worst
-    figs_per_category = NUM_OUTPUT_FIGS // num_categories
-    worst_samples = all_outputs[- figs_per_category :]
-    random_samples = random.sample(all_outputs, figs_per_category + NUM_OUTPUT_FIGS % num_categories)
+    worst_samples = all_outputs[-WORST_SAMPLES:] if WORST_SAMPLES > 0 else []
+    random_samples = random.sample(all_outputs, RANDOM_SAMPLES)
 
     # Combine and label
     categories = [('random', random_samples), ('worst', worst_samples)]

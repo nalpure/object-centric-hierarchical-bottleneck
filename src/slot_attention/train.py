@@ -25,7 +25,7 @@ def main():
     set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = ImageDataset(hdf5_file=config["train_path"], hdf5_format=config["hdf5_format"], only_first=ONLY_FIRST, only_original=ONLY_ORIGINAL)
+    dataset = ImageDataset(config["train_path"], config["in_format"], only_first=ONLY_FIRST, only_original=ONLY_ORIGINAL)
     train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=config["num_workers"])
     batch_size = config['batch_size']
     num_batches = len(train_dataloader)
@@ -82,7 +82,7 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
             context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
             
             with context_manager:
-                recon_combined, _, _, _, _ = model(obs)
+                recon_combined, _, _, _ = model(obs)
                 loss = criterion(recon_combined, obs) 
                 epoch_loss += loss.item()
                 batch_loss += loss
@@ -141,7 +141,10 @@ def initialize_model(args):
     ).to(DEVICE)
 
     if args["init_ckpt"] is not None:
-        ckpt = f"{args['init_ckpt']}.ckpt"
+        ckpt = str(args["init_ckpt"]).strip()
+        if not ckpt.endswith('.ckpt'):
+            ckpt = ckpt + '.ckpt'
+        
         print(f"Loading model weights from {ckpt}")
         checkpoint = torch.load(ckpt, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)

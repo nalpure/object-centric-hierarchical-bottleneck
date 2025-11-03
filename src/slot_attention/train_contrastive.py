@@ -24,7 +24,7 @@ def main():
     set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = ImageSequencePairDataset(h5_path=config["train_path"], hdf5_format=config["hdf5_format"])
+    dataset = ImageSequencePairDataset(h5_path=config["train_path"], in_format=config["hdf5_format"])
     train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=config["num_workers"])
     batch_size = config['batch_size']
     num_batches = len(train_dataloader)
@@ -236,7 +236,7 @@ def initialize_model(args):
     return model, optimizer
 
 
-def inter_slot_slot_loss(slots_t0, slots_t1, tau=0.075, margin=0.5, symmetric=True, criterion=torch.nn.CrossEntropyLoss()):
+def inter_slot_slot_loss(slots_t0, slots_t1, tau=0.075, margin=0.0, symmetric=True, criterion=torch.nn.CrossEntropyLoss()):
     """
     Inter-video slot-slot contrastive loss as defined in
     'Temporally Consistent Object-Centric Learning by Contrasting Slots'.
