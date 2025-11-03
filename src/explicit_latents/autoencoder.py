@@ -29,7 +29,6 @@ class ObjectEncoder(nn.Module):
         x = self.fc4(x)
         x = F.relu(x)
         x = self.fc5(x)
-        x = x.squeeze(-1) 
         return x
     
 

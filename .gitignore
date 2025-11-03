@@ -2,6 +2,7 @@
 */__pycache__
 /env
 */checkpoints
+configs
 checkpoints
 tb_logs
 *.pyc
@@ -10,3 +11,4 @@ settings.json
 *.log
 *.out
 *.sh
+.github/*
