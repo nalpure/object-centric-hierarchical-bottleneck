@@ -60,17 +60,23 @@ def main():
 
                 prev_slots_orig = None
                 prev_attn_orig = None
-                prev_slots_pert = None
-                prev_attn_pert = None
 
                 for t in range(T):
                     slots_orig, attn_orig = model.encode(orig_seq[:, t], slots_init=prev_slots_orig)
-                    slots_pert, attn_pert = model.encode(pert_seq[:, t], slots_init=prev_slots_pert)
                     slots_orig, attn_orig = order_slots(slots_orig, attn_orig, prev_slots_orig, prev_attn_orig)
+
+                    if t == 0:
+                        # Make sure both sequences start with the same slot order
+                        prev_slots_pert = slots_orig
+                        prev_attn_pert = attn_orig
+                    
+                    slots_pert, attn_pert = model.encode(pert_seq[:, t], slots_init=prev_slots_pert)
                     slots_pert, attn_pert = order_slots(slots_pert, attn_pert, prev_slots_pert, prev_attn_pert)
+
                     active_slots_orig[:, t, :, :] = slots_orig[:, 1:, :]
                     active_slots_pert[:, t, :, :] = slots_pert[:, 1:, :]
                     bg_slot_orig[:, t, :, :] = slots_orig[:, :1, :]
+
                     prev_slots_orig = slots_orig
                     prev_attn_orig = attn_orig
                     prev_slots_pert = slots_pert
