@@ -11,6 +11,8 @@ class EdgeEncoder(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
             nn.Linear(64, output_dim)
         )
 
@@ -26,6 +28,8 @@ class NodeEncoder(nn.Module):
         # e.g. 12+64 -> 64 -> 32 -> 2
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
             nn.ReLU(),
             nn.Linear(64, 32),
             nn.ReLU(),
@@ -43,9 +47,11 @@ class LatentEdgeEncoder(nn.Module):
         super().__init__()
         # e.g. 2*5->32->32
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 32),
+            nn.Linear(input_dim, 64),
             nn.ReLU(),
-            nn.Linear(32, output_dim)
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim)
         )
 
     def forward(self, source, neighbor):
@@ -61,6 +67,8 @@ class LatentNodeTransition(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
             nn.Linear(64, 32),
             nn.ReLU(),
             nn.Linear(32, output_dim)
@@ -75,7 +83,7 @@ class RelationalLatentDynamics(nn.Module):
     """
     Model for predicting future explicit latents by building an internal implicit latent representation.
     """
-    def __init__(self, explicit_dim, implicit_dim, seq_len, hidden_dim=64, hidden_dim_latent=32, attn_temperature=0.5):
+    def __init__(self, explicit_dim, implicit_dim, seq_len, hidden_dim=64, hidden_dim_latent=64, attn_temperature=0.5):
         super().__init__()
         self.E = explicit_dim
         self.I = implicit_dim
@@ -200,11 +208,11 @@ class RelationalLatentDynamics(nn.Module):
         jj = jj[mask]
         P = ii.shape[0]  # O*(O-1)
 
-        # 2) gather latent pairs → [B, P, L]
+        # 2) gather latent pairs → [B, P, EI]
         src_pairs = z[:, ii, :]
         nbr_pairs = z[:, jj, :]
 
-        # 3) flatten → [B*P, L]
+        # 3) flatten → [B*P, EI]
         flat_src = src_pairs.reshape(B * P, EI)
         flat_nbr = nbr_pairs.reshape(B * P, EI)
 
@@ -221,10 +229,10 @@ class RelationalLatentDynamics(nn.Module):
         edge_agg = (edge_enc * attn.unsqueeze(-1)).sum(dim=2)
 
         # 7) prepare node inputs: flatten batch×object
-        flat_source = z.reshape(B * O, EI)               # [B*O, L]
+        flat_source = z.reshape(B * O, EI)               # [B*O, EI]
         flat_edges  = edge_agg.reshape(B * O, H_latent) # [B*O, H]
 
-        #8) one‐shot node transition → [B*O, L]
+        #8) one‐shot node transition → [B*O, EI]
         flat_delta_z = self.latent_node_transition(flat_source, flat_edges)
 
         # 9) predict next latent
