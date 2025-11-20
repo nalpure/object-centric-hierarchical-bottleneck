@@ -135,13 +135,14 @@ def main():
                     print(z_explicit_computed[i].cpu().numpy().shape, z_explicit_computed[i].cpu().numpy())
 
             slot_computed = slot_computed_norm * std_slots + mean_slots 
+            first_compute_idx = T_past * (1 - reconstruct)
+
             obs_computed, _ = decode_slots(
                 slot_computed, 
-                background_slots[:, T_past*reconstruct:T_past*reconstruct+T_future], 
+                background_slots[:, first_compute_idx:T_past + T_future], 
                 model_SA
             )
-
-            first_compute_idx = T_past * (1 - reconstruct)
+            
             obs_loss.append(criterion(obs_computed, obs[:, first_compute_idx:]).item())
             slot_loss.append(criterion(slot_computed_norm, active_slots_norm[:, first_compute_idx:]).item())
             latent_loss.append(criterion(z_explicit_computed, z_explicit[:, first_compute_idx:]).item())
@@ -167,7 +168,7 @@ def main():
 
                 save_path = OUTPUT_DIR + f"random_{i}.png"
                 row_titles = ["Observation", "SA Reconstruction", "Predicted"]
-                column_titles = [f"t={t}" for t in range((1-T_past)*reconstruct, T_future)]
+                column_titles = [f"t={t}" for t in range(1+(-T_past)*reconstruct, 1+T_future)]
 
                 plot_grid(rows, row_titles, column_titles, save_path)
 
