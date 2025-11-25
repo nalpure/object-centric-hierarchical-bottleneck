@@ -9,7 +9,7 @@ from torch.amp import GradScaler
 from torch.utils import data
 from torch.nn import MSELoss
 
-from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
+from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics, disentanglement_loss
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import CODE_TO_STRING, PerturbedSlotSequenceDataset, get_config_argument, get_lr_schedule, load_config, log_progress, reorder_perturbation_indices, set_seed, DEVICE
 
@@ -63,6 +63,7 @@ model_implicit = RelationalLatentDynamics(
     explicit_dim=config["explicit_dim"],
     implicit_dim=config["implicit_dim"],
     seq_len=T_past,
+
 ).to(DEVICE)
 
 if config["init_ckpt"] is not None:
@@ -120,7 +121,7 @@ start = datetime.now()
 print("Training started at", start.ctime())
 
 disentangle = config["disentanglement_loss_weight"] > 0.0
-reconstruct = config["reconstruction_loss_weight"] > 0.0
+reconstruct = True #config["reconstruction_loss_weight"] > 0.0
 T_future = T_future if config["prediction_loss_weight"] > 0.0 else 0
 predict = T_future > 0
 
@@ -147,22 +148,21 @@ for epoch in range(1, config["num_epochs"] + 1):
             pert_seq_past = pert_seq_past + torch.randn_like(pert_seq_past) * noise
         
         # Encode to explicit latents
-        orig_seq_past_flat = orig_seq_past.reshape(B*T_past*O, S)
-        pert_seq_past_flat = pert_seq_past.reshape(B*T_past*O, S)
+        seq_past_flat = torch.cat([orig_seq_past, pert_seq_past], dim=0).reshape(2*B*T_past*O, S)
 
-        z_expl_orig_past = model_AE.encode(orig_seq_past_flat).reshape(B, T_past, O, -1)
-        z_expl_pert_past = model_AE.encode(pert_seq_past_flat).reshape(B, T_past, O, -1)
-
+        z_expl_past = model_AE.encode(seq_past_flat).reshape(2*B, T_past, O, -1)
+        
         # Predict future explicit latents with implicit dynamics model
-        z_expl_orig_computed, z_first_orig = model_implicit(z_expl_orig_past, T_future, reconstruct=reconstruct)
-        z_expl_pert_computed, z_first_pert = model_implicit(z_expl_pert_past, T_future, reconstruct=reconstruct)
+        z_expl_computed, z = model_implicit(z_expl_past, T_future, reconstruct=reconstruct)
+        z_orig = z[:B]
+        z_pert = z[B:]
 
         # Decode explicit latents back to slots
-        z_expl_orig_computed_flat = z_expl_orig_computed.reshape(B*T_out*O, -1)
-        z_expl_pert_computed_flat = z_expl_pert_computed.reshape(B*T_out*O, -1)
+        z_expl_computed_flat = z_expl_computed.reshape(2*B*T_out*O, -1)
 
-        orig_seq_computed = model_AE.decode(z_expl_orig_computed_flat).reshape(B, T_out, O, S)
-        pert_seq_computed = model_AE.decode(z_expl_pert_computed_flat).reshape(B, T_out, O, S)
+        seq_computed = model_AE.decode(z_expl_computed_flat).reshape(2, B, T_out, O, S)
+        orig_seq_computed = seq_computed[0]
+        pert_seq_computed = seq_computed[1]
 
         if reconstruct:
             orig_seq_recon = orig_seq_computed[:, :T_past, :, :]
@@ -171,8 +171,7 @@ for epoch in range(1, config["num_epochs"] + 1):
             recon_loss *= config["reconstruction_loss_weight"] / 2.0
             batch_loss += recon_loss
             reconstruction_epoch_loss += recon_loss.item()
-
-            
+ 
         if predict:
             orig_seq_pred = orig_seq_computed[:, T_past*reconstruct:T_out, :, :]
             pert_seq_pred = pert_seq_computed[:, T_past*reconstruct:T_out, :, :]
@@ -181,9 +180,11 @@ for epoch in range(1, config["num_epochs"] + 1):
             batch_loss += pred_loss
             prediction_epoch_loss += pred_loss.item()
         
-
         if disentangle:
-            raise NotImplementedError("Disentanglement loss not implemented for implicit latents.")
+            disentangle_loss = disentanglement_loss(z_orig, z_pert, prop_index, magnitude)
+            disentangle_loss *= config["disentanglement_loss_weight"]
+            batch_loss += disentangle_loss
+            disentanglement_epoch_loss += disentangle_loss.item()
 
         # Backpropagation and optimization step
         optimizer.zero_grad()
