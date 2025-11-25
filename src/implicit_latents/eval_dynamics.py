@@ -10,11 +10,13 @@ from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, identify_ba
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import IMG_CHANNELS, PerturbedImageSequenceDataset, create_trail, get_config_argument, load_config, plot_grid, plot_images, reorder_perturbation_indices, set_seed, DEVICE
 
-NUM_OUTPUT_FIGS = 5
+NUM_OUTPUT_FIGS = 10
 OUTPUT_DIR = "data/figures/"
 
-
 def main():
+    T_past = 4 # TODO: config
+    T_future = 4
+
     config_name = get_config_argument()
     config = load_config(config_name)
     config_SA = config["slot_attention"]
@@ -27,9 +29,6 @@ def main():
     print(f"Loading observation test dataset: {config_SA['test_path']}")
     test_dataset = PerturbedImageSequenceDataset(config_SA["test_path"], config_SA["in_format"])
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=False, drop_last=True)
-    
-    T_past = 4 # TODO: config
-    T_future = 4
 
     print("Loading model:", ckpt_path_SA)
     model_SA = SlotAttentionAutoEncoder(
@@ -74,15 +73,19 @@ def main():
         mean_slots = 0.0
         std_slots = 1.0
 
-    obs_loss = []
-    slot_loss = []
-    latent_loss = []
     criterion = torch.nn.MSELoss(reduction='mean')
-
     reconstruct = config_explicit["reconstruction_loss_weight"] > 0
     predict = config_explicit["prediction_loss_weight"] > 0
     T_future = T_future if predict else 0
-    T_out = T_past * reconstruct + T_future
+
+    obs_loss_pred = []
+    slot_loss_pred = []
+    latent_loss_pred = []
+    
+    if reconstruct:
+        obs_loss_recon = []
+        slot_loss_recon = []
+        latent_loss_recon = []
 
     for batch_idx, batch in enumerate(test_dataloader):
         with torch.no_grad():
@@ -91,7 +94,7 @@ def main():
             pert = pert[:, :T_past + T_future]
             prop_index = reorder_perturbation_indices(prop_index)
 
-            # ----- SLOT ATTENTION ENCODING / DECODING ------
+            # ----- SLOT ATTENTION + EXPLICIT LATENT ENCODING / DECODING ------
             # obs -> slots
             active_slots, background_slots, active_slots_pert, background_slots_pert = encode_obs(obs, pert, model_SA)
             B, T, O, _ = active_slots.shape
@@ -99,19 +102,20 @@ def main():
             active_slots_norm = (active_slots - mean_slots) / std_slots
             active_slots_pert_norm = (active_slots_pert - mean_slots) / std_slots
 
-            # slots -> obs
-            obs_SA, _ = decode_slots(active_slots, background_slots, model_SA)
-
-            # ----- EXPLICIT / IMPLICIT LATENT DYNAMICS ------
             # slots -> explicit
             z_explicit = encode_slots(active_slots_norm, model_explicit)
-            H_latent = z_explicit.shape[3]
+            z_explicit_pert = encode_slots(active_slots_pert_norm, model_explicit)
 
-            # explicit -> slots -> obs
-            slot_recon_norm = decode_explicit_latents(z_explicit, model_explicit)
-            slot_recon = slot_recon_norm * std_slots + mean_slots
-            obs_recon, _ = decode_slots(slot_recon, background_slots, model_SA)
+            # slots -> obs
+            slot_explicit_norm = decode_explicit_latents(z_explicit, model_explicit)
+            slot_explicit = slot_explicit_norm * std_slots + mean_slots
+            obs_explicit, _ = decode_slots(
+                slot_explicit, 
+                background_slots[:, :T_past + T_future], 
+                model_SA
+            )
 
+            # ----- EXPLICIT / IMPLICIT LATENT DYNAMICS ------
             # explicit (past) -> implicit -> explicit (past and/or future)
             z_explicit_computed, z_orig = model_implicit(
                 z_explicit[:, :T_past, :, :], 
@@ -121,61 +125,81 @@ def main():
 
             if reconstruct:
                 _, z_pert = model_implicit(
-                    z_explicit[:, :T_past, :, :],
+                    z_explicit_pert[:, :T_past, :, :],
                     t_future=0,
                     reconstruct=reconstruct
                 )
 
-            # explicit (future) -> slot (future) -> obs (future)
-            slot_computed_norm = decode_explicit_latents(z_explicit_computed, model_explicit)
-
-            if batch_idx == 0:
-                for i in range(min(1, B)):
-                    print(f"Predicted explicit latents for sample {i}:")
-                    print(z_explicit_computed[i].cpu().numpy().shape, z_explicit_computed[i].cpu().numpy())
-
-            slot_computed = slot_computed_norm * std_slots + mean_slots 
+            # explicit -> slot -> obs
+            slot_implicit_norm = decode_explicit_latents(z_explicit_computed, model_explicit)
+            slot_implicit = slot_implicit_norm * std_slots + mean_slots 
             first_compute_idx = T_past * (1 - reconstruct)
 
-            obs_computed, _ = decode_slots(
-                slot_computed, 
+            obs_implicit, _ = decode_slots(
+                slot_implicit, 
                 background_slots[:, first_compute_idx:T_past + T_future], 
                 model_SA
             )
-            
-            obs_loss.append(criterion(obs_computed, obs[:, first_compute_idx:]).item())
-            slot_loss.append(criterion(slot_computed_norm, active_slots_norm[:, first_compute_idx:]).item())
-            latent_loss.append(criterion(z_explicit_computed, z_explicit[:, first_compute_idx:]).item())
 
-            if batch_idx == 0 and reconstruct:
-                for i in range(min(5, B)):
-                    print(f"Perturbed ob {obj_index[i]}, index {prop_index[i]}, magnitude {magnitude[i].item():.3f}:")
-                    print(z_orig[i].cpu().numpy(), " (original)")
-                    print(z_pert[i].cpu().numpy(), " (perturbed)")
-                    print((z_pert[i] - z_orig[i]).cpu().numpy(), " (difference)")
+            # ----- LOSSES -----
+            if reconstruct:
+                obs_loss_recon.append(criterion(obs_implicit[:, :T_past], obs[:, :T_past]).item())
+                slot_loss_recon.append(criterion(slot_implicit_norm[:, :T_past], active_slots_norm[:, :T_past]).item())
+                latent_loss_recon.append(criterion(z_explicit_computed[:, :T_past], z_explicit[:, :T_past]).item())
+            
+            obs_loss_pred.append(criterion(obs_implicit[:, -T_future:], obs[:, T_past:]).item())
+            slot_loss_pred.append(criterion(slot_implicit_norm[:, -T_future:], active_slots_norm[:, T_past:]).item())
+            latent_loss_pred.append(criterion(z_explicit_computed[:, -T_future:], z_explicit[:, T_past:]).item())
+
+
+            # ----- DEBUG PRINTS -----
+            if batch_idx == 0:
+                if reconstruct:
+                    for i in range(min(5, B)):
+                        print(f"Perturbed an object at index {prop_index[i]} by magnitude {magnitude[i].item():.3f}:")
+                        print(z_orig[i].cpu().numpy(), " (original)")
+                        print(z_pert[i].cpu().numpy(), " (perturbed)")
+                        print((z_pert[i] - z_orig[i]).cpu().numpy(), " (difference)")
                     delta = torch.zeros_like(z_orig[i])
                     delta[obj_index[i], prop_index[i]] = magnitude[i]
                     print("loss: ", criterion(z_pert[i] - z_orig[i, :], delta).item())
                     print("\n-----\n")
 
+                print(f"Reconstructed and predicted explicit latents for first sample:")
+                print(z_explicit_computed[0].cpu().numpy().shape)
+                print(z_explicit_computed[0].cpu().numpy())
+                print()
+                print("Original explicit latents (first sample):")
+                print(z_explicit[0, first_compute_idx:].cpu().numpy())
+                print("Reconstructed explicit latents (first sample):")
+                print(z_explicit_computed[0].cpu().numpy())
+
+
         # ----- PLOTTING -----
         if batch_idx == 0:
             for i in range(min(NUM_OUTPUT_FIGS, obs.shape[0])):
-                first_row = obs[i, first_compute_idx:].cpu()
-                second_row = obs_SA[i, first_compute_idx:].cpu()
-                third_row = obs_computed[i].cpu()
-                rows = [first_row, second_row, third_row]
+                obs_row = obs[i, first_compute_idx:].cpu()
+                explicit_row = obs_explicit[i, first_compute_idx:].cpu()
+                implicit_row = obs_implicit[i].cpu()
+                rows = [obs_row, explicit_row, implicit_row]
 
                 save_path = OUTPUT_DIR + f"random_{i}.png"
-                row_titles = ["Observation", "SA Reconstruction", "Predicted"]
+                row_titles = ["Observation", "Explicit AE Reconstruction", "Implicit Dynamics Prediction"]
                 column_titles = [f"t={t}" for t in range(1+(-T_past)*reconstruct, 1+T_future)]
 
                 plot_grid(rows, row_titles, column_titles, save_path)
 
-    obs_loss = np.array(obs_loss)
-    print(f"Observation Loss: \t{obs_loss.mean():.6f} ± {obs_loss.std():.6f}")
-    print(f"Slot Loss: \t{np.array(slot_loss).mean():.6f} ± {np.array(slot_loss).std():.6f}")
-    print(f"Latent Loss: \t{np.array(latent_loss).mean():.6f} ± {np.array(latent_loss).std():.6f}")
+    # ----- FINAL RESULTS -----
+    if reconstruct:
+        print("\n=== Reconstruction Results ===")
+        print(f"Observation Loss: \t{np.array(obs_loss_recon).mean():.6f} ± {np.array(obs_loss_recon).std():.6f}")
+        print(f"Slot Loss: \t{np.array(slot_loss_recon).mean():.6f} ± {np.array(slot_loss_recon).std():.6f}")
+        print(f"Latent Loss: \t{np.array(latent_loss_recon).mean():.6f} ± {np.array(latent_loss_recon).std():.6f}")
+
+    print("\n=== Prediction Results ===")
+    print(f"Observation Loss: \t{np.array(obs_loss_pred).mean():.6f} ± {np.array(obs_loss_pred).std():.6f}")
+    print(f"Slot Loss: \t{np.array(slot_loss_pred).mean():.6f} ± {np.array(slot_loss_pred).std():.6f}")
+    print(f"Latent Loss: \t{np.array(latent_loss_pred).mean():.6f} ± {np.array(latent_loss_pred).std():.6f}")
     
 
 def encode_obs(obs, pert, model_SA: SlotAttentionAutoEncoder):
@@ -272,7 +296,7 @@ def decode_explicit_latents(z_explicit, model_explicit: ExplicitLatentAutoEncode
     - slots_recon (torch.Tensor): Reconstructed slots of shape [batch_size, seq_len, num_objects, slots_dim]    
     """
     batch_size, seq_len, num_objects, explicit_dim = z_explicit.shape
-    z_explicit = z_explicit.reshape(batch_size * seq_len, num_objects, explicit_dim)
+    z_explicit = z_explicit.reshape(batch_size * seq_len * num_objects, explicit_dim)
     slots_recon = model_explicit.decode(z_explicit)
     slots_recon = slots_recon.view(batch_size, seq_len, num_objects, model_explicit.slots_dim)
     return slots_recon    
