@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 from torch.optim.lr_scheduler import LambdaLR
 import matplotlib.pyplot as plt
+import imageio.v2 as imageio
 
 import torch
 from torch.utils import data
@@ -22,7 +23,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 IMG_CHANNELS = 3
 
 # Define the mappings between property names and numerical codes
-STRING_TO_CODE = {
+STRING_TO_CODE_LEGACY = {
     "pos_x": 0,
     "pos_y": 1,
     "vel_x": 2,
@@ -30,6 +31,15 @@ STRING_TO_CODE = {
     "hue": 4,
 }
 
+STRING_TO_CODE = {
+    "pos_x": 0,
+    "pos_y": 1,
+    "hue": 2,
+    "vel_x": 3,
+    "vel_y": 4,
+}
+
+CODE_TO_STRING_LEGACY = {v: k for k, v in STRING_TO_CODE_LEGACY.items()}
 CODE_TO_STRING = {v: k for k, v in STRING_TO_CODE.items()}
 
 DEFAULT_CONFIG = {
@@ -71,16 +81,23 @@ DEFAULT_CONFIG = {
         # Training parameters
         "batch_size": 128,
         "optimizer": "adam",
-        "mixed_precision": False,
         "num_epochs": 500,
         "learning_rate": 0.0004,
         "warmup_epochs": 0,
         "decay_epochs": 500,
         "decay_rate": 0.5,
         # Further model parameters
-        "latent_dim": 3,
+        "explicit_dim": 3,
+        "implicit_dim": 2,
         "normalize": True,
-        "noise": 0.0
+        "noise": 0.0,
+        "disentanglement_loss_weight": 0,
+        "prediction_loss_weight": 1,
+        "reconstruction_loss_weight": 0,
+        "freeze_ae": False,
+        "edge_dim": 64,
+        "latent_edge_dim": 64,
+        "log_note": ""
     },
     "implicit_latents": {
         # General parameters
@@ -100,7 +117,8 @@ DEFAULT_CONFIG = {
         "decay_rate": 0.5,
         # Further model parameters
         "latent_dim": 5,
-        "hidden_dim": 128,
+        "hidden_dim": 64,
+        "hidden_dim_latent": 32,
         "normalize": True,
         "noise": 0.0,
         "disentangle": False
@@ -149,6 +167,15 @@ def recursive_update(base_dict, override_dict):
             base_dict[key] = value
     return base_dict
 
+
+def reorder_perturbation_indices(indices):
+    """Reorder perturbation indices to match the new STRING_TO_CODE mapping."""
+    reordered_indices = []
+    for idx in indices:
+        prop_name = CODE_TO_STRING_LEGACY[idx.item()]
+        new_idx = STRING_TO_CODE[prop_name]
+        reordered_indices.append(new_idx)
+    return torch.tensor(reordered_indices, device=indices.device)
 
 def encode(string):
     """Encode a string into its corresponding numerical code."""
@@ -494,6 +521,43 @@ def create_trail(img_seq, highlight="last"):
 
     return final_img
 
+from PIL import Image
+
+def save_gif_from_array(frames, output_path="rollout.gif", fps=30, scale=4.0, loop=0):
+    """
+    Create a GIF directly from a list or NumPy array of RGB frames.
+    
+    Args:
+        frames: list or np.ndarray of shape [T, H, W, 3] (values in [0,1] or [0,255])
+        output_path: where to save the gif
+        fps: frames per second
+        scale: how much to enlarge frames (e.g. 2.0 = 2× bigger)
+        loop: 0 = infinite, N = loop N times
+    """
+    # Convert to uint8 if needed
+    frames = np.asarray(frames)
+    if frames.dtype != np.uint8:
+        frames = np.clip(frames * 255, 0, 255).astype(np.uint8)
+    
+    if frames.ndim != 4:
+        raise ValueError(f"Expected frames to have 4 dimensions [T, H, W, C], got {frames.shape}")
+    
+    if frames.shape[-1] > 10 and frames.shape[1] == 3:
+        frames = frames.transpose(0, 2, 3, 1)  # Convert from [T, C, H, W] to [T, H, W, C]
+
+    if scale != 1.0:
+        new_frames = []
+        for f in frames:
+            img = Image.fromarray(f)
+            new_size = (int(img.width * scale), int(img.height * scale))
+            img = img.resize(new_size, Image.Resampling.NEAREST)
+            new_frames.append(np.array(img))
+        frames = np.stack(new_frames)
+
+    imageio.mimsave(output_path, frames, duration=1/fps, loop=loop)
+    print(f"GIF saved to {output_path}")
+
+
 
 def _transpose_array(arr, in_fmt: str, out_fmt: str):
     """
@@ -602,6 +666,9 @@ class ImageSequencePairDataset(data.Dataset):
         self.in_format, self.out_format = in_format, out_format
         N, T = self.img_o.shape[:2]
         self.idx2pair = [(n, t) for n in range(N) for t in range(T - 1)]
+        
+        if self.img_o.max() > 1.0:
+            self.img_o = self.img_o.astype(np.float32) / 255.0
 
     def __len__(self):
         return len(self.idx2pair)
