@@ -629,17 +629,13 @@ class PerturbedImageSequenceDataset(data.Dataset):
             img_o, img_p: (N, T, H, W, C)
             magnitudes, indices, properties: (N,)
         """
-        data = np.load(npz_path)
+        data = np.load(npz_path, mmap_mode='r')
         self.img_o = data["img_o"]
         self.img_p = data["img_p"]
         self.mags = data["magnitudes"]
         self.inds = data["indices"]
         self.props = data["properties"]
         self.in_format, self.out_format = in_format, out_format
-
-        if self.img_o.max() > 1.0:
-            self.img_o = self.img_o.astype(np.float32) / 255.0
-            self.img_p = self.img_p.astype(np.float32) / 255.0
 
     def __len__(self):
         return self.img_o.shape[0]
@@ -648,8 +644,8 @@ class PerturbedImageSequenceDataset(data.Dataset):
         orig = _transpose_array(self.img_o[idx], self.in_format, self.out_format)
         pert = _transpose_array(self.img_p[idx], self.in_format, self.out_format)
         return (
-            torch.from_numpy(orig).float(),
-            torch.from_numpy(pert).float(),
+            torch.from_numpy(orig / 255.0).float(),
+            torch.from_numpy(pert / 255.0).float(),
             torch.tensor(self.mags[idx], dtype=torch.float32),
             torch.tensor(self.inds[idx], dtype=torch.int8),
             torch.tensor(self.props[idx], dtype=torch.int8),
