@@ -2,10 +2,8 @@ import os
 from os import makedirs
 from os.path import exists
 from datetime import datetime
-import contextlib
 import torch
-from torch import optim, autocast
-from torch.amp import GradScaler
+from torch import optim
 from torch.utils import data
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
@@ -18,6 +16,9 @@ def main():
     print("Running on", DEVICE)
     config_name = get_config_argument()
     config = load_config(config_name)["slot_attention"]
+
+    if exists(config["ckpt_path"]):
+        raise ValueError(f"Checkpoint path '{config['ckpt_path']}' already exists. Please provide a new path to save the model checkpoint.")
 
     for key, value in config.items():
         print(f"{key}: {value}")
@@ -35,35 +36,24 @@ def main():
     print(f"Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
     print("Training slot attention model...")
-    train(model, optim, train_dataloader, 
-        config["num_epochs"],
-        config["warmup_epochs"], 
-        config["decay_epochs"], 
-        config["decay_rate"], 
-        config["mixed_precision"],
-        config["ckpt_path"]
-    )
+    train(model, optim, train_dataloader, config)
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model: SlotAttentionAutoEncoder, optimizer: torch.optim.Optimizer, train_dataloader: data.DataLoader, config: dict, verbose: bool = True):
     """
-    Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
-
-    @param model: SlotAttentionAutoEncoder or DisentangledSlotAttentionAutoEncoder
-        Model to train.
-    @param optimizer: torch.optim.Optimizer
-        Optimizer for the model.
-    @param train_dataloader: torch.utils.data.DataLoader
-        DataLoader for the training dataset.
+    Main training loop. Saves model with lowest loss at specified location.
     """
+    criterion=torch.nn.MSELoss()
+    num_epochs = config["num_epochs"]
+    ckpt_path = config["ckpt_path"]
+    rec_loss_weight = config["rec_loss_weight"]
+    attn_loss_weight = config["attn_loss_weight"]
+    scheduler = get_lr_schedule(optimizer, config["warmup_epochs"], config["decay_epochs"], config["decay_rate"])
+
     ckpt_dir = os.path.dirname(ckpt_path)
     if not exists(ckpt_dir):
         makedirs(ckpt_dir)
 
-    scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
-    scaler = GradScaler(device=DEVICE.type) if mixed_precision else None
-
-    loss_list = []
     current_step = 0
     best_loss = 1e9
     model.train()
@@ -77,39 +67,25 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
         for batch in train_dataloader:
             obs = batch.to(DEVICE)   # [B, C, H, W]
             batch_loss = 0
+            recon_combined, _, _, _ = model(obs)
+            loss = criterion(recon_combined, obs) 
+            epoch_loss += loss.item()
+            batch_loss += loss
 
-            # Use autocast if enabled, otherwise use a no-op context
-            context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
-            
-            with context_manager:
-                recon_combined, _, _, _ = model(obs)
-                loss = criterion(recon_combined, obs) 
-                epoch_loss += loss.item()
-                batch_loss += loss
-
-            optimizer.zero_grad()
             current_step += 1
-            
-            if mixed_precision:
-                scaler.scale(batch_loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                batch_loss.backward()
-                optimizer.step()
+            optimizer.zero_grad()
+            batch_loss.backward()
+            optimizer.step()
             
         scheduler.step() # Adjust the learning rates
         current_lr = scheduler.get_last_lr()
-
         epoch_loss /= len(train_dataloader)
-        loss_list.append(epoch_loss)
 
         if verbose:
             additional_msg = (
                 f'Loss: {epoch_loss:.6f}, '
                 f'lr: {current_lr[0]:.6f}'
             )
-
             log_progress(epoch, num_epochs, start, additional_msg)
 
         # Save the best model and optimizer state
@@ -126,8 +102,6 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     if verbose:
         print()
         print(f'Best epoch was #{best_epoch} with a loss of {best_loss:.6f}. Saved at \'{ckpt_path}\'.')
-
-    return model, loss_list
 
 
 def initialize_model(args):

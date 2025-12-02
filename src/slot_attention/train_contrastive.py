@@ -2,21 +2,25 @@ import os
 from os import makedirs
 from os.path import exists
 from datetime import datetime
-import contextlib
 import torch
-from torch import optim, autocast
-from torch.amp import GradScaler
+from torch import optim
 from torch.utils import data
 import torch.nn.functional as F
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
-from src.utils import ImageSequencePairDataset, get_lr_schedule, load_config, log_progress, get_config_argument, plot_images, set_seed, DEVICE, IMG_CHANNELS
+from src.utils import PerturbedImageSequenceDataset, get_lr_schedule, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
 
+
+T = 2
+print(f"Using sequence length T={T}")
 
 def main():
     print("Running on", DEVICE)
     config_name = get_config_argument()
     config = load_config(config_name)["slot_attention"]
+
+    if exists(config["ckpt_path"]):
+        raise ValueError(f"Checkpoint path '{config['ckpt_path']}' already exists. Please provide a new path to save the model checkpoint.")
 
     for key, value in config.items():
         print(f"{key}: {value}")
@@ -24,7 +28,7 @@ def main():
     set_seed(config['seed'])
     
     print("Loading training data...")
-    dataset = ImageSequencePairDataset(h5_path=config["train_path"], in_format=config["hdf5_format"])
+    dataset = PerturbedImageSequenceDataset(config["train_path"], config["in_format"], T=T, only_original=True)
     train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=config["num_workers"])
     batch_size = config['batch_size']
     num_batches = len(train_dataloader)
@@ -34,153 +38,145 @@ def main():
     print(f"Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     batch = next(iter(train_dataloader))
-    seq_pair = batch.to(DEVICE)
-    obs_t0 = seq_pair[:, 0]
-    obs_t1 = seq_pair[:, 1]
+    img_seq = batch.to(DEVICE)
+    obs_t0 = img_seq[:, 0]
+    obs_t1 = img_seq[:, 1]
+
     with torch.no_grad():
         slots_t0, attn_t0 = model.encode(obs_t0)
-        slots_t1, attn_t1 = model.encode(obs_t1)
         slots_t0, attn_t0 = order_slots(slots_t0, attn_t0)
+
+        slots_t1, attn_t1 = model.encode(obs_t1, slots_init=slots_t0)
         slots_t1, attn_t1 = order_slots(slots_t1, attn_t1, prev_slots=slots_t0, prev_attention=attn_t0)
+
         mean_pos_sim, mean_neg_sim, slot_match_acc, separation = evaluate_slot_alignment(slots_t0, slots_t1)
+
     print(f"Initial slot alignment metrics before training:")
     print(f'Pos: {mean_pos_sim:.6f}, Neg: {mean_neg_sim:.6f}, Match Acc: {slot_match_acc:.6f}, Separation: {separation:.6f}')
 
     print("Training slot attention model...")
-    train(model, optim, train_dataloader, 
-        config["num_epochs"],
-        config["warmup_epochs"], 
-        config["decay_epochs"], 
-        config["decay_rate"], 
-        config["mixed_precision"],
-        config["ckpt_path"],
-        config["rec_loss_mult"]
-    )
+    train(model, optim, train_dataloader, config)
 
 
-def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_steps, decay_rate, mixed_precision, ckpt_path, rec_loss_mult, criterion=torch.nn.MSELoss(), verbose=True):
+def train(model: SlotAttentionAutoEncoder, optimizer: torch.optim.Optimizer, train_dataloader: data.DataLoader, config: dict, verbose: bool = True):
     """
-    Main training loop. Saves model with lowest loss at specified location. Returns trained model and the loss for each epoch.
-
-    @param model: SlotAttentionAutoEncoder or DisentangledSlotAttentionAutoEncoder
-        Model to train.
-    @param optimizer: torch.optim.Optimizer
-        Optimizer for the model.
-    @param train_dataloader: torch.utils.data.DataLoader
-        DataLoader for the training dataset.
+    Main training loop. Saves model with lowest loss at specified location.
     """
+    criterion=torch.nn.MSELoss()
+    num_epochs = config["num_epochs"]
+    ckpt_path = config["ckpt_path"]
+    rec_loss_weight = config["rec_loss_weight"]
+    attn_loss_weight = config["attn_loss_weight"]
+    contrastive_loss_weight = config["contrastive_loss_weight"]
+    scheduler = get_lr_schedule(optimizer, config["warmup_epochs"], config["decay_epochs"], config["decay_rate"])
+
     ckpt_dir = os.path.dirname(ckpt_path)
     if not exists(ckpt_dir):
         makedirs(ckpt_dir)
 
-    #TODO: make configurable
-    contrastive_loss_fn_str = "Inter-slot" 
-    match contrastive_loss_fn_str:
-        case "Inter-slot":
-            contrastive_loss_fn = inter_slot_slot_loss
-        case "Intra-slot":
-            contrastive_loss_fn = intra_slot_slot_loss
-        case "Hinge":
-            contrastive_loss_fn = margin_rank_slot_loss
-        case _:
-            raise ValueError("Select a valid contrastive loss function.")
-    print("Using contrastive loss function:", contrastive_loss_fn_str)
-
-    scheduler = get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate)
-    scaler = GradScaler(device=DEVICE.type) if mixed_precision else None
-
-    recon_loss_list = []
-    contrastive_loss_list = []
     current_step = 0
     best_loss = 1e9
     model.train()
-    start = datetime.now()
-    
+    start = datetime.now()    
     print("Training started at", start.ctime())
     
     for epoch in range(1, num_epochs + 1): 
         epoch_recon_loss = 0
         epoch_contrastive_loss = 0
+        epoch_attn_loss = 0
         epoch_pos_loss = 0
         epoch_neg_loss = 0
         epoch_match_loss = 0
         epoch_separation_loss = 0
+        epoch_attn_std = 0
         
-        for batch_idx, batch in enumerate(train_dataloader):
-            seq_pair = batch.to(DEVICE) # (B, 2, C, H, W)
-            obs_t0 = seq_pair[:, 0]  # (B, C, H, W)
-            obs_t1 = seq_pair[:, 1]  # (B, C, H, W)
+        for batch in train_dataloader:
+            img_seq = batch.to(DEVICE) # (B, T, C, H, W)
+            B, T, C, H, W = img_seq.shape
+            S = model.num_slots
+            D = model.slots_dim
+            O = S - 1
             batch_loss = 0
 
-            # Use autocast if enabled, otherwise use a no-op context
-            context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
-            
-            with context_manager:
-                # Encode and decode both time steps
-                slots_t0, attn_t0 = model.encode(obs_t0)
-                slots_t1, attn_t1 = model.encode(obs_t1)
-                slots_t0, attn_t0 = order_slots(slots_t0, attn_t0)
-                slots_t1, attn_t1 = order_slots(slots_t1, attn_t1, prev_slots=slots_t0, prev_attention=attn_t0)
-                active_slots_t0 = slots_t0[:, 1:]  # remove bg slot
-                active_slots_t1 = slots_t1[:, 1:]  # remove bg slot
-                recon_combined_t0, _, _ = model.decode(slots_t0)
-                recon_combined_t1, _, _ = model.decode(slots_t1)
+            # Encode all timesteps, initialized with previous slots
+            active_slots = torch.empty((B, T, O, D), device=DEVICE)
+            bg_slot = torch.empty((B, T, 1, D), device=DEVICE)
+            attn = torch.empty((B, T, S, H*W), device=DEVICE)
 
+            prev_slots = None
+            prev_attn = None
 
-                # Calculate losses
-                recon_loss_t0 = criterion(recon_combined_t0, obs_t0)
-                recon_loss_t1 = criterion(recon_combined_t1, obs_t1)
-                recon_loss = (recon_loss_t0 + recon_loss_t1) / 2.0
-                recon_loss *= rec_loss_mult
-                contrastive_loss = contrastive_loss_fn(active_slots_t0, active_slots_t1)
+            for t in range(T):
+                slots_current, attn_current = model.encode(img_seq[:, t], slots_init=prev_slots)
+                slots_current, attn_current = order_slots(slots_current, attn_current, prev_slots, prev_attn)
 
-                batch_loss += recon_loss
-                batch_loss += contrastive_loss
+                active_slots[:, t] = slots_current[:, 1:]
+                bg_slot[:, t] = slots_current[:, :1]
+                attn[:, t] = attn_current
 
-                epoch_recon_loss += recon_loss.item()
-                epoch_contrastive_loss += contrastive_loss.item()
+                prev_slots = slots_current
+                prev_attn = attn_current
 
-                mean_pos, mean_neg, slot_match_acc, separation = evaluate_slot_alignment(active_slots_t0, active_slots_t1)
-                epoch_pos_loss += mean_pos
-                epoch_neg_loss += mean_neg
-                epoch_match_loss += slot_match_acc
-                epoch_separation_loss += separation
+            # Decode all timesteps at once for speedup
+            slots = torch.cat((active_slots, bg_slot), dim=2) # (B, T, S, D)
+            slots_flat = slots.view(B * T, S, -1)
+            recon_flat, _, _ = model.decode(slots_flat)
+            recon = recon_flat.view(B, T, C, H, W)
 
-            optimizer.zero_grad()
+            # Calculate losses
+            recon_loss = criterion(recon, img_seq) * rec_loss_weight
+            contrastive_loss = slot_slot_contrastive_loss(active_slots) * contrastive_loss_weight
+            attn_loss = attention_loss(attn.view(B * T, S, H * W)) * attn_loss_weight
+            epoch_attn_std += attn.std().item()
+
+            batch_loss += recon_loss
+            batch_loss += contrastive_loss
+            batch_loss += attn_loss
+
+            epoch_recon_loss += recon_loss.item()
+            epoch_contrastive_loss += contrastive_loss.item()
+            epoch_attn_loss += attn_loss.item()
+
+            mean_pos, mean_neg, slot_match_acc, separation = evaluate_slot_alignment(active_slots[:, 0], active_slots[:, 1])
+            epoch_pos_loss += mean_pos
+            epoch_neg_loss += mean_neg
+            epoch_match_loss += slot_match_acc
+            epoch_separation_loss += separation
+
             current_step += 1
-            
-            if mixed_precision:
-                scaler.scale(batch_loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                batch_loss.backward()
-                optimizer.step()
-            
+            optimizer.zero_grad()
+            batch_loss.backward()
+            optimizer.step()
+
         scheduler.step() # Adjust the learning rates
         current_lr = scheduler.get_last_lr()
 
         epoch_recon_loss /= len(train_dataloader)
         epoch_contrastive_loss /= len(train_dataloader)
+        epoch_bg_loss /= len(train_dataloader)
+        epoch_bg_recon_loss /= len(train_dataloader)
+        epoch_attn_loss /= len(train_dataloader)
+
         epoch_pos_loss /= len(train_dataloader)
         epoch_neg_loss /= len(train_dataloader)
         epoch_match_loss /= len(train_dataloader)
         epoch_separation_loss /= len(train_dataloader)
+        epoch_attn_std /= len(train_dataloader)
 
-        epoch_loss = epoch_recon_loss + epoch_contrastive_loss
-        recon_loss_list.append(epoch_recon_loss)
-        contrastive_loss_list.append(epoch_contrastive_loss)
+        epoch_loss = epoch_recon_loss + epoch_contrastive_loss + epoch_attn_loss
 
         if verbose:
             additional_msg = (
                 f'Recon: {epoch_recon_loss:.6f}, '
                 f'Contrastive: {epoch_contrastive_loss:.6f}, '
+                f'Attention: {epoch_attn_loss:.6f}, '
                 f'Total: {epoch_loss:.6f}, '
                 f'lr: {current_lr[0]:.6f}, '
                 f'Pos: {epoch_pos_loss:.6f}, '
                 f'Neg: {epoch_neg_loss:.6f}, '
                 f'Match: {epoch_match_loss:.6f}, '
-                f'Sep: {epoch_separation_loss:.6f}'
+                f'Sep: {epoch_separation_loss:.6f}, '
+                f'Attn Std: {epoch_attn_std:.6f}'
             )
 
             log_progress(epoch, num_epochs, start, additional_msg)
@@ -199,8 +195,6 @@ def train(model, optimizer, train_dataloader, num_epochs, warmup_steps, decay_st
     if verbose:
         print()
         print(f'Best epoch was #{best_epoch} with a loss of {best_loss:.6f}. Saved at \'{ckpt_path}\'.')
-
-    return model, recon_loss_list
 
 
 def initialize_model(args):
@@ -236,113 +230,41 @@ def initialize_model(args):
     return model, optimizer
 
 
-def inter_slot_slot_loss(slots_t0, slots_t1, tau=0.075, margin=0.0, symmetric=True, criterion=torch.nn.CrossEntropyLoss()):
+def slot_slot_contrastive_loss(slots, temperature=0.075, batch_contrast=True, criterion=torch.nn.CrossEntropyLoss()) -> torch.Tensor:
     """
     Inter-video slot-slot contrastive loss as defined in
     'Temporally Consistent Object-Centric Learning by Contrasting Slots'.
     Adds optional margin and symmetric variants.
 
     Args:
-        slots_t0: (B, S, D) — slots at time t-1
-        slots_t1: (B, S, D) — slots at time t
+        slots: (B, T, S, D) — slots over time
         temperature: float — τ from the paper
 
     Returns:
         scalar loss
     """
-    slots_t0 = F.normalize(slots_t0, dim=-1)
-    slots_t1 = F.normalize(slots_t1, dim=-1)
-    B, S, D = slots_t0.shape
-
-    z0 = slots_t0.reshape(B * S, D)
-    z1 = slots_t1.reshape(B * S, D)
-
-    sim = torch.matmul(z0, z1.T) # (B*S, B*S)
-
-    if margin != 0.0:
-        diag_idx = torch.arange(B * S, device=sim.device)
-        sim[diag_idx, diag_idx] -= margin
-
-    sim /= tau
-    targets = torch.arange(B*S, device=sim.device)
-
-    # InfoNCE loss in both directions (symmetrized)
-    loss_fwd = criterion(sim, targets)
-
-    if symmetric:
-        loss_bwd = criterion(sim.T, targets)
-        return 0.5 * (loss_fwd + loss_bwd)
-
-    return loss_fwd
+    slots = F.normalize(slots, p=2.0, dim=-1)
+    if batch_contrast:
+        slots = slots.split(1)  # [1xTxKxD]
+        slots = torch.cat(slots, dim=-2)  # 1xTxK*BxD
+    s1 = slots[:, :-1, :, :]
+    s2 = slots[:, 1:, :, :]
+    ss = torch.matmul(s1, s2.transpose(-2, -1)) / temperature
+    B, T, S, D = ss.shape
+    ss = ss.reshape(B * T, S, S)
+    target = torch.eye(S).expand(B * T, S, S).to(ss.device)
+    loss = criterion(ss, target)
+    return loss
 
 
-def intra_slot_slot_loss(slots_t0, slots_t1, tau=0.075, margin=0.0, symmetric=True, criterion=torch.nn.CrossEntropyLoss()):
+def attention_loss(attention):
+    """ 
+    For each slot, compute the standard deviation of its attention values. This is assumed to be the background.
+    The loss is the mean of the minimum standard deviations. 
     """
-    Pure intra-video slot-slot contrastive loss (InfoNCE), symmetrized.
-
-    Args:
-        slots_t0: (B, S, D)
-        slots_t1: (B, S, D)
-        tau: temperature
-    """
-    # normalize
-    z0 = F.normalize(slots_t0, dim=-1)
-    z1 = F.normalize(slots_t1, dim=-1)
-    B, S, D = z0.shape
-
-    # similarity per video: (B, S, S)
-    sim = torch.matmul(z0, z1.transpose(-2, -1))  # logits
-
-    # apply margin to positive logits: subtract m/τ from diagonal entries
-    if margin != 0.0:
-        # subtract margin in logit-space consistent with derivation:
-        # sim_pos := sim_pos - margin
-        diag_idx = torch.arange(S, device=sim.device)
-        sim[:, diag_idx, diag_idx] -= margin
-    
-    sim /= tau
-
-    # flatten for cross-entropy: treat each anchor separately
-    logits_fwd = sim.reshape(B * S, S)
-    targets = torch.arange(S, device=sim.device).repeat(B)  # 0..S-1 per video
-
-    loss_fwd = criterion(logits_fwd, targets)
-
-    if symmetric:
-        sim_bwd = sim.transpose(-2, -1)  # (B, S, S)
-        logits_bwd = sim_bwd.reshape(B * S, S)
-        loss_bwd = criterion(logits_bwd, targets)
-        return 0.5 * (loss_fwd + loss_bwd)
-
-    return loss_fwd
-
-
-def margin_rank_slot_loss(slots_t0, slots_t1, margin=1.5, symmetric=True):
-    z0 = F.normalize(slots_t0, dim=-1)
-    z1 = F.normalize(slots_t1, dim=-1)
-    B, S, D = z0.shape
-
-    sim = torch.matmul(z0, z1.transpose(-2, -1))  # (B,S,S)
-    pos = torch.diagonal(sim, dim1=-2, dim2=-1).unsqueeze(-1)  # (B,S,1)
-    # compute margin_loss matrix: m + sim_neg - pos
-    # mask out diagonal
-    margin_mat = margin + sim - pos  # (B,S,S)
-    # zero diagonal
-    eye = torch.eye(S, device=sim.device).unsqueeze(0)
-    margin_mat = margin_mat * (1.0 - eye)
-    # hinge: max(0, margin_mat)
-    loss_per_anchor = torch.clamp(margin_mat, min=0.0).sum(dim=-1) / (S - 1)  # (B,S)
-    loss = loss_per_anchor.mean()
-
-    if symmetric:
-        # reverse direction
-        sim_rev = torch.matmul(z1, z0.transpose(-2, -1))
-        pos_r = torch.diagonal(sim_rev, dim1=-2, dim2=-1).unsqueeze(-1)
-        margin_mat_r = margin + sim_rev - pos_r
-        margin_mat_r = margin_mat_r * (1.0 - eye)
-        loss_r = torch.clamp(margin_mat_r, min=0.0).sum(dim=-1) / (S - 1)
-        loss = 0.5 * (loss + loss_r.mean())
-
+    B, S, N = attention.shape
+    std = torch.std(attention, dim=-1)
+    loss = std.min(dim=1)[0].mean()
     return loss
 
 
@@ -388,8 +310,6 @@ def evaluate_slot_alignment(slots_t0, slots_t1):
     separation = mean_pos - mean_neg
 
     return mean_pos, mean_neg.item(), slot_match_acc, separation.item()
-
-
 
 
 if __name__ == "__main__":

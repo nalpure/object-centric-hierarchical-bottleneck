@@ -65,7 +65,9 @@ DEFAULT_CONFIG = {
         "mixed_precision": False,
         "num_epochs": 100,
         "learning_rate": 0.0003,
-        "rec_loss_mult": 10000,
+        "rec_loss_weight": 10000,
+        "attn_loss_weight": 1,
+        "contrastive_loss_weight": 5000,
         "warmup_epochs": 20,
         "decay_epochs": 80,
         "decay_rate": 0.5
@@ -371,7 +373,6 @@ def log_progress(current_step, total_steps, start_time, additional_msg=''):
     remaining_time = estimated_total_time - elapsed_time
     remaining_timedelta = timedelta(seconds=int(remaining_time))
     remaining_time_str = str(remaining_timedelta)
-    estimated_end_time = datetime.now() + timedelta(seconds=remaining_time)
 
     msg = (
         f"{current_step}/{total_steps} - "
@@ -623,55 +624,74 @@ class ImageDataset(data.Dataset):
 
 
 class PerturbedImageSequenceDataset(data.Dataset):
-    def __init__(self, npz_path, in_format="HWC", out_format="CHW"):
+    def __init__(self, npz_path, in_format="HWC", out_format="CHW", T=None, only_original=False):
         """
         Loads full observation/perturbation sequences:
             img_o, img_p: (N, T, H, W, C)
             magnitudes, indices, properties: (N,)
         """
         data = np.load(npz_path, mmap_mode='r')
-        self.img_o = data["img_o"]
-        self.img_p = data["img_p"]
-        self.mags = data["magnitudes"]
-        self.inds = data["indices"]
-        self.props = data["properties"]
         self.in_format, self.out_format = in_format, out_format
+        self.only_original = only_original
+        seq_len = T if T is not None else data["img_o"].shape[1]
+        self.img_o = data["img_o"][:, :seq_len]
+
+        if not only_original:
+            self.img_p = data["img_p"][:, :seq_len]
+            self.mags = data["magnitudes"]
+            self.inds = data["indices"]
+            self.props = data["properties"]
+        
 
     def __len__(self):
         return self.img_o.shape[0]
 
     def __getitem__(self, idx):
         orig = _transpose_array(self.img_o[idx], self.in_format, self.out_format)
-        pert = _transpose_array(self.img_p[idx], self.in_format, self.out_format)
-        return (
-            torch.from_numpy(orig / 255.0).float(),
-            torch.from_numpy(pert / 255.0).float(),
-            torch.tensor(self.mags[idx], dtype=torch.float32),
-            torch.tensor(self.inds[idx], dtype=torch.int8),
-            torch.tensor(self.props[idx], dtype=torch.int8),
-        )
+        if self.only_original:
+            return torch.from_numpy(orig / 255.0).float()
+        else:
+            pert = _transpose_array(self.img_p[idx], self.in_format, self.out_format)
+            return (
+                torch.from_numpy(orig / 255.0).float(),
+                torch.from_numpy(pert / 255.0).float(),
+                torch.tensor(self.mags[idx], dtype=torch.float32),
+                torch.tensor(self.inds[idx], dtype=torch.int8),
+                torch.tensor(self.props[idx], dtype=torch.int8),
+            )
 
 
 class ImageSequencePairDataset(data.Dataset):
     """
     Returns consecutive frame pairs (t, t+1) from the 'img_o' sequences.
     """
-    def __init__(self, npz_path, in_format="HWC", out_format="CHW"):
+    def __init__(self, npz_path, in_format="HWC", out_format="CHW", only_first=True):
         data = np.load(npz_path)
-        self.img_o = data["img_o"]
-        self.in_format, self.out_format = in_format, out_format
-        N, T = self.img_o.shape[:2]
-        self.idx2pair = [(n, t) for n in range(N) for t in range(T - 1)]
         
-        if self.img_o.max() > 1.0:
-            self.img_o = self.img_o.astype(np.float32) / 255.0
+        if only_first:
+            self.img_o = data["img_o"][:, 0:2]
+        else:
+            self.img_o = data["img_o"]
+            N, T = self.img_o.shape[:2]
+            self.idx2pair = [(n, t) for n in range(N) for t in range(T - 1)]
+        
+        self.in_format, self.out_format = in_format, out_format
+        self.change_type = True if self.img_o.max() > 1.0 else False
+        self.only_first = only_first
 
     def __len__(self):
-        return len(self.idx2pair)
+        return len(self.img_o)
 
     def __getitem__(self, idx):
-        n, t = self.idx2pair[idx]
-        pair = self.img_o[n, t:t + 2]
+        if self.only_first:  
+            pair = self.img_o[idx]
+        else:
+            n, t = self.idx2pair[idx]
+            pair = self.img_o[n, t:t+2]
+
+        if self.change_type:
+            pair = pair.astype(np.float32) / 255.0
+
         pair = _transpose_array(pair, self.in_format, self.out_format)
         return torch.from_numpy(pair).float()
 
