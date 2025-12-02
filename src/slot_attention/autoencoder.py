@@ -2,6 +2,7 @@ import numpy as np
 from torch import nn
 import torch
 import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
 
 from src.slot_attention.slot_attention import SlotAttention
 
@@ -135,19 +136,18 @@ class SlotAttentionAutoEncoder(nn.Module):
     def forward(self, image):
         slots, attn = self.encode(image)       
         recon_combined, recons, masks = self.decode(slots)
-        return recon_combined, recons, masks, attn
-    
-
-        """     
-        if prev_slots is None or prev_attention is None:
-            sorted_slots, sorted_attn = order_slots(slots, attention_scores)
-        else:
-            sorted_slots, sorted_attn, _ = match_active_slots(prev_slots, slots, prev_attention, attention_scores)"""
-    
+        return recon_combined, recons, masks, attn    
 
     def encode(self, image, slots_init=None):
         # `image` has shape: [batch_size, num_channels, width, height].
-
+        B, C, W, H = image.shape
+        assert W == self.resolution[0] and H == self.resolution[1], \
+            f'Input image resolution ({W}x{H}) does not match model resolution ({self.resolution[0]}x{self.resolution[1]}).'
+        assert C == self.num_channels, \
+            f'Input image channels ({C}) does not match model channels ({self.num_channels}).'
+        assert slots_init is None or slots_init.shape == (B, self.num_slots, self.slots_dim), \
+            f'Initial slots shape {slots_init.shape} does not match required shape {(B, self.num_slots, self.slots_dim)}.'
+        
         # Convolutional encoder with position embedding.
         x = self.encoder_cnn(image)  # CNN Backbone.
         x = x.permute(0,2,3,1)
@@ -166,6 +166,10 @@ class SlotAttentionAutoEncoder(nn.Module):
         return slots, attention_scores
     
     def decode(self, slots):
+        B, S, D = slots.shape
+        assert S == self.num_slots and D == self.slots_dim, \
+            f'Input slots shape {slots.shape} does not match required shape {(B, self.num_slots, self.slots_dim)}.'
+        
         # `slots` has shape: [batch_size, num_slots, slot_size].
         batch_size = slots.shape[0]
 
@@ -265,8 +269,6 @@ def identify_background(slots, attention_scores):
     return active_slots, background_slot, active_attn, background_attn
 
 
-from scipy.optimize import linear_sum_assignment
-
 def match_slots(prev_slots, curr_slots, prev_attn, curr_attn, w_slot=1.0, w_attn=0.0):
     """
     Matches active slots between two timesteps (prev -> curr) using a weighted
@@ -284,32 +286,33 @@ def match_slots(prev_slots, curr_slots, prev_attn, curr_attn, w_slot=1.0, w_attn
         curr_attn_reordered:  [B, S, HW]
         assignment: LongTensor [B, S] (curr index assigned to each prev slot)
     """
+    device = curr_slots.device
     B, S, D = prev_slots.shape
 
-    # Normalize
-    prev_slots_n = F.normalize(prev_slots, dim=-1)
-    curr_slots_n = F.normalize(curr_slots, dim=-1)
-    prev_attn_n = F.normalize(prev_attn, dim=-1)
-    curr_attn_n = F.normalize(curr_attn, dim=-1)
+    # Normalize across last dim (vector/cosine) and attention maps
+    prev_slots_n = F.normalize(prev_slots, dim=-1)     # (B,S,D)
+    curr_slots_n = F.normalize(curr_slots, dim=-1)     # (B,S,D)
+    prev_attn_n  = F.normalize(prev_attn, dim=-1)      # (B,S,HW)
+    curr_attn_n  = F.normalize(curr_attn, dim=-1)      # (B,S,HW)
+
+    # sim_slot[b] -> (S, S) similarity between prev_slots[b] and curr_slots[b]
+    sim_slot = torch.matmul(prev_slots_n, curr_slots_n.transpose(1, 2))   # (B, S, S)
+    sim_attn = torch.matmul(prev_attn_n, curr_attn_n.transpose(1, 2))     # (B, S, S)
+    sim = w_slot * sim_slot + w_attn * sim_attn                            # (B, S, S)
 
     reordered_slots = torch.zeros_like(curr_slots)
-    reordered_attn = torch.zeros_like(curr_attn)
-    assignments = torch.zeros((B, S), dtype=torch.long, device=curr_slots.device)
+    reordered_attn  = torch.zeros_like(curr_attn)
+    assignments = torch.zeros((B, S), dtype=torch.long, device=device)
 
-    
     for b in range(B):
         with torch.no_grad():
-            # [S, S] similarities
-            sim_slot = prev_slots_n[b] @ curr_slots_n[b].T           # cosine sim
-            sim_attn = prev_attn_n[b] @ curr_attn_n[b].T             # spatial overlap
-            sim = w_slot * sim_slot + w_attn * sim_attn              # weighted combo
-
-            # Hungarian assignment (maximize sim -> minimize -sim)
-            row_ind, col_ind = linear_sum_assignment(-sim.cpu().numpy())
-            perm = torch.tensor(col_ind, device=curr_slots.device)
+            sim_b = sim[b].cpu().numpy()    # (S, S), move to cpu for SciPy
+            # we maximize similarity -> minimize -sim
+            row_ind, col_ind = linear_sum_assignment(-sim_b)
+            perm = torch.tensor(col_ind, device=device, dtype=torch.long)
 
         reordered_slots[b] = curr_slots[b, perm]
-        reordered_attn[b] = curr_attn[b, perm]
-        assignments[b] = perm
+        reordered_attn[b]  = curr_attn[b, perm]
+        assignments[b]     = perm
 
     return reordered_slots, reordered_attn, assignments
