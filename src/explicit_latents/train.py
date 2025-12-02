@@ -2,12 +2,8 @@ import os
 from os import makedirs
 from os.path import exists
 from datetime import datetime
-import contextlib
-
-import numpy as np
 import torch
-from torch import optim, autocast
-from torch.amp import GradScaler
+from torch import optim
 from torch.utils import data
 from torch.nn import MSELoss
 
@@ -20,7 +16,6 @@ verbose = True
 print("Running on", DEVICE)
 config_name = get_config_argument()
 config = load_config(config_name)["explicit_latents"]
-mixed_precision = config["mixed_precision"]
 noise = config["noise"]
 
 for key, value in config.items():
@@ -54,7 +49,7 @@ slots_dim = dataset[0].shape[-1]
 
 # Initialize the model
 model = ExplicitLatentAutoEncoder(
-    config["latent_dim"],
+    config["explicit_dim"],
     slots_dim
 ).to(DEVICE)
 
@@ -90,8 +85,6 @@ scheduler = get_lr_schedule(
     config["decay_rate"]
 )
 
-scaler = GradScaler(device=DEVICE.type) if mixed_precision else None
-
 loss_list = []
 current_step = 0
 best_loss = 1e9
@@ -109,27 +102,17 @@ for epoch in range(1, config["num_epochs"] + 1):
 
         if noise > 0.0:
             slots = slots + torch.randn_like(slots) * noise
-
-        # Use autocast if enabled, otherwise use a no-op context
-        context_manager = autocast(device_type=DEVICE.type) if mixed_precision else contextlib.nullcontext()
         
-        with context_manager:
-            slot_recon, z = model(slots)
-            recon_loss = criterion(slots, slot_recon)
-                
-            batch_loss += recon_loss
-            epoch_loss += recon_loss.item()
+        slot_recon, _ = model(slots)
+        recon_loss = criterion(slots, slot_recon)
+            
+        batch_loss += recon_loss
+        epoch_loss += recon_loss.item()
 
-        optimizer.zero_grad()
         current_step += 1
-        
-        if mixed_precision:
-            scaler.scale(batch_loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            batch_loss.backward()
-            optimizer.step()
+        optimizer.zero_grad()
+        batch_loss.backward()
+        optimizer.step()
         
     scheduler.step() # Adjust the learning rates
     current_lr = scheduler.get_last_lr()
