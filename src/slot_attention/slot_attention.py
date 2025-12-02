@@ -16,7 +16,6 @@ class SlotAttention(nn.Module):
         self.epsilon = eps
 
         self.norm_inputs = nn.LayerNorm(self.in_features)
-        # I guess this is layer norm across each slot? should look into this
         self.norm_slots = nn.LayerNorm(self.slot_size)
         self.norm_mlp = nn.LayerNorm(self.slot_size)
 
@@ -39,15 +38,6 @@ class SlotAttention(nn.Module):
 
         self.slots_mu = nn.Parameter(nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")))
         self.slots_log_sigma = nn.Parameter(nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")))
-
-        """self.register_buffer(
-            "slots_mu",
-            nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")),
-        )
-        self.register_buffer(
-            "slots_log_sigma",
-            nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")),
-        )"""
     
     def step(self, slots, n_s, k, v, a, batch_size, num_inputs):
         slots_prev = slots

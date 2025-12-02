@@ -32,8 +32,9 @@ def main():
     
     model.load_state_dict(torch.load(ckpt_path, weights_only=True)['model_state_dict'], strict=False)
 
-    print(f"Loading observation training dataset: {config['train_path']}")
+    print(f"Loading perturbed image sequence dataset: {config['train_path']}")
     dataset = PerturbedImageSequenceDataset(config["train_path"], config["in_format"])
+    print("Creating dataloader...")
     dataloader = data.DataLoader(
         dataset,
         batch_size=config["batch_size"],
@@ -82,6 +83,8 @@ def main():
                     prev_slots_pert = slots_pert
                     prev_attn_pert = attn_pert
 
+
+                    # ----- Debug prints for slot similarity at t=0 within single observations -----
                     if batch_index == 0 and t == 0:
                         slots_orig_no_init, attn_orig_no_init = model.encode(orig_seq[:, t])
                         slots_orig_no_init_ordered, attn_orig_no_init_ordered = order_slots(slots_orig_no_init, attn_orig_no_init, prev_slots_orig, prev_attn_orig)
@@ -100,6 +103,8 @@ def main():
                             print(f"Batch {batch_index} Sample {b} Attention similarity matrix at t=0:\n", sim_attn.cpu().numpy())
                             print()
 
+
+                # ----- Debug prints for slot similarities across time and videos -----
                 if batch_index == 0:
                     # positive similarity between slots at t and t+1
                     positive_similarities = torch.cosine_similarity(
@@ -130,6 +135,7 @@ def main():
                         print(f"Sample {i} slot inter-video similarities at t:")
                         print(similarities_inter[i].cpu().numpy())
 
+                # ----- Save to HDF5 -----
                 data_dict = {
                     f'batch_{batch_index}_orig_seq': active_slots_orig,
                     f'batch_{batch_index}_pert_seq': active_slots_pert,
