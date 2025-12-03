@@ -10,10 +10,8 @@ class EdgeEncoder(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
-            nn.BatchNorm1d(64),
             nn.Linear(64, 64),
             nn.ReLU(),
-            nn.BatchNorm1d(64),
             nn.Linear(64, output_dim)
         )
 
@@ -50,10 +48,8 @@ class LatentEdgeEncoder(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
-            nn.BatchNorm1d(64),
             nn.Linear(64, 64),
             nn.ReLU(),
-            nn.BatchNorm1d(64),
             nn.Linear(64, output_dim)
         )
 
@@ -127,12 +123,10 @@ class RelationalLatentDynamics(nn.Module):
         self.TE = self.T * self.E
 
         self.edge_encoder = EdgeEncoder(self.TE * 2, self.H)
-        self.agg_proj = nn.Linear(self.H, 1)
         self.node_encoder_first = NodeEncoder((self.T * self.E) + self.H, self.I)
         self.node_encoder_current = NodeEncoder((self.T * self.E) + self.H, self.I)
 
         self.latent_edge_encoder = LatentEdgeEncoder(self.EI * 2, self.H_latent)
-        self.latent_agg_proj = nn.Linear(self.H_latent, 1)
         self.implicit_transition = ImplicitTransition(self.EI + self.H_latent, self.I)
         self.explicit_transition = ExplicitTransition(self.I, self.E)
 
@@ -161,8 +155,9 @@ class RelationalLatentDynamics(nn.Module):
 
         if T_out <= 0:
             raise ValueError("Either reconstruct must be True or t_future > 0")
-                
-        edge_agg = self.get_edges(z_explicit_seq)
+        
+        source = z_explicit_seq.permute(0, 2, 1, 3).reshape(B, O, T*E)
+        edge_agg = self.get_edges(source, self.edge_encoder)  # [B, O, H]
         seq_return = torch.empty(B, T_out, O, E, device=z_explicit_seq.device)
         z_first = None
 
@@ -186,26 +181,20 @@ class RelationalLatentDynamics(nn.Module):
         return seq_return, z_first
 
 
-    def get_edges(self, z_explicit_seq):
+    def get_edges(self, source, edge_encoder:EdgeEncoder):
         """
         Args:
-            z_explicit_seq: torch.Tensor of shape [B, T, O, E]
+            z_explicit_seq: torch.Tensor of shape [B, O, D]
                 The sequence of explicit latents
         Returns:
             torch.Tensor of shape [B, O, H]
                 The aggregated edge representations per object
         """
-        B, T, O, E = z_explicit_seq.shape
-        I = self.I
+        B, O, D = source.shape
         H = self.H
-        TE = T * E
-
-        # 1) collapse time+explicit into per‐object vector
-        #    → source: [B, O, TE]
-        source = z_explicit_seq.permute(0, 2, 1, 3).reshape(B, O, TE)
 
         # 2) build all off‐diagonal indices (i != j)
-        idx = torch.arange(O, device=z_explicit_seq.device)
+        idx = torch.arange(O, device=source.device)
         ii = idx.repeat_interleave(O)   # [O*O] = [0,0,0,1,1,1,2,2,2]
         jj = idx.repeat(O)              # [O*O] = [0,1,2,0,1,2,0,1,2]
         mask = (ii != jj)
@@ -219,20 +208,17 @@ class RelationalLatentDynamics(nn.Module):
         nbr_pairs = source[:, jj, :]    # object‐j as neighbor
 
         # 4) flatten batch & pairs → [B*P, TE]
-        flat_src = src_pairs.reshape(B * P, TE)
-        flat_nbr = nbr_pairs.reshape(B * P, TE)
+        flat_src = src_pairs.reshape(B * P, D)
+        flat_nbr = nbr_pairs.reshape(B * P, D)
 
         # 5) single big edge‐encoding call (no self‐pairs)
-        flat_edge = self.edge_encoder(flat_src, flat_nbr)  # [B*P, H]
+        flat_edge = edge_encoder(flat_src, flat_nbr)  # [B*P, H]
 
         # 6) rebuild [B, P, H] then [B, O, O-1, H]
         edge_enc = flat_edge.view(B, P, H).view(B, O, O-1, H)
 
-        # 7) attention-based aggregation of the O-1 edges → [B, O, H]
-        attn_logits = self.agg_proj(edge_enc).squeeze(-1)
-        attn_logits = attn_logits - attn_logits.max(dim=-1, keepdim=True)[0]
-        attn = torch.softmax(attn_logits / self.attn_temperature, dim=-1)
-        edge_agg = (edge_enc * attn.unsqueeze(-1)).sum(dim=2)
+        # 7) summation aggregation of the O-1 edges → [B, O, H]
+        edge_agg = edge_enc.sum(dim=2)
 
         return edge_agg
     
@@ -276,45 +262,18 @@ class RelationalLatentDynamics(nn.Module):
         flat_z_impl = flat_z[:, self.E:]  # [B*O, I]
         flat_delta_z_expl = self.explicit_transition(flat_z_impl)  # [B*O, E]
         flat_z_expl_tplus1 = flat_z_expl + flat_delta_z_expl
-        
         z_updated = torch.cat([flat_z_expl_tplus1, flat_z_impl], dim=-1).view(B, O, EI)
-        flat_z_updated = z_updated.reshape(B * O, EI)  # [B*O, EI]
         
-        # 2) build all off‐diagonal indices
-        idx = torch.arange(O, device=z.device)
-        ii = idx.repeat_interleave(O)
-        jj = idx.repeat(O)
-        mask = (ii != jj)
-        ii = ii[mask]
-        jj = jj[mask]
-        P = ii.shape[0]  # O*(O-1)
-
-        # 3) gather latent pairs → [B, P, EI]
-        src_pairs = z_updated[:, ii, :]
-        nbr_pairs = z_updated[:, jj, :]
-
-        # 4) flatten → [B*P, EI]
-        flat_src = src_pairs.reshape(B * P, EI)
-        flat_nbr = nbr_pairs.reshape(B * P, EI)
-
-        # 5) single big edge‐decoding → [B*P, H]
-        flat_edge = self.latent_edge_encoder(flat_src, flat_nbr)
-
-        # 6) regroup → [B, P, H] → [B, O, O-1, H]
-        edge_enc = flat_edge.view(B, P, H_latent).view(B, O, O-1, H_latent)
-
-        # 7) attention-based aggregation of the O-1 edges → [B, O, H]
-        attn_logits = self.latent_agg_proj(edge_enc).squeeze(-1)
-        attn_logits = attn_logits - attn_logits.max(dim=-1, keepdim=True)[0]
-        attn = torch.softmax(attn_logits / self.attn_temperature, dim=-1)
-        edge_agg = (edge_enc * attn.unsqueeze(-1)).sum(dim=2)
-        flat_edges  = edge_agg.reshape(B * O, H_latent) # [B*O, H]
-
-        # 8) one‐shot node transition → [B*O, I]
+        # 2) compute aggregated edges in latent space
+        edge_agg = self.get_edges(z_updated, self.latent_edge_encoder)  # [B, O, H_latent]
+        
+        # 3) one‐shot node transition
+        flat_z_updated = z_updated.reshape(B * O, EI)
+        flat_edges = edge_agg.reshape(B * O, H_latent) 
         flat_delta_z = self.implicit_transition(flat_z_updated, flat_edges)
-        flat_z_impl_tplus1 = flat_z_impl + flat_delta_z
+        flat_z_impl_tplus1 = flat_z_impl + flat_delta_z # [B*O, I]
 
-        # 9) concatenate explicit + implicit for next step
+        # 4) concatenate explicit + implicit for next step
         flat_z_pred = torch.cat([flat_z_expl_tplus1, flat_z_impl_tplus1], dim=-1)  # [B*O, E + I]
 
         return flat_z_pred.view(B, O, EI)
@@ -343,57 +302,3 @@ class RelationalLatentDynamics(nn.Module):
             z_current = z_tplus1                                # update current latent for next step
 
         return z_explicit_pred
-    
-
-def disentanglement_loss(z_orig, z_pert, latent_idx, magnitude):
-    """
-    z_orig:     [B, O, EI]
-    z_pert:     [B, O, EI]
-    latent_idx: [B]       (int indices 0..EI-1)
-    magnitude:  [B]       (scalar magnitude per batch item)
-    Returns scalar loss.
-    """
-    B, O, EI = z_orig.shape
-    assert z_orig.shape == z_pert.shape
-    assert latent_idx.shape == (B,)
-    assert magnitude.shape == (B,)
-
-    device = z_orig.device
-    delta = z_pert - z_orig                      # [B, O, EI]
-
-    # Build mask of shape [O, O] where mask[c, j] = 1 if j == c else 0
-    eye_O = torch.eye(O, device=device)         # [O, O]
-
-    # We'll build target_exp shaped [B, O_choice, O_object, EI]
-    # Start with zeros:
-    target_exp = torch.zeros((B, O, O, EI), device=device)  # [B, O_choice, O_object, EI]
-
-    # We need to set target_exp[b, c, j, latent_idx[b]] = magnitude[b] if j == c
-    # Use broadcasting: eye_O[None, :, :] has shape [1, O, O]
-    # Expand magnitude and latent indices to match batch/hypothesis dims
-    mask = eye_O[None, :, :].expand(B, -1, -1)          # [B, O, O]
-    # latent_idx expanded to [B, 1, 1] so it can index into the EI dim
-    lat_idx_exp = latent_idx.view(B, 1, 1)              # [B, 1, 1]
-    mag_exp     = magnitude.view(B, 1, 1)               # [B, 1, 1]
-
-    # Use scatter to place magnitude at the correct latent index only where mask==1
-    # For scatter we need indices of shape [B, O, O, 1] and values shape [B, O, O, 1]
-    idx_for_scatter = lat_idx_exp.expand(B, O, O).unsqueeze(-1)  # [B, O, O, 1]
-    values_for_scatter = (mask.unsqueeze(-1) * mag_exp.unsqueeze(-1))  # [B, O, O, 1]
-
-    # scatter_ along last dim (dim=-1)
-    target_exp.scatter_(-1, idx_for_scatter, values_for_scatter)  # places magnitude only where mask==1
-
-    # Expand delta to compare: delta_exp [B, 1, O, EI] so it broadcasts with target_exp
-    delta_exp = delta.unsqueeze(1)  # [B, 1, O, EI]
-
-    # Compute squared error per latent -> mean over EI gives [B, O_choice, O_object]
-    loss_matrix = (delta_exp - target_exp).pow(2).mean(dim=-1)  # [B, O, O]
-
-    # For a hypothesis 'choice' we average the per-object errors across objects:
-    hypothesis_loss = loss_matrix.mean(dim=-1)  # [B, O]
-
-    # pick best hypothesis per batch item
-    best_loss = hypothesis_loss.min(dim=1).values  # [B]
-
-    return best_loss.mean()
