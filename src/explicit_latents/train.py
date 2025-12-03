@@ -7,8 +7,9 @@ from torch import optim
 from torch.utils import data
 from torch.nn import MSELoss
 
+from losses import disentanglement_loss
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import SlotDataset, get_config_argument, get_lr_schedule, load_config, log_progress, set_seed, DEVICE
+from src.utils import PerturbedSlotSequenceDataset, SlotDataset, get_config_argument, get_lr_schedule, load_config, log_progress, reorder_perturbation_indices, set_seed, DEVICE
 
 criterion = MSELoss()
 verbose = True
@@ -16,7 +17,8 @@ verbose = True
 print("Running on", DEVICE)
 config_name = get_config_argument()
 config = load_config(config_name)["explicit_latents"]
-noise = config["noise"]
+noise_mag = config["noise"]
+disentangle = config["disentanglement_loss_weight"] > 0
 
 for key, value in config.items():
     print(f"{key}: {value}")
@@ -35,17 +37,32 @@ if config["normalize"] and exists(norm_stats_path):
 
 
 print("Loading training data...")
-dataset = SlotDataset(hdf5_file=config["train_path"], feature_mean=mean, feature_std=std, normalize=config["normalize"])
+if disentangle:
+    dataset = PerturbedSlotSequenceDataset(hdf5_file=config["train_path"], 
+        feature_mean=mean,
+        feature_std=std,
+        normalize=config["normalize"],
+        only_first=True)
+else:
+    dataset = SlotDataset(hdf5_file=config["train_path"],
+        feature_mean=mean, 
+        feature_std=std, 
+        normalize=config["normalize"])
+
 
 if config["normalize"] and not exists(norm_stats_path):
     print(f"mean: {dataset.feature_mean}, std: {dataset.feature_std}")
     print("Saving normalization stats to", norm_stats_path)
     torch.save({"mean": dataset.feature_mean, "std": dataset.feature_std}, norm_stats_path)
 
+
 train_dataloader = data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, drop_last=True, num_workers=config["num_workers"], prefetch_factor=8)
 print(f"Finished loading all {len(train_dataloader)}x{config['batch_size']} training samples.")
 
-slots_dim = dataset[0].shape[-1]
+if disentangle:
+    slots_dim = dataset[0][0].shape[-1]
+else:
+    slots_dim = dataset[0].shape[-1]
 
 # Initialize the model
 model = ExplicitLatentAutoEncoder(
@@ -94,21 +111,48 @@ start = datetime.now()
 print("Training started at", start.ctime())
 
 for epoch in range(1, config["num_epochs"] + 1): 
-    epoch_loss = 0
+    epoch_recon_loss = 0
+    epoch_total_loss = 0
+    epoch_disent_loss = 0
 
     for i, batch in enumerate(train_dataloader):
-        slots = batch.to(DEVICE)
         batch_loss = 0
+        if not disentangle:
+            slots = batch.to(DEVICE)
 
-        if noise > 0.0:
-            slots = slots + torch.randn_like(slots) * noise
-        
-        slot_recon, _ = model(slots)
-        recon_loss = criterion(slots, slot_recon)
+            if noise_mag > 0.0:
+                slots = slots + torch.randn_like(slots) * noise_mag
             
-        batch_loss += recon_loss
-        epoch_loss += recon_loss.item()
+            slot_recon, _ = model(slots)
+            recon_loss = criterion(slots, slot_recon)
+                
+            batch_loss += recon_loss
+            epoch_recon_loss += recon_loss.item()
+        else:
+            slots_orig, slots_pert, magnitude, obj, prop = (b.to(DEVICE) for b in batch)
+            prop = reorder_perturbation_indices(prop)
+            B, O, E = slots_orig.shape
 
+            if noise_mag > 0.0:
+                noise = torch.randn_like(slots_orig)
+                slots_orig = slots_orig + noise * noise_mag
+                slots_pert = slots_pert + noise * noise_mag
+
+            slots_all = torch.cat([slots_orig, slots_pert], dim=0)  # [2*B, O, E]
+            slot_recon_all, z = model(slots_all)
+            z_orig, z_pert = z.split(B, dim=0)
+
+            recon_loss = criterion(slots_all, slot_recon_all)
+            recon_loss *= config["reconstruction_loss_weight"]
+            batch_loss += recon_loss
+            epoch_recon_loss += recon_loss.item()
+
+            disent_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop,magnitude=magnitude)
+            disent_loss *= config["disentanglement_loss_weight"]
+            batch_loss += disent_loss
+            epoch_disent_loss += disent_loss.item()            
+
+        epoch_total_loss += batch_loss.item()
         current_step += 1
         optimizer.zero_grad()
         batch_loss.backward()
@@ -117,19 +161,29 @@ for epoch in range(1, config["num_epochs"] + 1):
     scheduler.step() # Adjust the learning rates
     current_lr = scheduler.get_last_lr()
 
-    epoch_loss /= len(train_dataloader)
-    loss_list.append(epoch_loss)
+    epoch_recon_loss /= len(train_dataloader)
+    epoch_total_loss /= len(train_dataloader)
+    epoch_disent_loss /= len(train_dataloader)
+    loss_list.append(epoch_recon_loss)
 
     if verbose:
-        additional_msg = (
-            f'Slot diff: {epoch_loss:.6f}, '
-            f'lr: {current_lr[0]:.6f}'
-        )
+        if not disentangle:
+            additional_msg = (
+                f'Slot diff: {epoch_recon_loss:.6f}, '
+                f'lr: {current_lr[0]:.6f}'
+            )
+        else:
+            additional_msg = (
+                f'Slot diff: {epoch_recon_loss:.6f}, '
+                f'Disent: {epoch_disent_loss:.6f}, '
+                f'Total: {epoch_total_loss:.6f}, '
+                f'lr: {current_lr[0]:.6f}'
+            )
         log_progress(epoch, config["num_epochs"], start, additional_msg)
 
     # Save the best model and optimizer state
-    if epoch_loss < best_loss:
-        best_loss = epoch_loss
+    if epoch_recon_loss < best_loss:
+        best_loss = epoch_recon_loss
         best_epoch = epoch
 
         torch.save({
