@@ -23,7 +23,11 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 IMG_CHANNELS = 3
 
 # Define the mappings between property names and numerical codes
-STRING_TO_CODE_LEGACY = {
+# Default: attributes are not ordered by explicit / implicit distinction
+# Sorted: first explicit attributes (pos, hue), then implicit attributes (vel)
+implicit_properties = ['vel_x', 'vel_y']
+
+STRING_TO_CODE_DEFAULT = {
     "pos_x": 0,
     "pos_y": 1,
     "vel_x": 2,
@@ -31,7 +35,7 @@ STRING_TO_CODE_LEGACY = {
     "hue": 4,
 }
 
-STRING_TO_CODE = {
+STRING_TO_CODE_SORTED = {
     "pos_x": 0,
     "pos_y": 1,
     "hue": 2,
@@ -39,8 +43,8 @@ STRING_TO_CODE = {
     "vel_y": 4,
 }
 
-CODE_TO_STRING_LEGACY = {v: k for k, v in STRING_TO_CODE_LEGACY.items()}
-CODE_TO_STRING = {v: k for k, v in STRING_TO_CODE.items()}
+CODE_TO_STRING_DEFAULT = {v: k for k, v in STRING_TO_CODE_DEFAULT.items()}
+CODE_TO_STRING_SORTED = {v: k for k, v in STRING_TO_CODE_SORTED.items()}
 
 DEFAULT_CONFIG = {
     "slot_attention": {
@@ -111,7 +115,6 @@ DEFAULT_CONFIG = {
         # Training parameters
         "batch_size": 128,
         "optimizer": "adam",
-        "mixed_precision": False,
         "num_epochs": 500,
         "learning_rate": 0.0004,
         "warmup_epochs": 0,
@@ -119,11 +122,13 @@ DEFAULT_CONFIG = {
         "decay_rate": 0.5,
         # Further model parameters
         "latent_dim": 5,
-        "hidden_dim": 64,
-        "hidden_dim_latent": 32,
+        "edge_dim": 64,
+        "latent_edge_dim": 64,
         "normalize": True,
         "noise": 0.0,
-        "disentangle": False
+        "prediction_loss_weight": 1,
+        "reconstruction_loss_weight": 1,
+        "disentanglement_loss_weight": 0
     }
 }
 
@@ -174,23 +179,10 @@ def reorder_perturbation_indices(indices):
     """Reorder perturbation indices to match the new STRING_TO_CODE mapping."""
     reordered_indices = []
     for idx in indices:
-        prop_name = CODE_TO_STRING_LEGACY[idx.item()]
-        new_idx = STRING_TO_CODE[prop_name]
+        prop_name = CODE_TO_STRING_DEFAULT[idx.item()]
+        new_idx = STRING_TO_CODE_SORTED[prop_name]
         reordered_indices.append(new_idx)
     return torch.tensor(reordered_indices, device=indices.device)
-
-def encode(string):
-    """Encode a string into its corresponding numerical code."""
-    if string not in STRING_TO_CODE:
-        raise ValueError(f"String '{string}' is not in the predefined set.")
-    return STRING_TO_CODE[string]
-
-
-def decode(code):
-    """Decode a numerical code back into its corresponding string."""
-    if code not in CODE_TO_STRING:
-        raise ValueError(f"Code '{code}' is not valid.")
-    return CODE_TO_STRING[code]
 
 
 def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
@@ -631,13 +623,14 @@ class PerturbedImageSequenceDataset(data.Dataset):
             magnitudes, indices, properties: (N,)
         """
         data = np.load(npz_path, mmap_mode='r')
+        assert T is None or T <= data["img_o"].shape[1], \
+            "Requested T exceeds dataset length."
         self.in_format, self.out_format = in_format, out_format
         self.only_original = only_original
-        seq_len = T if T is not None else data["img_o"].shape[1]
-        self.img_o = data["img_o"][:, :seq_len]
+        self.img_o = data["img_o"][:, :T]
 
         if not only_original:
-            self.img_p = data["img_p"][:, :seq_len]
+            self.img_p = data["img_p"][:, :T]
             self.mags = data["magnitudes"]
             self.inds = data["indices"]
             self.props = data["properties"]
@@ -767,10 +760,13 @@ class PerturbedSlotSequenceDataset(data.Dataset):
     The dataset can be normalized using the provided feature mean and standard deviation.
     If normalization is enabled but feature mean and standard deviation are not provided,
     the mean and standard deviation will be computed from the data.
+    If only_first is True, only the first time step of each sequence is used,
+    and samples with implicit perturbations are filtered out.
     """
-    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True):
+    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True, only_first=False):
         self.hdf5_file = hdf5_file
         self.normalize = normalize
+        self.only_first = only_first
 
         # Load all data into memory
         self.original, self.perturbed, self.magnitude, self.obj_index, self.prop_index = self._load_slots_data()
@@ -788,34 +784,50 @@ class PerturbedSlotSequenceDataset(data.Dataset):
 
 
     def _load_slots_data(self):
-        data = {
-            'orig_seq': [],
-            'pert_seq': [],
-            'magnitude': [],
-            'obj_index': [],
-            'prop_index': []
-        }
+            data = { 'orig_seq': [], 'pert_seq': [],
+                    'magnitude': [], 'obj_index': [], 'prop_index': [] }
 
-        with h5py.File(self.hdf5_file, 'r') as f:
-            for key in f.keys():
-                for k in data:
-                    if k in key:
-                        data[k].append(f[key][...])
-                        break
+            with h5py.File(self.hdf5_file, 'r') as f:
+                for key in f.keys():
+                    for k in data:
+                        if k in key:
+                            data[k].append(f[key][...])
+                            break
 
-        # Stack all data into single tensors
-        orig_seq = torch.tensor(np.concatenate(data['orig_seq']), dtype=torch.float32)
-        pert_seq = torch.tensor(np.concatenate(data['pert_seq']), dtype=torch.float32)
-        magnitude = torch.tensor(np.concatenate(data['magnitude']), dtype=torch.float32)
-        obj_index = torch.tensor(np.concatenate(data['obj_index']), dtype=torch.int64)
-        prop_index = torch.tensor(np.concatenate(data['prop_index']), dtype=torch.int64)
+            # Stack everything
+            orig_seq = np.concatenate(data['orig_seq'], axis=0)
+            pert_seq = np.concatenate(data['pert_seq'], axis=0)
+            magnitude = np.concatenate(data['magnitude'], axis=0)
+            obj_index = np.concatenate(data['obj_index'], axis=0)
+            prop_index = np.concatenate(data['prop_index'], axis=0)
 
-        return orig_seq, pert_seq, magnitude, obj_index, prop_index
+            if self.only_first:
+                orig_seq = orig_seq[:, 0]   # (B, O, S)
+                pert_seq = pert_seq[:, 0]   # (B, O, S)
+
+                # Keep only samples with *explicit* perturbations
+                implicit_codes = [STRING_TO_CODE_DEFAULT[prop] for prop in implicit_properties]
+                mask = ~np.isin(prop_index, implicit_codes)
+
+                orig_seq = orig_seq[mask]
+                pert_seq = pert_seq[mask]
+                magnitude = magnitude[mask]
+                obj_index = obj_index[mask]
+                prop_index = prop_index[mask]
+
+            # Convert to tensors
+            orig_seq = torch.tensor(orig_seq, dtype=torch.float32)
+            pert_seq = torch.tensor(pert_seq, dtype=torch.float32)
+            magnitude = torch.tensor(magnitude, dtype=torch.float32)
+            obj_index = torch.tensor(obj_index, dtype=torch.int64)
+            prop_index = torch.tensor(prop_index, dtype=torch.int64)
+
+            return orig_seq, pert_seq, magnitude, obj_index, prop_index
 
     def _compute_mean_std(self):
         with torch.no_grad():
             all_data = torch.tensor(np.concatenate([self.original, self.perturbed], axis=0), dtype=torch.float32)
-            flat = all_data.reshape(-1, all_data.shape[-1])  # Shape: [B*T*O, E]
+            flat = all_data.reshape(-1, all_data.shape[-1])
             mean = flat.mean(dim=0)  # Shape: [E]
             std = flat.std(dim=0)    # Shape: [E]
             return mean, std
