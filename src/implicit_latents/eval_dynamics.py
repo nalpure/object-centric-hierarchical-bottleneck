@@ -6,28 +6,29 @@ from os.path import exists
 
 #from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
-from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, identify_background, order_slots
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import IMG_CHANNELS, PerturbedImageSequenceDataset, create_trail, get_config_argument, load_config, plot_grid, plot_images, reorder_perturbation_indices, set_seed, DEVICE
 
 NUM_OUTPUT_FIGS = 10
 OUTPUT_DIR = "data/figures/"
+T_PAST = 4
+T_FUTURE = 4
 
 def main():
-    T_past = 4 # TODO: config
-    T_future = 4
-
     config_name = get_config_argument()
     config = load_config(config_name)
     config_SA = config["slot_attention"]
     config_explicit = config["explicit_latents"]
+    config_implicit = config["implicit_latents"]
     
     set_seed(config_explicit["seed"])
     ckpt_path_SA = config_SA["ckpt_path"]
     ckpt_path_explicit = config_explicit["ckpt_path"]
+    ckpt_path_implicit = config_implicit["ckpt_path"]
 
     print(f"Loading observation test dataset: {config_SA['test_path']}")
-    test_dataset = PerturbedImageSequenceDataset(config_SA["test_path"], config_SA["in_format"])
+    test_dataset = PerturbedImageSequenceDataset(config_SA["test_path"], config_SA["in_format"], T=T_PAST + T_FUTURE)
     test_dataloader = data.DataLoader(test_dataset, batch_size=config_SA['batch_size'], shuffle=False, drop_last=True)
 
     print("Loading model:", ckpt_path_SA)
@@ -47,15 +48,18 @@ def main():
         slots_dim=config_SA["slots_dim"]
     ).to(DEVICE)
     model_explicit.eval()
-    model_explicit.load_state_dict(torch.load(ckpt_path_explicit, weights_only=True)['model_AE_state_dict'])
+    model_explicit.load_state_dict(torch.load(ckpt_path_explicit, weights_only=True)['model_state_dict'])
 
+    print("Loading model:", ckpt_path_implicit)
     model_implicit = RelationalLatentDynamics(
         explicit_dim=config_explicit["explicit_dim"],
-        implicit_dim=config_explicit["implicit_dim"],
-        seq_len=T_past
+        implicit_dim=config_implicit["latent_dim"] - config_explicit["explicit_dim"],
+        seq_len=T_PAST,
+        edge_dim=config_implicit["edge_dim"],
+        latent_edge_dim=config_implicit["latent_edge_dim"]
     ).to(DEVICE)	
     model_implicit.eval()
-    model_implicit.load_state_dict(torch.load(ckpt_path_explicit, weights_only=True)['model_implicit_state_dict'])
+    model_implicit.load_state_dict(torch.load(ckpt_path_implicit, weights_only=True)['model_state_dict'])
 
     normalize_slots = config_explicit["normalize"]
 
@@ -74,9 +78,9 @@ def main():
         std_slots = 1.0
 
     criterion = torch.nn.MSELoss(reduction='mean')
-    reconstruct = config_explicit["reconstruction_loss_weight"] > 0
-    predict = config_explicit["prediction_loss_weight"] > 0
-    T_future = T_future if predict else 0
+    reconstruct = config_implicit["reconstruction_loss_weight"] > 0
+    predict = config_implicit["prediction_loss_weight"] > 0
+    t_future = T_FUTURE if predict else 0
 
     obs_loss_pred = []
     slot_loss_pred = []
@@ -90,14 +94,13 @@ def main():
     for batch_idx, batch in enumerate(test_dataloader):
         with torch.no_grad():
             obs, pert, magnitude, obj_index, prop_index = (b.to(DEVICE) for b in batch)
-            obs = obs[:, :T_past + T_future]
-            pert = pert[:, :T_past + T_future]
+            obs = obs[:, :T_PAST + t_future]
+            pert = pert[:, :T_PAST + t_future]
             prop_index = reorder_perturbation_indices(prop_index)
-
             # ----- SLOT ATTENTION + EXPLICIT LATENT ENCODING / DECODING ------
             # obs -> slots
             active_slots, background_slots, active_slots_pert, background_slots_pert = encode_obs(obs, pert, model_SA)
-            B, T, O, _ = active_slots.shape
+            B = obs.shape[0]
 
             active_slots_norm = (active_slots - mean_slots) / std_slots
             active_slots_pert_norm = (active_slots_pert - mean_slots) / std_slots
@@ -111,21 +114,21 @@ def main():
             slot_explicit = slot_explicit_norm * std_slots + mean_slots
             obs_explicit, _ = decode_slots(
                 slot_explicit, 
-                background_slots[:, :T_past + T_future], 
+                background_slots[:, :T_PAST + t_future], 
                 model_SA
             )
 
             # ----- EXPLICIT / IMPLICIT LATENT DYNAMICS ------
             # explicit (past) -> implicit -> explicit (past and/or future)
             z_explicit_computed, z_orig = model_implicit(
-                z_explicit[:, :T_past, :, :], 
-                T_future, 
+                z_explicit[:, :T_PAST], 
+                t_future, 
                 reconstruct=reconstruct
             )
 
             if reconstruct:
                 _, z_pert = model_implicit(
-                    z_explicit_pert[:, :T_past, :, :],
+                    z_explicit_pert[:, :T_PAST, :, :],
                     t_future=0,
                     reconstruct=reconstruct
                 )
@@ -133,23 +136,22 @@ def main():
             # explicit -> slot -> obs
             slot_implicit_norm = decode_explicit_latents(z_explicit_computed, model_explicit)
             slot_implicit = slot_implicit_norm * std_slots + mean_slots 
-            first_compute_idx = T_past * (1 - reconstruct)
-
+            first_compute_idx = T_PAST * (1 - reconstruct)
             obs_implicit, _ = decode_slots(
                 slot_implicit, 
-                background_slots[:, first_compute_idx:T_past + T_future], 
+                background_slots[:, first_compute_idx:T_PAST + t_future], 
                 model_SA
             )
 
             # ----- LOSSES -----
             if reconstruct:
-                obs_loss_recon.append(criterion(obs_implicit[:, :T_past], obs[:, :T_past]).item())
-                slot_loss_recon.append(criterion(slot_implicit_norm[:, :T_past], active_slots_norm[:, :T_past]).item())
-                latent_loss_recon.append(criterion(z_explicit_computed[:, :T_past], z_explicit[:, :T_past]).item())
+                obs_loss_recon.append(criterion(obs_implicit[:, :T_PAST], obs[:, :T_PAST]).item())
+                slot_loss_recon.append(criterion(slot_implicit_norm[:, :T_PAST], active_slots_norm[:, :T_PAST]).item())
+                latent_loss_recon.append(criterion(z_explicit_computed[:, :T_PAST], z_explicit[:, :T_PAST]).item())
             
-            obs_loss_pred.append(criterion(obs_implicit[:, -T_future:], obs[:, T_past:]).item())
-            slot_loss_pred.append(criterion(slot_implicit_norm[:, -T_future:], active_slots_norm[:, T_past:]).item())
-            latent_loss_pred.append(criterion(z_explicit_computed[:, -T_future:], z_explicit[:, T_past:]).item())
+            obs_loss_pred.append(criterion(obs_implicit[:, -t_future:], obs[:, T_PAST:]).item())
+            slot_loss_pred.append(criterion(slot_implicit_norm[:, -t_future:], active_slots_norm[:, T_PAST:]).item())
+            latent_loss_pred.append(criterion(z_explicit_computed[:, -t_future:], z_explicit[:, T_PAST:]).item())
 
 
             # ----- DEBUG PRINTS -----
@@ -185,7 +187,7 @@ def main():
 
                 save_path = OUTPUT_DIR + f"random_{i}.png"
                 row_titles = ["Observation", "Explicit AE Reconstruction", "Implicit Dynamics Prediction"]
-                column_titles = [f"t={t}" for t in range(1+(-T_past)*reconstruct, 1+T_future)]
+                column_titles = [f"t={t}" for t in range(1+(-T_PAST)*reconstruct, 1+t_future)]
 
                 plot_grid(rows, row_titles, column_titles, save_path)
 
@@ -277,7 +279,6 @@ def decode_slots(active_slots, background_slots, model_SA: SlotAttentionAutoEnco
     - obs_recon (torch.Tensor): Reconstructed images of shape [batch_size, seq_len, channels, height, width]
     """
     batch_size, seq_len, num_objects, slots_dim = active_slots.shape
-
     slots = torch.concat((active_slots, background_slots), dim=2)
     slots = slots.view(batch_size * seq_len, num_objects + 1, slots_dim)
     obs_recon, _, masks = model_SA.decode(slots)

@@ -10,7 +10,7 @@ from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from src.utils import IMG_CHANNELS, ImageDataset, get_config_argument, load_config, plot_grid, set_seed, plot_images, DEVICE
 
-PERTURBATION_MAGNITUDES = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+PERTURBATION_MAGNITUDES = [0.0, 1/3, 0.5, 2/3, 1.0]
 NUM_RANDOM_SAMPLES = 20
 NUM_WORST_SAMPLES = 10
 OUTPUT_DIR = "data/figures/"
@@ -52,11 +52,22 @@ if normalize:
 
 print("Loading model:", ckpt_path_disentangle)
 model_explicit = ExplicitLatentAutoEncoder(
-    latent_dim=config_latent["latent_dim"], 
+    latent_dim=config_latent["explicit_dim"], 
     slots_dim=config_SA["slots_dim"]
 ).to(DEVICE)
 model_explicit.eval()
-model_explicit.load_state_dict(torch.load(ckpt_path_disentangle, weights_only=True)['model_state_dict'], strict=True)
+
+possible_dict_names = ['model_state_dict', 'model_AE_state_dict']
+ckpt_dict = torch.load(ckpt_path_disentangle, weights_only=True)
+found = False
+
+for dict_name in possible_dict_names:
+    if dict_name in ckpt_dict:
+        model_explicit.load_state_dict(ckpt_dict[dict_name], strict=True)
+        found = True
+        break
+if not found:
+    raise KeyError(f"None of the expected keys {possible_dict_names} were found in the checkpoint.")
 
 print(f"Loading observation test dataset: {config_SA['test_path']}")
 test_dataset = ImageDataset(config_SA["test_path"], config_SA["in_format"])
