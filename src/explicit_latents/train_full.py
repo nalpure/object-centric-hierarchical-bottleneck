@@ -2,19 +2,19 @@ import os
 from os import makedirs
 from os.path import exists
 from datetime import datetime
-from pyexpat import model
 import torch
 from torch import optim
-from torch.amp import GradScaler
 from torch.utils import data
 from torch.nn import MSELoss
 
-from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics, disentanglement_loss
+from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import CODE_TO_STRING, PerturbedSlotSequenceDataset, get_config_argument, get_lr_schedule, load_config, log_progress, reorder_perturbation_indices, set_seed, DEVICE
+from src.utils import PerturbedSlotSequenceDataset, get_config_argument, get_lr_schedule, load_config, log_progress, reorder_perturbation_indices, set_seed, DEVICE
+from src.losses import disentanglement_loss
 
 criterion = MSELoss()
 verbose = True
+EPS = 1e-6
 
 T_past = 4 #TODO: make point of splitting sequences configurable
 T_future = 4
@@ -22,7 +22,15 @@ T_future = 4
 print("Running on", DEVICE)
 config_name = get_config_argument()
 config = load_config(config_name)["explicit_latents"]
+
 noise = config["noise"]
+disentangle = config["disentanglement_loss_weight"] > 0.0
+reconstruct = config["reconstruction_loss_weight"] > 0.0
+T_future = T_future if config["prediction_loss_weight"] > 0.0 else 0
+predict = T_future > 0
+
+if exists(config["ckpt_path"]):
+    raise ValueError(f"Checkpoint path '{config['ckpt_path']}' already exists. Please provide a new path to save the model checkpoint.")
 
 for key, value in config.items():
     print(f"{key}: {value}")
@@ -63,6 +71,8 @@ model_implicit = RelationalLatentDynamics(
     explicit_dim=config["explicit_dim"],
     implicit_dim=config["implicit_dim"],
     seq_len=T_past,
+    edge_dim=config["edge_dim"],
+    latent_edge_dim=config["latent_edge_dim"],
 
 ).to(DEVICE)
 
@@ -120,15 +130,14 @@ start = datetime.now()
 
 print("Training started at", start.ctime())
 
-disentangle = config["disentanglement_loss_weight"] > 0.0
-reconstruct = True #config["reconstruction_loss_weight"] > 0.0
-T_future = T_future if config["prediction_loss_weight"] > 0.0 else 0
-predict = T_future > 0
-
 for epoch in range(1, config["num_epochs"] + 1): 
     reconstruction_epoch_loss = 0
+    recon_slot_epoch_loss = 0
+    recon_latent_epoch_loss = 0
     prediction_epoch_loss = 0
     disentanglement_epoch_loss = 0
+    epoch_loss = 0
+    latent_std = 0
 
     for i, batch in enumerate(train_dataloader):
         orig_seq, pert_seq, magnitude, obj_index, prop_index = (b.to(DEVICE) for b in batch)
@@ -149,7 +158,6 @@ for epoch in range(1, config["num_epochs"] + 1):
         
         # Encode to explicit latents
         seq_past_flat = torch.cat([orig_seq_past, pert_seq_past], dim=0).reshape(2*B*T_past*O, S)
-
         z_expl_past = model_AE.encode(seq_past_flat).reshape(2*B, T_past, O, -1)
         
         # Predict future explicit latents with implicit dynamics model
@@ -159,19 +167,33 @@ for epoch in range(1, config["num_epochs"] + 1):
 
         # Decode explicit latents back to slots
         z_expl_computed_flat = z_expl_computed.reshape(2*B*T_out*O, -1)
-
         seq_computed = model_AE.decode(z_expl_computed_flat).reshape(2, B, T_out, O, S)
         orig_seq_computed = seq_computed[0]
         pert_seq_computed = seq_computed[1]
 
         if reconstruct:
+            # implicit latent dynamics
             orig_seq_recon = orig_seq_computed[:, :T_past, :, :]
             pert_seq_recon = pert_seq_computed[:, :T_past, :, :]
             recon_loss = criterion(orig_seq_past, orig_seq_recon) + criterion(pert_seq_past, pert_seq_recon)
             recon_loss *= config["reconstruction_loss_weight"] / 2.0
             batch_loss += recon_loss
             reconstruction_epoch_loss += recon_loss.item()
- 
+
+            # pure explicit AE reconstruction loss
+            z_expl_past_flat = z_expl_past.reshape(2*B*T_past*O, -1)
+            seq_computed_explicit = model_AE.decode(z_expl_past_flat).reshape(2, B, T_past, O, S)
+            recon_slot_loss = criterion(orig_seq_past, seq_computed_explicit[0]) + criterion(pert_seq_past, seq_computed_explicit[1])
+            recon_slot_loss *= config["reconstruction_loss_weight"] / 2.0
+            recon_slot_epoch_loss += recon_slot_loss.item()
+
+            # pure latent reconstruction loss
+            z_expl_computed_past_flat = z_expl_computed[:, :T_past].reshape(2*B*T_past*O, -1)
+            recon_latent_loss = criterion(z_expl_past, z_expl_computed[:, :T_past]) * 100
+            recon_latent_epoch_loss += recon_latent_loss.item()
+            batch_loss += recon_latent_loss
+            latent_std += z_expl_past.std().item()
+
         if predict:
             orig_seq_pred = orig_seq_computed[:, T_past*reconstruct:T_out, :, :]
             pert_seq_pred = pert_seq_computed[:, T_past*reconstruct:T_out, :, :]
@@ -187,6 +209,7 @@ for epoch in range(1, config["num_epochs"] + 1):
             disentanglement_epoch_loss += disentangle_loss.item()
 
         # Backpropagation and optimization step
+        epoch_loss += batch_loss.item()
         optimizer.zero_grad()
         batch_loss.backward()
         optimizer.step()
@@ -198,13 +221,15 @@ for epoch in range(1, config["num_epochs"] + 1):
     
     loss_dict = {}
     if reconstruct:
-        loss_dict["Reconstruction Loss"] = reconstruction_epoch_loss / len(train_dataloader)
+        loss_dict["Recon Loss"] = reconstruction_epoch_loss / len(train_dataloader)
+        loss_dict["Recon Explicit AE Loss"] = recon_slot_epoch_loss / len(train_dataloader)
+        loss_dict["Recon Latent Loss"] = recon_latent_epoch_loss / len(train_dataloader)
     if predict:
         loss_dict["Prediction Loss"] = prediction_epoch_loss / len(train_dataloader)
     if disentangle:
         loss_dict["Disentanglement Loss"] = disentanglement_epoch_loss / len(train_dataloader)
-        
-    epoch_loss = sum(loss_dict.values())
+    
+    epoch_loss /= len(train_dataloader)
 
     # Save the best model and optimizer state
     marker = ""
@@ -224,6 +249,7 @@ for epoch in range(1, config["num_epochs"] + 1):
     if verbose:
         additional_msg = ", ".join([f"{key}: {value:.6f}" for key, value in loss_dict.items()])
         additional_msg += f", Total loss: {epoch_loss:.6f}{marker}, lr: {current_lr[0]:.6f}"
+        additional_msg += f", Latent std: {latent_std / len(train_dataloader):.6f}"
         log_progress(epoch, config["num_epochs"], start, additional_msg)
 
 

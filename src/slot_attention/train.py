@@ -46,8 +46,6 @@ def train(model: SlotAttentionAutoEncoder, optimizer: torch.optim.Optimizer, tra
     criterion=torch.nn.MSELoss()
     num_epochs = config["num_epochs"]
     ckpt_path = config["ckpt_path"]
-    rec_loss_weight = config["rec_loss_weight"]
-    attn_loss_weight = config["attn_loss_weight"]
     scheduler = get_lr_schedule(optimizer, config["warmup_epochs"], config["decay_epochs"], config["decay_rate"])
 
     ckpt_dir = os.path.dirname(ckpt_path)
