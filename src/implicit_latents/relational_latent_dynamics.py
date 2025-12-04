@@ -56,13 +56,13 @@ class LatentEdgeEncoder(nn.Module):
     def forward(self, source, neighbor):
         x = torch.cat((source, neighbor), dim=-1)
         return self.net(x)
-    
+        
 
-class ImplicitTransition(nn.Module):
-    """ Given a latent containing aggregated edge info, produce delta for prediction of next implicit latent. """
+class LatentTransition(nn.Module):
+    """ Given a latent containing explicit and implicit info, produce delta for prediction of next explicit latent. """
     def __init__(self, input_dim, output_dim):
         super().__init__()
-        # e.g. 5+32 -> 64 -> 32 -> 2
+        # e.g. 5+64 -> 64 -> 64 -> 32 -> 16 ->3
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
@@ -70,40 +70,14 @@ class ImplicitTransition(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(32, output_dim)
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, output_dim)
         )
 
-        # gate projection
-        self.gate_proj = nn.Linear(input_dim, 1)
-
-        # Initialize bias to favor "no update" (small gates at start)
-        nn.init.constant_(self.gate_proj.bias, -2.0)  # gives sigmoid(-2) ≈ 0.12
-        self.input_dim = input_dim
-
-    def forward(self, source_node, edges_info):
-        x = torch.cat((source_node, edges_info), dim=-1)
-        delta = self.net(x) # [B*O, I]
-        gate = torch.sigmoid(self.gate_proj(x)) # [B*O, 1]
-        return delta * gate
-    
-
-class ExplicitTransition(nn.Module):
-    """ Given a latent containing explicit and implicit info, produce delta for prediction of next explicit latent. """
-    def __init__(self, input_dim, output_dim):
-        super().__init__()
-        # e.g. 5 -> 32 -> 64 -> 32 -> 3
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, output_dim)
-        )
-
-    def forward(self, implicit_latent):
-        return self.net(implicit_latent)
+    def forward(self, z, edges_info):
+        x = torch.cat((z, edges_info), dim=-1)
+        return self.net(x)
 
 
 class RelationalLatentDynamics(nn.Module):
@@ -123,12 +97,15 @@ class RelationalLatentDynamics(nn.Module):
         self.TE = self.T * self.E
 
         self.edge_encoder = EdgeEncoder(self.TE * 2, self.H)
-        self.node_encoder_first = NodeEncoder((self.T * self.E) + self.H, self.I)
-        self.node_encoder_current = NodeEncoder((self.T * self.E) + self.H, self.I)
+        self.node_encoder_first = NodeEncoder(self.TE + self.H, self.I)
+        self.node_encoder_current = NodeEncoder(self.TE + self.H, self.I)
 
         self.latent_edge_encoder = LatentEdgeEncoder(self.EI * 2, self.H_latent)
-        self.implicit_transition = ImplicitTransition(self.EI + self.H_latent, self.I)
-        self.explicit_transition = ExplicitTransition(self.I, self.E)
+        self.latent_transition = LatentTransition(self.EI + self.H_latent, self.EI)
+
+        
+        # gate projection
+        self.gate_proj = nn.Linear(self.H + self.EI, 1)
 
 
     def forward(self, z_explicit_seq, t_future, reconstruct=False):
@@ -156,94 +133,102 @@ class RelationalLatentDynamics(nn.Module):
         if T_out <= 0:
             raise ValueError("Either reconstruct must be True or t_future > 0")
         
-        source = z_explicit_seq.permute(0, 2, 1, 3).reshape(B, O, T*E)
+        z_explicit_diffs = z_explicit_seq[:, 1:, :, :] - z_explicit_seq[:, :-1, :, :]  # [B, T-1, O, E]
+        z_explicit_first = z_explicit_seq[:, 0:1, :, :]  # [B, 1, O, E]
+        z_explicit_current = z_explicit_seq[:, -1:, :, :]  # [B, 1, O, E]
+        
+        # Compute edge aggregations from first explicit latent and following diffs between
+        source = torch.cat([z_explicit_first, z_explicit_diffs], dim=1)  # [B, T, O, E]
+        source = source.permute(0, 2, 1, 3).reshape(B, O, -1)
         edge_agg = self.get_edges(source, self.edge_encoder)  # [B, O, H]
+
         seq_return = torch.empty(B, T_out, O, E, device=z_explicit_seq.device)
         z_first = None
 
         if reconstruct:
             # Build latent for first time step, rollout to reconstruct input sequence
-            z_explicit_first = z_explicit_seq[:, 0, :, :]  # [B, O, E]
-            z_implicit_first = self.compute_implicit(z_explicit_seq, edge_agg, self.node_encoder_first)  # [B, O, I]
-            z_first = torch.cat([z_explicit_first, z_implicit_first], dim=-1)  # [B, O, E + I]
+            z_implicit_first = self.compute_implicit(source, edge_agg, self.node_encoder_first)  # [B, O, I]
+            z_first = torch.cat([z_explicit_first.squeeze(1), z_implicit_first], dim=-1)  # [B, O, E + I]
             z_pred = self.rollout(z_first, num_steps=T)  # [B, T, O, E]
             seq_return[:, :T, :, :] = z_pred
             z_first = z_first 
 
         if t_future > 0:
             # Build latent for current time step, rollout to predict future sequence
-            z_explicit_current = z_explicit_seq[:, -1, :, :]  # [B, O, E]
-            z_implicit_current = self.compute_implicit(z_explicit_seq, edge_agg, self.node_encoder_current)  # [B, O, I]
-            z_current = torch.cat([z_explicit_current, z_implicit_current], dim=-1)  # [B, O, E + I]
+            z_implicit_current = self.compute_implicit(source, edge_agg, self.node_encoder_current)  # [B, O, I]
+            z_current = torch.cat([z_explicit_current.squeeze(1), z_implicit_current], dim=-1)  # [B, O, E + I]
             z_pred_future = self.rollout(z_current, num_steps=t_future)  # [B, t_future, O, E]
             seq_return[:, T * reconstruct:, :, :] = z_pred_future
 
         return seq_return, z_first
+    
 
-
-    def get_edges(self, source, edge_encoder:EdgeEncoder):
+    def get_edges(self, source, edge_encoder: EdgeEncoder):
         """
+        Antisymmetric, direction-preserving pairwise interactions.
+
         Args:
-            z_explicit_seq: torch.Tensor of shape [B, O, D]
-                The sequence of explicit latents
+            source: [B, O, D]
         Returns:
-            torch.Tensor of shape [B, O, H]
-                The aggregated edge representations per object
+            edge_agg: [B, O, H]
         """
         B, O, D = source.shape
         H = self.H
+        device = source.device
 
-        # 2) build all off‐diagonal indices (i != j)
-        idx = torch.arange(O, device=source.device)
-        ii = idx.repeat_interleave(O)   # [O*O] = [0,0,0,1,1,1,2,2,2]
-        jj = idx.repeat(O)              # [O*O] = [0,1,2,0,1,2,0,1,2]
-        mask = (ii != jj)
-        ii = ii[mask]                   # [P]
-        jj = jj[mask]                   # [P]
-        P = ii.shape[0]                 # P = O*(O-1)
+        # 1) build unordered pairs i < j
+        ii, jj = torch.triu_indices(O, O, offset=1, device=device)
+        P = ii.shape[0]  # O*(O-1)/2
 
-        # 3) gather neighbor pairs
-        #    src_pairs, nbr_pairs: [B, P, TE]
-        src_pairs = source[:, ii, :]    # object‐i as source
-        nbr_pairs = source[:, jj, :]    # object‐j as neighbor
+        # 2) gather unordered object pairs
+        src_pairs = source[:, ii, :]   # [B, P, D]
+        nbr_pairs = source[:, jj, :]   # [B, P, D]
 
-        # 4) flatten batch & pairs → [B*P, TE]
+        # 3) flatten for encoding
         flat_src = src_pairs.reshape(B * P, D)
         flat_nbr = nbr_pairs.reshape(B * P, D)
 
-        # 5) single big edge‐encoding call (no self‐pairs)
+        # 4) encode a single directed interaction per unordered pair
+        # IMPORTANT: direction is learned by encoder via (src, nbr)
         flat_edge = edge_encoder(flat_src, flat_nbr)  # [B*P, H]
+        edge_pairs = flat_edge.view(B, P, H)           # [B, P, H]
 
-        # 6) rebuild [B, P, H] then [B, O, O-1, H]
-        edge_enc = flat_edge.view(B, P, H).view(B, O, O-1, H)
+        # 5) zero initialize per-object accumulator
+        edge_agg = torch.zeros(B, O, H, device=device)
 
-        # 7) summation aggregation of the O-1 edges → [B, O, H]
-        edge_agg = edge_enc.sum(dim=2)
+        # 6) scatter +f to i, -f to j  (action = -reaction)
+        edge_agg.index_add_(1, ii, edge_pairs)
+        edge_agg.index_add_(1, jj, -edge_pairs)
 
         return edge_agg
     
 
-    def compute_implicit(self, z_explicit_seq, edge_agg, node_encoder:NodeEncoder):
-        B, T, O, E = z_explicit_seq.shape
+    def compute_implicit(self, source, edge_agg, node_encoder:NodeEncoder):
+        """
+        Compute implicit latent from source information and aggregated edges.
+        Args:
+            source: torch.Tensor of shape [B, O, TE]
+                The sequence of explicit latents
+            edge_agg: torch.Tensor of shape [B, O, H]
+                The aggregated edge information per object
+            node_encoder: NodeEncoder
+                The node encoder to use
+        """
+        B, O, TE = source.shape
         I = self.I
         H = self.H
-        TE = T * E
 
-        # 1) collapse time+explicit into per‐object vector
-        #    → source: [B, O, TE]
-        source = z_explicit_seq.permute(0, 2, 1, 3).reshape(B, O, TE)
-
-        # 2) prepare node inputs: flatten batch×object
+        # 1) prepare node inputs: flatten batch×object
         flat_source = source.reshape(B * O, TE)         # [B*O, TE]
         flat_edges  = edge_agg.reshape(B * O, H)       # [B*O, H]
 
-        # 3) one‐shot node encoding → [B*O, I]
+        # 2) one‐shot node encoding → [B*O, I]
         flat_z_impl = node_encoder(flat_source, flat_edges)
         z_impl = flat_z_impl.view(B, O, I)
 
         return z_impl
     
-
+    
     def predict(self, z):
         """
         Args:
@@ -255,28 +240,16 @@ class RelationalLatentDynamics(nn.Module):
         """
         B, O, EI = z.shape
         H_latent = self.H_latent
-        flat_z = z.reshape(B * O, EI)  # [B*O, EI]
+        flat_z = z.reshape(B * O, EI)
 
-        # 1) compute new explicit latent, given previous explicit latent + implicit latent
-        flat_z_expl = flat_z[:, :self.E]  # [B*O, E]
-        flat_z_impl = flat_z[:, self.E:]  # [B*O, I]
-        flat_delta_z_expl = self.explicit_transition(flat_z_impl)  # [B*O, E]
-        flat_z_expl_tplus1 = flat_z_expl + flat_delta_z_expl
-        z_updated = torch.cat([flat_z_expl_tplus1, flat_z_impl], dim=-1).view(B, O, EI)
-        
-        # 2) compute aggregated edges in latent space
-        edge_agg = self.get_edges(z_updated, self.latent_edge_encoder)  # [B, O, H_latent]
-        
-        # 3) one‐shot node transition
-        flat_z_updated = z_updated.reshape(B * O, EI)
-        flat_edges = edge_agg.reshape(B * O, H_latent) 
-        flat_delta_z = self.implicit_transition(flat_z_updated, flat_edges)
-        flat_z_impl_tplus1 = flat_z_impl + flat_delta_z # [B*O, I]
+        # 1) compute aggregated edges in latent space
+        edge_agg = self.get_edges(z, self.latent_edge_encoder)  # [B, O, H_latent]
+        flat_edges = edge_agg.reshape(B * O, H_latent)
 
-        # 4) concatenate explicit + implicit for next step
-        flat_z_pred = torch.cat([flat_z_expl_tplus1, flat_z_impl_tplus1], dim=-1)  # [B*O, E + I]
-
-        return flat_z_pred.view(B, O, EI)
+        #2) compute new latents
+        delta_z = self.latent_transition(flat_z, flat_edges).reshape(B, O, EI)  # [B, O, E + I]
+        z_new = z + delta_z  # [B, O, E + I]
+        return z_new
     
 
     def rollout(self, z, num_steps):
