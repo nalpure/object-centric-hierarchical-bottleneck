@@ -5,8 +5,8 @@ from datetime import datetime
 import torch
 from torch import optim
 from torch.utils import data
-import torch.nn.functional as F
 
+from losses import attention_loss, slot_slot_contrastive_loss
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
 from src.utils import PerturbedImageSequenceDataset, get_lr_schedule, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
 
@@ -228,44 +228,6 @@ def initialize_model(args):
         raise ValueError("Select a valid optimizer.")
     
     return model, optimizer
-
-
-def slot_slot_contrastive_loss(slots, temperature=0.075, batch_contrast=True, criterion=torch.nn.CrossEntropyLoss()) -> torch.Tensor:
-    """
-    Inter-video slot-slot contrastive loss as defined in
-    'Temporally Consistent Object-Centric Learning by Contrasting Slots'.
-    Adds optional margin and symmetric variants.
-
-    Args:
-        slots: (B, T, S, D) — slots over time
-        temperature: float — τ from the paper
-
-    Returns:
-        scalar loss
-    """
-    slots = F.normalize(slots, p=2.0, dim=-1)
-    if batch_contrast:
-        slots = slots.split(1)  # [1xTxKxD]
-        slots = torch.cat(slots, dim=-2)  # 1xTxK*BxD
-    s1 = slots[:, :-1, :, :]
-    s2 = slots[:, 1:, :, :]
-    ss = torch.matmul(s1, s2.transpose(-2, -1)) / temperature
-    B, T, S, D = ss.shape
-    ss = ss.reshape(B * T, S, S)
-    target = torch.eye(S).expand(B * T, S, S).to(ss.device)
-    loss = criterion(ss, target)
-    return loss
-
-
-def attention_loss(attention):
-    """ 
-    For each slot, compute the standard deviation of its attention values. This is assumed to be the background.
-    The loss is the mean of the minimum standard deviations. 
-    """
-    B, S, N = attention.shape
-    std = torch.std(attention, dim=-1)
-    loss = std.min(dim=1)[0].mean()
-    return loss
 
 
 def evaluate_slot_alignment(slots_t0, slots_t1):
