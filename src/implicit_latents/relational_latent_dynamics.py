@@ -24,7 +24,7 @@ class NodeEncoder(nn.Module):
     """ Given a sequence of explicit latents and aggregated edge info, encode into implicit latent. """
     def __init__(self, input_dim, output_dim):
         super().__init__()
-        # e.g. 12+64 -> 64 -> 32 -> 2
+        # e.g. 12+64 -> 64 -> 64 -> 32 -> 2
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
@@ -44,7 +44,7 @@ class LatentEdgeEncoder(nn.Module):
     """ Given two latents containing explicit+implicit info, encode into an edge representation. """
     def __init__(self, input_dim, output_dim):
         super().__init__()
-        # e.g. 2*5->32->32
+        # e.g. 2*5->64->64
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
@@ -62,7 +62,7 @@ class LatentTransition(nn.Module):
     """ Given a latent containing explicit and implicit info, produce delta for prediction of next explicit latent. """
     def __init__(self, input_dim, output_dim):
         super().__init__()
-        # e.g. 5+64 -> 64 -> 64 -> 32 -> 16 ->3
+        # e.g. 5+64 -> 64 -> 64 -> 32 -> 16 -> 5
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
@@ -170,7 +170,7 @@ class RelationalLatentDynamics(nn.Module):
         Args:
             source: [B, O, D]
         Returns:
-            edge_agg: [B, O, H]
+            edge_agg: [B, O, H_out]
         """
         B, O, D = source.shape
         H = self.H
@@ -189,12 +189,12 @@ class RelationalLatentDynamics(nn.Module):
         flat_nbr = nbr_pairs.reshape(B * P, D)
 
         # 4) encode a single directed interaction per unordered pair
-        # IMPORTANT: direction is learned by encoder via (src, nbr)
-        flat_edge = edge_encoder(flat_src, flat_nbr)  # [B*P, H]
-        edge_pairs = flat_edge.view(B, P, H)           # [B, P, H]
+        flat_edge = edge_encoder(flat_src, flat_nbr)    # [B*P, H]
+        edge_pairs = flat_edge.view(B, P, -1)            # [B, P, H_out]
+        H_out = edge_pairs.shape[-1]
 
         # 5) zero initialize per-object accumulator
-        edge_agg = torch.zeros(B, O, H, device=device)
+        edge_agg = torch.zeros(B, O, H_out, device=device)
 
         # 6) scatter +f to i, -f to j  (action = -reaction)
         edge_agg.index_add_(1, ii, edge_pairs)
@@ -246,7 +246,7 @@ class RelationalLatentDynamics(nn.Module):
         edge_agg = self.get_edges(z, self.latent_edge_encoder)  # [B, O, H_latent]
         flat_edges = edge_agg.reshape(B * O, H_latent)
 
-        #2) compute new latents
+        # 2) compute new latents
         delta_z = self.latent_transition(flat_z, flat_edges).reshape(B, O, EI)  # [B, O, E + I]
         z_new = z + delta_z  # [B, O, E + I]
         return z_new
@@ -266,12 +266,9 @@ class RelationalLatentDynamics(nn.Module):
         B, O, EI = z.shape
         E = self.E
         z_explicit_pred = torch.zeros(B, num_steps, O, E, device=z.device)
-        z_current = z
 
         for t in range(num_steps):
-            # z_current: [B, O, E + I]
-            z_tplus1 = self.predict(z_current)                  # predict next timestep
-            z_explicit_pred[:, t, :, :] = z_tplus1[:, :, :E]    # store explicit part of prediction
-            z_current = z_tplus1                                # update current latent for next step
+            z = self.predict(z)                         # predict next timestep
+            z_explicit_pred[:, t, :, :] = z[:, :, :E]   # store explicit part of prediction
 
         return z_explicit_pred
