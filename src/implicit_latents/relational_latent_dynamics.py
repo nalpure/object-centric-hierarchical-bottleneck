@@ -84,7 +84,7 @@ class RelationalLatentDynamics(nn.Module):
     """
     Model for predicting future explicit latents by building an internal implicit latent representation.
     """
-    def __init__(self, explicit_dim, implicit_dim, seq_len, edge_dim=64, latent_edge_dim=64, attn_temperature=0.5):
+    def __init__(self, explicit_dim, implicit_dim, seq_len, edge_dim=64, latent_edge_dim=64, attn_temperature=0.5, disentangle=False):
         super().__init__()
         self.E = explicit_dim
         self.I = implicit_dim
@@ -92,12 +92,14 @@ class RelationalLatentDynamics(nn.Module):
         self.H = edge_dim
         self.H_latent = latent_edge_dim
         self.attn_temperature = attn_temperature
+        self.disentangle = disentangle
 
         self.EI = self.E + self.I
         self.TE = self.T * self.E
 
         self.edge_encoder = EdgeEncoder(self.TE * 2, self.H)
-        self.node_encoder_first = NodeEncoder(self.TE + self.H, self.I)
+        if self.disentangle:
+            self.node_encoder_first = NodeEncoder(self.TE + self.H, self.I)
         self.node_encoder_current = NodeEncoder(self.TE + self.H, self.I)
 
         self.latent_edge_encoder = LatentEdgeEncoder(self.EI * 2, self.H_latent)
@@ -108,7 +110,7 @@ class RelationalLatentDynamics(nn.Module):
         self.gate_proj = nn.Linear(self.H + self.EI, 1)
 
 
-    def forward(self, z_explicit_seq, t_future, reconstruct=False):
+    def forward(self, z_explicit_seq, t_future):
         """
         Predict future explicit latents given a sequence of past explicit latents.
         Args:
@@ -127,41 +129,35 @@ class RelationalLatentDynamics(nn.Module):
         B, T, O, E = z_explicit_seq.shape
         assert T == self.T
         assert E == self.E
-
-        T_out = T * reconstruct + t_future
-
-        if T_out <= 0:
-            raise ValueError("Either reconstruct must be True or t_future > 0")
+        assert T >= 2, "Sequence length must be at least 2"
+        assert t_future >= 1, "t_future must be at least 1"
         
-        z_explicit_diffs = z_explicit_seq[:, 1:, :, :] - z_explicit_seq[:, :-1, :, :]  # [B, T-1, O, E]
-        z_explicit_first = z_explicit_seq[:, 0:1, :, :]  # [B, 1, O, E]
-        z_explicit_current = z_explicit_seq[:, -1:, :, :]  # [B, 1, O, E]
-        
-        # Compute edge aggregations from first explicit latent and following diffs between
-        source = torch.cat([z_explicit_first, z_explicit_diffs], dim=1)  # [B, T, O, E]
-        source = source.permute(0, 2, 1, 3).reshape(B, O, -1)
-        edge_agg = self.get_edges(source, self.edge_encoder)  # [B, O, H]
+        z_explicit_current = z_explicit_seq[:, -1, :, :]  # [B, O, E]
 
-        seq_return = torch.empty(B, T_out, O, E, device=z_explicit_seq.device)
-        z_first = None
+        # Build latent for current time step, rollout to predict future sequence
+        source = self.define_source(z_explicit_seq)
+        edge_agg = self.get_edges(source, self.edge_encoder)
+        z_implicit_current = self.compute_implicit(source, edge_agg, self.node_encoder_current)  # [B, O, I]
+        z_current = torch.cat([z_explicit_current, z_implicit_current], dim=-1)  # [B, O, E + I]
+        z_pred_future = self.rollout(z_current, num_steps=t_future)  # [B, t_future, O, E]
 
-        if reconstruct:
+        if self.disentangle:
+            z_explicit_seq_inv = z_explicit_seq.flip(dims=[1])  # [B, T, O, E]
+            source_inv = self.define_source(z_explicit_seq_inv)
+            edge_inv_agg = self.get_edges(source_inv, self.edge_encoder)
             # Build latent for first time step, rollout to reconstruct input sequence
-            z_implicit_first = self.compute_implicit(source, edge_agg, self.node_encoder_first)  # [B, O, I]
-            z_first = torch.cat([z_explicit_first.squeeze(1), z_implicit_first], dim=-1)  # [B, O, E + I]
-            z_pred = self.rollout(z_first, num_steps=T)  # [B, T, O, E]
-            seq_return[:, :T, :, :] = z_pred
-            z_first = z_first 
-
-        if t_future > 0:
-            # Build latent for current time step, rollout to predict future sequence
-            z_implicit_current = self.compute_implicit(source, edge_agg, self.node_encoder_current)  # [B, O, I]
-            z_current = torch.cat([z_explicit_current.squeeze(1), z_implicit_current], dim=-1)  # [B, O, E + I]
-            z_pred_future = self.rollout(z_current, num_steps=t_future)  # [B, t_future, O, E]
-            seq_return[:, T * reconstruct:, :, :] = z_pred_future
-
-        return seq_return, z_first
+            z_implicit_first = (-1) * self.compute_implicit(source_inv, edge_inv_agg, self.node_encoder_current)  # [B, O, I]
+            return z_pred_future, z_implicit_first
+        else:
+            return z_pred_future, None
     
+    def define_source(self, z_explicit_seq):
+        B, T, O, E = z_explicit_seq.shape
+        z_explicit_first = z_explicit_seq[:, 0:1, :, :]  # [B, 1, O, E]
+        z_explicit_diffs = z_explicit_seq[:, 1:, :, :] - z_explicit_seq[:, :-1, :, :]  # [B, T-1, O, E]
+        source = torch.cat([z_explicit_first, z_explicit_diffs], dim=1)  # [B, T, O, E]
+        source = source.permute(0, 2, 1, 3).reshape(B, O, T*E)
+        return source
 
     def get_edges(self, source, edge_encoder: EdgeEncoder):
         """

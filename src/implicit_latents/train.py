@@ -9,7 +9,7 @@ from torch.utils import data
 #from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
 from losses import disentanglement_loss
-from src.utils import PerturbedSlotSequenceDataset, get_config_argument, load_config, log_progress, reorder_perturbation_indices, set_seed, get_lr_schedule, DEVICE
+from src.utils import PerturbedSlotSequenceDataset, get_config_argument, get_explicit_codes, get_implicit_codes, load_config, log_progress, num_explicit_props, reorder_perturbation_indices, set_seed, get_lr_schedule, DEVICE
 
 T_PAST = 4
 T_FUTURE = 4
@@ -37,7 +37,13 @@ def main():
         print(f"mean: {mean}, std: {std}")
 
     print("Loading training data...")
-    dataset = PerturbedSlotSequenceDataset(hdf5_file=config_impl["train_path"], feature_mean=mean, feature_std=std, normalize=config_impl["normalize"])
+    dataset = PerturbedSlotSequenceDataset(
+        hdf5_file=config_impl["train_path"], 
+        feature_mean=mean, 
+        feature_std=std, 
+        normalize=config_impl["normalize"], 
+        prop_skip_codes=get_explicit_codes()
+    )
     
     if config_impl["normalize"] and not exists(norm_stats_path):
         print(f"mean: {dataset.feature_mean}, std: {dataset.feature_std}")
@@ -48,7 +54,7 @@ def main():
     print(f"Finished loading all {config_impl['batch_size'] * len(train_dataloader)} training samples.")
 
     explicit_dim = next(iter(train_dataloader))[0].shape[-1]
-    model, optimizer = initialize_model(config_impl, explicit_dim)
+    model, optimizer = initialize_model(config_impl, explicit_dim, disentangle=(config_impl["disentanglement_loss_weight"] > 0))
     print(f"Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
     print("Training implicit autoencoder...")
@@ -89,7 +95,7 @@ def train(model: RelationalLatentDynamics, optimizer: torch.optim.Optimizer, tra
         for batch in train_dataloader:
             batch_loss = 0
             orig_seq, pert_seq, magnitude, obj_index, prop_index = (a.to(DEVICE) for a in batch)
-            prop_index = reorder_perturbation_indices(prop_index)
+            prop_index = reorder_perturbation_indices(prop_index, shift=-3)
             B, _, O, E = orig_seq.shape
 
             orig_seq_past = orig_seq[:, :T_PAST]
@@ -104,12 +110,14 @@ def train(model: RelationalLatentDynamics, optimizer: torch.optim.Optimizer, tra
 
             # Predict future explicit latents with implicit dynamics model
             seq_past_flat = torch.cat([orig_seq_past, pert_seq_past], dim=0).reshape(2*B, T_PAST, O, E)  # [2*B*T_past, O, D_slot]
-            seq_pred, z = model(seq_past_flat, t_future, reconstruct=reconstruct)
+            seq_pred, z = model(seq_past_flat, t_future)
             orig_seq_pred, pert_seq_pred = seq_pred.split(B, dim=0)  # Each: [B, T_past + T_future, O, D_slot] or [B, T_future, O, D_slot]
+            
+            if z is not None:
+                z_orig, z_pert = z.split(B, dim=0)
 
             # ===== COMPUTE LOSSES =====
             if reconstruct:
-                z_orig, z_pert = z.split(B, dim=0)
                 orig_seq_recon = orig_seq_pred[:, :T_PAST]
                 pert_seq_recon = pert_seq_pred[:, :T_PAST]
                 recon_loss = (criterion(orig_seq_past, orig_seq_recon) + criterion(pert_seq_past, pert_seq_recon)) / 2.0
@@ -174,17 +182,18 @@ def train(model: RelationalLatentDynamics, optimizer: torch.optim.Optimizer, tra
     print(f'Best epoch was #{best_epoch} with a loss of {best_loss:.6f}. Saved at \'{ckpt_path}\'.')
 
 
-def initialize_model(args, explicit_dim):
+def initialize_model(args, explicit_dim, disentangle:bool):
     model = RelationalLatentDynamics(
         explicit_dim,
         args["latent_dim"] - explicit_dim,
         T_PAST,
         args["edge_dim"],
-        args["latent_edge_dim"]
+        args["latent_edge_dim"],
+        disentangle=disentangle
     ).to(DEVICE)
 
     if args["init_ckpt"] is not None:
-        ckpt = f"{args['init_ckpt']}.ckpt"
+        ckpt = f"{args['init_ckpt']}"
         print(f"Loading model weights from {ckpt}")
         checkpoint = torch.load(ckpt, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
