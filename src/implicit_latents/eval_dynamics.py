@@ -23,6 +23,7 @@ def main():
     config_implicit = config["implicit_latents"]
     
     set_seed(config_explicit["seed"])
+    disentangle = config_implicit["disentanglement_loss_weight"] > 0
     ckpt_path_SA = config_SA["ckpt_path"]
     ckpt_path_explicit = config_explicit["ckpt_path"]
     ckpt_path_implicit = config_implicit["ckpt_path"]
@@ -56,7 +57,8 @@ def main():
         implicit_dim=config_implicit["latent_dim"] - config_explicit["explicit_dim"],
         seq_len=T_PAST,
         edge_dim=config_implicit["edge_dim"],
-        latent_edge_dim=config_implicit["latent_edge_dim"]
+        latent_edge_dim=config_implicit["latent_edge_dim"],
+        disentangle=disentangle
     ).to(DEVICE)	
     model_implicit.eval()
     model_implicit.load_state_dict(torch.load(ckpt_path_implicit, weights_only=True)['model_state_dict'])
@@ -78,18 +80,12 @@ def main():
         std_slots = 1.0
 
     criterion = torch.nn.MSELoss(reduction='mean')
-    reconstruct = config_implicit["reconstruction_loss_weight"] > 0
     predict = config_implicit["prediction_loss_weight"] > 0
     t_future = T_FUTURE if predict else 0
 
     obs_loss_pred = []
     slot_loss_pred = []
     latent_loss_pred = []
-    
-    if reconstruct:
-        obs_loss_recon = []
-        slot_loss_recon = []
-        latent_loss_recon = []
 
     for batch_idx, batch in enumerate(test_dataloader):
         with torch.no_grad():
@@ -122,33 +118,25 @@ def main():
             # explicit (past) -> implicit -> explicit (past and/or future)
             z_explicit_computed, z_orig = model_implicit(
                 z_explicit[:, :T_PAST], 
-                t_future, 
-                reconstruct=reconstruct
+                t_future
             )
 
-            if reconstruct:
+            if disentangle:
                 _, z_pert = model_implicit(
                     z_explicit_pert[:, :T_PAST, :, :],
-                    t_future=0,
-                    reconstruct=reconstruct
+                    t_future=0
                 )
 
             # explicit -> slot -> obs
             slot_implicit_norm = decode_explicit_latents(z_explicit_computed, model_explicit)
             slot_implicit = slot_implicit_norm * std_slots + mean_slots 
-            first_compute_idx = T_PAST * (1 - reconstruct)
             obs_implicit, _ = decode_slots(
                 slot_implicit, 
-                background_slots[:, first_compute_idx:T_PAST + t_future], 
+                background_slots[:, T_PAST:T_PAST + t_future], 
                 model_SA
             )
 
-            # ----- LOSSES -----
-            if reconstruct:
-                obs_loss_recon.append(criterion(obs_implicit[:, :T_PAST], obs[:, :T_PAST]).item())
-                slot_loss_recon.append(criterion(slot_implicit_norm[:, :T_PAST], active_slots_norm[:, :T_PAST]).item())
-                latent_loss_recon.append(criterion(z_explicit_computed[:, :T_PAST], z_explicit[:, :T_PAST]).item())
-            
+            # ----- LOSSES -----         
             obs_loss_pred.append(criterion(obs_implicit[:, -t_future:], obs[:, T_PAST:]).item())
             slot_loss_pred.append(criterion(slot_implicit_norm[:, -t_future:], active_slots_norm[:, T_PAST:]).item())
             latent_loss_pred.append(criterion(z_explicit_computed[:, -t_future:], z_explicit[:, T_PAST:]).item())
@@ -156,7 +144,7 @@ def main():
 
             # ----- DEBUG PRINTS -----
             if batch_idx == 0:
-                if reconstruct:
+                if disentangle:
                     for i in range(min(5, B)):
                         print(f"Perturbed an object at index {prop_index[i]} by magnitude {magnitude[i].item():.3f}:")
                         print(z_orig[i].cpu().numpy(), " (original)")
@@ -172,7 +160,7 @@ def main():
                 print(z_explicit_computed[0].cpu().numpy())
                 print()
                 print("Original explicit latents (first sample):")
-                print(z_explicit[0, first_compute_idx:].cpu().numpy())
+                print(z_explicit[0, T_PAST:].cpu().numpy())
                 print("Reconstructed explicit latents (first sample):")
                 print(z_explicit_computed[0].cpu().numpy())
 
@@ -180,24 +168,19 @@ def main():
         # ----- PLOTTING -----
         if batch_idx == 0:
             for i in range(min(NUM_OUTPUT_FIGS, obs.shape[0])):
-                obs_row = obs[i, first_compute_idx:].cpu()
-                explicit_row = obs_explicit[i, first_compute_idx:].cpu()
-                implicit_row = obs_implicit[i].cpu()
+                obs_row = obs[i].cpu()
+                explicit_row = obs_explicit[i].cpu()
+                implicit_row = torch.ones_like(explicit_row[:T_PAST])  # Fill with zeros for past frames
+                implicit_row = torch.cat([implicit_row, obs_implicit[i].cpu()], dim=0)
                 rows = [obs_row, explicit_row, implicit_row]
 
                 save_path = OUTPUT_DIR + f"random_{i}.png"
                 row_titles = ["Observation", "Explicit AE Reconstruction", "Implicit Dynamics Prediction"]
-                column_titles = [f"t={t}" for t in range(1+(-T_PAST)*reconstruct, 1+t_future)]
+                column_titles = [f"t={t}" for t in range(-T_PAST+1, t_future+1)]
 
                 plot_grid(rows, row_titles, column_titles, save_path)
 
     # ----- FINAL RESULTS -----
-    if reconstruct:
-        print("\n=== Reconstruction Results ===")
-        print(f"Observation Loss: \t{np.array(obs_loss_recon).mean():.6f} ± {np.array(obs_loss_recon).std():.6f}")
-        print(f"Slot Loss: \t{np.array(slot_loss_recon).mean():.6f} ± {np.array(slot_loss_recon).std():.6f}")
-        print(f"Latent Loss: \t{np.array(latent_loss_recon).mean():.6f} ± {np.array(latent_loss_recon).std():.6f}")
-
     print("\n=== Prediction Results ===")
     print(f"Observation Loss: \t{np.array(obs_loss_pred).mean():.6f} ± {np.array(obs_loss_pred).std():.6f}")
     print(f"Slot Loss: \t{np.array(slot_loss_pred).mean():.6f} ± {np.array(slot_loss_pred).std():.6f}")
