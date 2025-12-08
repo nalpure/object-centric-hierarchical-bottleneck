@@ -9,7 +9,7 @@ from torch.utils import data
 #from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
 from losses import disentanglement_loss
-from src.utils import PerturbedSlotSequenceDataset, get_config_argument, get_explicit_codes, get_implicit_codes, load_config, log_progress, num_explicit_props, reorder_perturbation_indices, set_seed, get_lr_schedule, DEVICE
+from src.utils import PerturbedSlotSequenceDataset, get_config_argument, get_explicit_codes, load_config, log_progress, reorder_perturbation_indices, set_seed, get_lr_schedule, DEVICE
 
 T_PAST = 4
 T_FUTURE = 4

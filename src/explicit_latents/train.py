@@ -9,7 +9,7 @@ from torch.nn import MSELoss
 
 from losses import disentanglement_loss
 from src.explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from src.utils import PerturbedSlotSequenceDataset, SlotDataset, get_config_argument, get_lr_schedule, load_config, log_progress, reorder_perturbation_indices, set_seed, DEVICE
+from src.utils import PerturbedSlotSequenceDataset, SlotDataset, get_config_argument, get_implicit_codes, get_lr_schedule, load_config, log_progress, reorder_perturbation_indices, set_seed, DEVICE
 
 criterion = MSELoss()
 verbose = True
@@ -42,7 +42,8 @@ if disentangle:
         feature_mean=mean,
         feature_std=std,
         normalize=config["normalize"],
-        only_first=True)
+        only_first=True,
+        prop_skip_codes=get_implicit_codes())
 else:
     dataset = SlotDataset(hdf5_file=config["train_path"],
         feature_mean=mean, 

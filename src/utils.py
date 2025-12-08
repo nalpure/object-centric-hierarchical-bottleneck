@@ -7,6 +7,7 @@ import json
 import os
 from os.path import exists
 import random
+from typing import List
 import h5py
 import numpy as np
 from torch.optim.lr_scheduler import LambdaLR
@@ -26,6 +27,7 @@ IMG_CHANNELS = 3
 # Default: attributes are not ordered by explicit / implicit distinction
 # Sorted: first explicit attributes (pos, hue), then implicit attributes (vel)
 implicit_properties = ['vel_x', 'vel_y']
+explicit_properties = ['pos_x', 'pos_y', 'hue']
 
 STRING_TO_CODE_DEFAULT = {
     "pos_x": 0,
@@ -175,14 +177,22 @@ def recursive_update(base_dict, override_dict):
     return base_dict
 
 
-def reorder_perturbation_indices(indices):
+def reorder_perturbation_indices(indices, shift=0):
     """Reorder perturbation indices to match the new STRING_TO_CODE mapping."""
     reordered_indices = []
     for idx in indices:
         prop_name = CODE_TO_STRING_DEFAULT[idx.item()]
         new_idx = STRING_TO_CODE_SORTED[prop_name]
-        reordered_indices.append(new_idx)
+        reordered_indices.append(new_idx + shift)
     return torch.tensor(reordered_indices, device=indices.device)
+
+
+def get_implicit_codes() -> List[int]:
+    return [STRING_TO_CODE_DEFAULT[prop] for prop in implicit_properties]
+
+
+def get_explicit_codes() -> List[int]:
+    return [STRING_TO_CODE_DEFAULT[prop] for prop in explicit_properties]
 
 
 def get_lr_schedule(optimizer, warmup_steps, decay_steps, decay_rate):
@@ -383,7 +393,7 @@ def set_seed(seed: int, deterministic_cudnn: bool = False) -> torch.Generator:
     g.manual_seed(seed)
 
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
     if deterministic_cudnn:
         torch.backends.cudnn.deterministic = True
@@ -760,13 +770,14 @@ class PerturbedSlotSequenceDataset(data.Dataset):
     The dataset can be normalized using the provided feature mean and standard deviation.
     If normalization is enabled but feature mean and standard deviation are not provided,
     the mean and standard deviation will be computed from the data.
-    If only_first is True, only the first time step of each sequence is used,
-    and samples with implicit perturbations are filtered out.
+    If only_first is True, only the first time step of each sequence is used.
+    If prop_skip_codes is provided, samples with those property codes are filtered out.
     """
-    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True, only_first=False):
+    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True, only_first=False, prop_skip_codes: List[int] = None):
         self.hdf5_file = hdf5_file
         self.normalize = normalize
         self.only_first = only_first
+        self.prop_skip_codes = prop_skip_codes
 
         # Load all data into memory
         self.original, self.perturbed, self.magnitude, self.obj_index, self.prop_index = self._load_slots_data()
@@ -805,10 +816,8 @@ class PerturbedSlotSequenceDataset(data.Dataset):
                 orig_seq = orig_seq[:, 0]   # (B, O, S)
                 pert_seq = pert_seq[:, 0]   # (B, O, S)
 
-                # Keep only samples with *explicit* perturbations
-                implicit_codes = [STRING_TO_CODE_DEFAULT[prop] for prop in implicit_properties]
-                mask = ~np.isin(prop_index, implicit_codes)
-
+            if self.prop_skip_codes is not None:
+                mask = ~np.isin(prop_index, self.prop_skip_codes)
                 orig_seq = orig_seq[mask]
                 pert_seq = pert_seq[mask]
                 magnitude = magnitude[mask]
