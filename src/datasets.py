@@ -215,10 +215,10 @@ class PerturbedSlotSequenceDataset(data.Dataset):
     If only_first is True, only the first time step of each sequence is used.
     If prop_skip_codes is provided, samples with those property codes are filtered out.
     """
-    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True, only_first=False, prop_skip_codes: List[int] = None):
+    def __init__(self, hdf5_file, feature_mean=None, feature_std=None, normalize=True, timesteps=None, prop_skip_codes: List[int] = None):
         self.hdf5_file = hdf5_file
         self.normalize = normalize
-        self.only_first = only_first
+        self.T = timesteps
         self.prop_skip_codes = prop_skip_codes
 
         # Load all data into memory
@@ -254,9 +254,12 @@ class PerturbedSlotSequenceDataset(data.Dataset):
             obj_index = np.concatenate(data['obj_index'], axis=0)
             prop_index = np.concatenate(data['prop_index'], axis=0)
 
-            if self.only_first:
-                orig_seq = orig_seq[:, 0]   # (B, O, S)
-                pert_seq = pert_seq[:, 0]   # (B, O, S)
+            orig_seq = orig_seq[:, :self.T]   # (B, O, S, T)
+            pert_seq = pert_seq[:, :self.T]   # (B, O, S, T)
+
+            if self.T == 1:
+                orig_seq = np.squeeze(orig_seq, axis=-1)  # (B, O, S)
+                pert_seq = np.squeeze(pert_seq, axis=-1)  # (B, O, S)
 
             if self.prop_skip_codes is not None:
                 mask = ~np.isin(prop_index, self.prop_skip_codes)

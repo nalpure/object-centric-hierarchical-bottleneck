@@ -13,9 +13,11 @@ import numpy as np
 from torch.optim.lr_scheduler import LambdaLR
 import matplotlib.pyplot as plt
 import imageio.v2 as imageio
+import tomli
+import tomli_w
+from importlib import resources
 
 import torch
-from torch.utils import data
 from torch import nn
 
 EPS = 1e-17
@@ -146,22 +148,6 @@ def get_config_argument():
         raise ValueError("Invalid arguments provided.")
 
     return args['config']
-
-
-def load_config(config_name):
-    """
-    Load configuration from a nested JSON file.
-    """
-    user_config_path = CONFIG_DIR + config_name + '.json'
-    if not exists(user_config_path):
-        raise ValueError("Configuration file not found.")
-
-    with open(user_config_path, 'r') as f:
-        user_config = json.load(f)
-    
-    combined_config = recursive_update(DEFAULT_CONFIG.copy(), user_config)
-
-    return combined_config
 
 
 def recursive_update(base_dict, override_dict):
@@ -559,3 +545,55 @@ def save_gif_from_array(frames, output_path="rollout.gif", fps=30, scale=4.0, lo
 
     imageio.mimsave(output_path, frames, duration=1/fps, loop=loop)
     print(f"GIF saved to {output_path}")
+
+
+from pathlib import Path
+
+def load_norm_stats(path):    
+    if exists(path):
+        print("Loading normalization stats from", path)
+        stats = torch.load(path, weights_only=True)
+        mean = stats["mean"]
+        std = stats["std"]
+        print(f"mean: {mean}, std: {std}")
+    else:
+        raise ValueError(f"Normalization stats file not found at {path}.")
+
+    return mean, std
+
+def save_norm_stats(mean, std, path):
+    if exists(path):
+        raise ValueError(f"Normalization stats file already exists at {path}. Please provide a new path to save the stats.")
+    else:
+        print(f"mean: {mean}, std: {std}")
+        print("Saving normalization stats to", path)
+        torch.save({"mean": mean, "std": std}, path)
+
+
+def load_config_by_name(name):
+    try:
+        #path = resources.files("FS-SWM").joinpath("../../configs", name)
+        path = Path(__file__).parent.parent / "configs" / (name + ".toml")
+
+        with path.open("rb") as f:
+            config = tomli.load(f)
+
+        return config
+    except FileNotFoundError:
+        print(f"Config file '{name}' does not exist!")
+        raise
+    except Exception as e:
+        print(f"Error occured while loading config: {e}")
+        raise
+
+
+def load_config(path):
+    with open(path, "rb") as f:
+        config = tomli.load(f)
+
+    return config
+
+
+def save_config(config, path):
+    with open(path, "wb") as f:
+        tomli_w.dump(config, f)
