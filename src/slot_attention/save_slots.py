@@ -1,3 +1,4 @@
+import argparse
 import os
 import h5py
 import numpy as np
@@ -6,47 +7,60 @@ from torch.utils import data
 import torch
 from torch.nn import functional as F
 
-from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, identify_background, order_slots
-from src.slot_attention.train_contrastive import evaluate_slot_alignment
-from src.utils import PerturbedImageSequenceDataset, PerturbedImageSequenceDataset, get_config_argument, load_config, plot_grid, set_seed, DEVICE, IMG_CHANNELS
+from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
+from src.utils import load_config, plot_grid, set_seed, DEVICE
+from datasets import PerturbedImageSequenceDataset
 
-DISPLAY_SAMPLES = 10
-OUTPUT_DIR = "data/figures/"
+VALID_TYPES = ["slot_attention", "explicit_latents"]
 
 def main():
-    config_name = get_config_argument()
-    config = load_config(config_name)["slot_attention"]
-    set_seed(config["seed"])
-    ckpt_path = config['ckpt_path']
-    output_path = config['save_path']
-
-    print("Loading model:", ckpt_path)
-    model = SlotAttentionAutoEncoder(
-        resolution=config["resolution"],
-        num_slots=config["num_slots"],
-        num_iterations=config["num_iterations"], 
-        num_channels=IMG_CHANNELS,
-        slots_dim=config["slots_dim"], 
-        encdec_dim=config["encdec_dim"]).to(DEVICE)
-    model.eval()
-    
-    model.load_state_dict(torch.load(ckpt_path, weights_only=True)['model_state_dict'], strict=False)
-
-    print(f"Loading perturbed image sequence dataset: {config['train_path']}")
-    dataset = PerturbedImageSequenceDataset(config["train_path"], config["in_format"])
-    print("Creating dataloader...")
-    dataloader = data.DataLoader(
-        dataset,
-        batch_size=config["batch_size"],
-        num_workers=config["num_workers"],
-        pin_memory=True,
-        prefetch_factor=2,
-        persistent_workers=True,
-        drop_last=True
+    # ----- Parse arguments -----
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--data", help="Path of the input observation dataset.")
+    parser.add_argument("-b", "--base", help="Base model name.")    
+    parser.add_argument(
+        "-e",
+        "--base-epoch",
+        help="Base model epoch. If not provided, best epoch is selected.",
     )
-    print(f"Finished loading all {config['batch_size'] * len(dataloader)} sequences.")
-    print(f"Saving slots to {output_path}")
+    parser.add_argument("-n", "--name", help="Name of the output file.")
+    parser.add_argument("-p", "--display-samples", type=int, default=5, help="Number of samples to visualize and save.")
+    parser.add_argument("-i", "--info_prints", action="store_true", help="Whether to print additional slot similarity information during saving.")
+    args = parser.parse_args()
 
+    if args.base is None:
+        raise ValueError("Base model name must be provided with -b/--base")
+    if args.data is None:
+        raise ValueError("Input data path must be provided with -d/--data")
+    if args.name is None:
+        args.name = args.data.split("/")[-1].split(".")[0]
+
+    # ----- Load configuration -----
+    base_dir = f"out/{args.base}"
+    config = load_config(f"{base_dir}/config.toml")
+    config["data_path"] = args.data
+
+    if args.base_epoch is None:
+        config["base_ckpt"] = f"out/{args.base}/ckpt_best.pt"
+    else:
+        config["base_ckpt"] = f"out/{args.base}/ckpt_epoch_{args.base_epoch}.pt" 
+    
+    if config["type"] not in VALID_TYPES:
+        raise ValueError(f"Unknown model type '{config['type']}'. Valid types are: {VALID_TYPES}")
+    
+    # ----- Initialize model and dataloader -----
+    set_seed(config["seed"])
+    model = initialize_model(config)
+    dataloader = get_dataloader(config)
+
+    # ----- Save slots -----
+    output_path = os.path.join(base_dir, f"{args.name}_slots.h5")
+    print(f"Saving slots to {output_path}...")
+    save_slots(model, dataloader, output_path, base_dir, args.display_samples, args.info_prints)
+    print("Finished saving slots.")
+
+
+def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_path: str, output_dir: str, num_figures: int, info_prints: bool):
     with torch.no_grad(), h5py.File(output_path, "w") as hf:
             for batch_index, batch in enumerate(tqdm(dataloader)):
                 orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
@@ -85,7 +99,7 @@ def main():
 
 
                     # ----- Debug prints for slot similarity at t=0 within single observations -----
-                    if batch_index == 0 and t == 0:
+                    if info_prints and batch_index == 0 and t == 0:
                         slots_orig_no_init, attn_orig_no_init = model.encode(orig_seq[:, t])
                         slots_orig_no_init_ordered, attn_orig_no_init_ordered = order_slots(slots_orig_no_init, attn_orig_no_init, prev_slots_orig, prev_attn_orig)
 
@@ -105,7 +119,7 @@ def main():
 
 
                 # ----- Debug prints for slot similarities across time and videos -----
-                if batch_index == 0:
+                if info_prints and batch_index == 0:
                     # positive similarity between slots at t and t+1
                     positive_similarities = torch.cosine_similarity(
                         active_slots_orig[:, :-1, :, :],
@@ -147,7 +161,7 @@ def main():
                     hf.create_dataset(key, data=value.cpu().numpy())
 
                 if batch_index == 0:
-                    for sample_idx in range(min(DISPLAY_SAMPLES, B)):
+                    for sample_idx in range(min(num_figures, B)):
                         image_rows = np.empty((model.num_slots + 2, T), dtype=object)
                         row_titles = ["Original", "Reconstruction"] 
                         row_titles += [f"Mask {i+1}" for i in range(model.num_slots)]
@@ -163,12 +177,59 @@ def main():
                             for o in range(model.num_slots):
                                 image_rows[o + 2, t] = masks_t[o].unsqueeze(0).cpu()
                 
-                        save_path = os.path.join(OUTPUT_DIR, f"sample_{sample_idx}_latents.png")
-                        plot_grid(image_rows, row_titles, column_titles, save_path)
-                    print(f"Saved latent visualizations to {OUTPUT_DIR}")
+                        output_path = os.path.join(output_dir, f"sample_{sample_idx}_latents.png")
+                        plot_grid(image_rows, row_titles, column_titles, output_path)
+
+                    print(f"Saved latent visualizations to {output_dir}.")
+
+
+def get_dataloader(config: dict) -> data.DataLoader:
+    print(f"Loading perturbed image sequence dataset: {config['data_path']}")
+    if config["type"] == "slot_attention":
+        dataset = PerturbedImageSequenceDataset(
+            npz_path=config["data_path"], 
+            in_format=config["model"]["obs_format"],
+            T=config["model"]["seq_length"],
+            only_original=False
+        )
+    elif config["type"] == "explicit_latents":
+        raise NotImplementedError("Dataloader for 'explicit_latents' not yet implemented.")
     
-    print("Finished saving slots.")
-    
+    dataloader = data.DataLoader(
+        dataset,
+        batch_size=config["train"]["batch_size"],
+        num_workers=config["train"]["num_workers"],
+        shuffle=False,
+        drop_last=False
+    )
+    print(f"Finished loading all {len(dataloader.dataset)} sequences.")
+    return dataloader
+
+def initialize_model(config: dict) -> torch.nn.Module:
+    if config["type"] == "slot_attention":
+        model = SlotAttentionAutoEncoder(
+            resolution=(config["model"]["obs_height"], config["model"]["obs_width"]),
+            num_channels=config["model"]["obs_channels"],
+            num_slots=config["slot"]["num_slots"],
+            num_iterations=config["slot"]["sa_iterations"],
+            slots_dim=config["model"]["slot_size"],
+            encdec_dim=config["model"]["mlp_size"]
+        )
+    elif config["type"] == "explicit_latents":
+        raise NotImplementedError(f"Model initialization for training type '{config['type']}' is not implemented.")
+
+    model = model.to(DEVICE)
+    model.eval()
+    base_ckpt = config["base_ckpt"]
+
+    if base_ckpt is not None:
+        print(f"Loading model weights from {base_ckpt}")
+        checkpoint = torch.load(base_ckpt, weights_only=True)
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+    print(f"Finished loading model. Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    return model
+
 
 def evaluate_slot_alignment(slots_t0, slots_t1):
     """
