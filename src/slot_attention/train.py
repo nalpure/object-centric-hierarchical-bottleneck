@@ -7,7 +7,8 @@ from torch import optim
 from torch.utils import data
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder
-from src.utils import ImageDataset, get_lr_schedule, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
+from src.utils import get_lr_schedule, load_config, log_progress, get_config_argument, set_seed, DEVICE, IMG_CHANNELS
+from datasets import ImageDataset
 
 ONLY_ORIGINAL = False
 ONLY_FIRST = False

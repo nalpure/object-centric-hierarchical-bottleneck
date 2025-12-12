@@ -31,6 +31,21 @@ class TrainStep:
         self.epoch_loss_dict[name] += value.item() / self.loss_divisor
     
 
+class SlotAttentionAETrainStep(TrainStep):
+    def __init__(self, model, device, loss_divisor):
+        super().__init__(model, device, loss_divisor)
+        self.criterion = torch.nn.MSELoss()
+
+    def __call__(self, batch) -> torch.Tensor:
+        obs = batch.to(self.device)
+        recon_combined, _, _, _ = self.model(obs)
+        batch_loss = self.criterion(obs, recon_combined)
+        self._add_loss("reconstruction", batch_loss)
+        self._add_loss("total", batch_loss)
+
+        return batch_loss / self.loss_divisor
+
+
 class ImplicitDynamicsTrainStep(TrainStep):
     def __init__(self, model, device, loss_divisor, noise_mag, pred_loss_weight, disentangle_loss_weight, t_past, t_future):
         super().__init__(model, device, loss_divisor)
@@ -43,7 +58,7 @@ class ImplicitDynamicsTrainStep(TrainStep):
     def __call__(self, batch) -> torch.Tensor:
         batch_loss = 0.0
         criterion = torch.nn.MSELoss()
-        disentangle = self.disentangle_loss_weight > 0
+        disentangle = self.disentangle_loss_weight > 0.0
         orig_seq, pert_seq, magnitude, obj_index, prop_index = (a.to(self.device) for a in batch)
         prop_index = reorder_perturbation_indices(prop_index, shift=-3)
         B, _, O, E = orig_seq.shape
@@ -114,6 +129,7 @@ class TrainManager:
 
     def train_epoch(self):
         self.train_step.reset_losses()
+        self.current_epoch += 1
 
         for batch in self.dataloader:
             batch_loss = self.train_step(batch)
@@ -121,17 +137,16 @@ class TrainManager:
             batch_loss.backward()
             self.optimizer.step()
 
+        self.scheduler.step()  # Adjust the learning rates
         epoch_loss = self.train_step.get_losses()["total"]
+
         if epoch_loss < self.best_loss:
             self.best_loss = epoch_loss
             self.best_epoch = self.current_epoch
 
-        self.scheduler.step()  # Adjust the learning rates
-        self.current_epoch += 1
         
-
-    def save_checkpoint(self, ckpt_path: str):
-        if exists(ckpt_path):
+    def save_checkpoint(self, ckpt_path: str, overwrite: bool = False):
+        if exists(ckpt_path) and not overwrite:
             raise ValueError(f"Checkpoint path '{ckpt_path}' already exists. Will not overwrite.")
 
         ckpt_dir = os.path.dirname(ckpt_path)
@@ -148,7 +163,7 @@ class TrainManager:
     
     def save_if_best(self, ckpt_path: str):
         if self.current_epoch == self.best_epoch:
-            self.save_checkpoint(ckpt_path)
+            self.save_checkpoint(ckpt_path, overwrite=True)
 
     def log_losses(self):
         loss_dict = self.train_step.get_losses()
@@ -166,6 +181,6 @@ class TrainManager:
                 header = 'epoch,' + ','.join(loss_dict.keys()) + '\n'
                 f.write(header)
             # Write losses
-            line = f"{self.current_epoch}," + ','.join([f"{value:.6f}" for value in loss_dict.values()]) + '\n'
+            line = f"{self.current_epoch}," + ','.join([f"{value}" for value in loss_dict.values()]) + '\n'
             f.write(line)
 
