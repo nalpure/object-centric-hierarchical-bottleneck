@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 import os
 import numpy as np
 import torch
@@ -8,15 +9,16 @@ from tqdm import tqdm
 
 #from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
+from slot_attention.autoencoder import SlotAttentionAutoEncoder
 from src.utils import get_explicit_codes, load_config, load_config_by_name, save_config, set_seed, DEVICE
-from datasets import PerturbedSlotSequenceDataset
-from train_classes import ImplicitDynamicsTrainStep, TrainManager
+from datasets import ImageDataset, PerturbedSlotSequenceDataset
+from train_classes import ImplicitDynamicsTrainStep, SlotAttentionAETrainStep, TrainManager
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
 
 
 def main():
-    # ----- Load configuration -----
+    # ----- Parse arguments -----
 
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Model and training configuration")
@@ -26,9 +28,13 @@ def main():
     parser.add_argument(
         "-e",
         "--base-epoch",
-        help="Base model epoch. If not provided, latest epoch is selected.",
+        help="Base model epoch. If not provided, best epoch is selected.",
     )
     args = parser.parse_args()
+
+
+    # ----- Load configuration -----
+    
     config = load_config_by_name(args.config)
     
     if config["type"] not in VALID_TYPES:
@@ -92,41 +98,63 @@ def main():
     # ----- Train model -----
 
     print("Starting training...")
+    start_time = datetime.now()
     for epoch in tqdm(range(config["train"]["epochs"])):
         train_manager.train_epoch()
         if (epoch + 1) % config["train"]["ckpt_rate"] == 0:
             train_manager.save_checkpoint(f"{output_path}/ckpt_epoch_{epoch+1}.pt")
         train_manager.save_if_best(f"{output_path}/ckpt_best.pt")
         train_manager.save_losses_to_csv(f"{output_path}/losses.csv")
-
-    print("Finished.")
+    
+    elapsed = datetime.now() - start_time
+    print(f"Finished after {elapsed}.")
 
 
 def get_dataloader(config: dict) -> data.DataLoader:
-    if config["type"] == "implicit_dynamics":
+    print("Loading training data...")
+
+    if config["type"] == "slot_attention":
+        dataset = ImageDataset(
+            npz_path=config["data_path"],
+            in_format=config["model"]["obs_format"],
+            only_first=config["model"]["seq_length"] == 1,
+            only_original=not config["train"]["include_perturbed"]
+        )
+    elif config["type"] == "implicit_dynamics":
         t_past = config["model"]["t_past"]
         t_future = config["model"]["t_future"]
 
-        print("Loading training data...")
         dataset = PerturbedSlotSequenceDataset(
             hdf5_file=config["data_path"], 
             normalize=False, 
             timesteps=t_past + t_future,
             prop_skip_codes=get_explicit_codes()
-        )
-
-        batch_size = config["train"]["batch_size"]
-        num_workers = config["train"]["num_workers"]
+        ) 
     else:
         raise NotImplementedError(f"Dataloader for training type '{config['type']}' is not implemented.")
     
-    train_dataloader = data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=num_workers)
-    print(f"Finished loading all {batch_size * len(train_dataloader)} training samples.")
+    train_dataloader = data.DataLoader(
+        dataset=dataset, 
+        batch_size=config["train"]["batch_size"], 
+        shuffle=True, 
+        drop_last=True, 
+        num_workers=config["train"]["num_workers"]
+    )
+    print(f"Finished loading all {config['train']['batch_size'] * len(train_dataloader)} training samples.")
     return train_dataloader
 
 
 def initialize_model(dataloader: data.DataLoader, config: dict) -> torch.nn.Module:
-    if config["type"] == "implicit_dynamics":
+    if config["type"] == "slot_attention":
+        model = SlotAttentionAutoEncoder(
+            resolution=(config["model"]["obs_height"], config["model"]["obs_width"]),
+            num_channels=config["model"]["obs_channels"],
+            num_slots=config["slot"]["num_slots"],
+            num_iterations=config["slot"]["sa_iterations"],
+            slots_dim=config["model"]["slot_size"],
+            encdec_dim=config["model"]["mlp_size"]
+        )
+    elif config["type"] == "implicit_dynamics":
         explicit_dim = next(iter(dataloader))[0].shape[-1]
         model = RelationalLatentDynamics(
             explicit_dim=explicit_dim,
@@ -134,10 +162,12 @@ def initialize_model(dataloader: data.DataLoader, config: dict) -> torch.nn.Modu
             seq_len=config["model"]["t_past"],
             edge_dim=config["model"]["edge_dim"],
             latent_edge_dim=config["model"]["latent_edge_dim"]
-        ).to(DEVICE)
+        )
     else:
         raise NotImplementedError(f"Model initialization for training type '{config['type']}' is not implemented.")
 
+    model = model.to(DEVICE)
+    model.train()
     init_ckpt = None # TODO !!
 
     if init_ckpt is not None:
@@ -151,7 +181,13 @@ def initialize_model(dataloader: data.DataLoader, config: dict) -> torch.nn.Modu
 
 
 def get_train_manager(model: torch.nn.Module, train_dataloader: data.DataLoader, config: dict) -> TrainManager:
-    if config["type"] == "implicit_dynamics":
+    if config["type"] == "slot_attention":
+        train_step = SlotAttentionAETrainStep(
+            model=model,
+            device=DEVICE,
+            loss_divisor=len(train_dataloader)
+        )
+    elif config["type"] == "implicit_dynamics":
         train_step = ImplicitDynamicsTrainStep(
             model=model,
             device=DEVICE,
