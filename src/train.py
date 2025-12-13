@@ -6,7 +6,6 @@ import torch
 from torch.utils import data
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
-from pathlib import Path
 
 #from src.implicit_latents.autoencoder import ImplicitLatentAutoEncoder
 from explicit_latents.autoencoder import ExplicitLatentAutoEncoder
@@ -80,11 +79,7 @@ def main():
     if config["type"] == "slot_attention":
         out_dir = "out"
     else:
-        # out_dir 
-        #data_path_parts = Path(config["data_path"]).parts
-        #out_index = data_path_parts.index("out")
-        #out_dir = Path(*data_path_parts[out_index:-1])
-        out_dir = config["data_path"].parent
+        out_dir = os.path.dirname(args.base)
 
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)

@@ -6,44 +6,45 @@ from tqdm import tqdm
 from torch.utils import data
 import torch
 from torch.nn import functional as F
+from pathlib import Path
 
 from src.slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
 from src.utils import load_config, plot_grid, set_seed, DEVICE
 from datasets import PerturbedImageSequenceDataset
 
+
 VALID_TYPES = ["slot_attention", "explicit_latents"]
+
 
 def main():
     # ----- Parse arguments -----
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--data", help="Path of the input observation dataset.")
-    parser.add_argument("-b", "--base", help="Base model name.")    
-    parser.add_argument(
-        "-e",
-        "--base-epoch",
-        help="Base model epoch. If not provided, best epoch is selected.",
-    )
+    parser.add_argument("-c", "--ckpt", help="Path to the .pt checkpoint file.")
     parser.add_argument("-n", "--name", help="Name of the output file.")
     parser.add_argument("-p", "--display-samples", type=int, default=5, help="Number of samples to visualize and save.")
     parser.add_argument("-i", "--info_prints", action="store_true", help="Whether to print additional slot similarity information during saving.")
     args = parser.parse_args()
 
-    if args.base is None:
-        raise ValueError("Base model name must be provided with -b/--base")
     if args.data is None:
         raise ValueError("Input data path must be provided with -d/--data")
-    if args.name is None:
-        args.name = args.data.split("/")[-1].split(".")[0]
+    if args.ckpt is None:
+        raise ValueError("Checkpoint path must be provided with -c/--ckpt")
+    if not os.path.exists(args.ckpt):
+        raise ValueError(f"Checkpoint path '{args.ckpt}' does not exist.")
 
     # ----- Load configuration -----
-    base_dir = f"out/{args.base}"
-    config = load_config(f"{base_dir}/config.toml")
+    base_dir = os.path.dirname(args.ckpt)
+    config = load_config(os.path.join(base_dir, "config.toml"))
     config["data_path"] = args.data
+    config["base_ckpt"] = args.ckpt
 
-    if args.base_epoch is None:
-        config["base_ckpt"] = f"out/{args.base}/ckpt_best.pt"
-    else:
-        config["base_ckpt"] = f"out/{args.base}/ckpt_epoch_{args.base_epoch}.pt" 
+    if "num_workers" not in config:
+        config["num_workers"] = 0
+
+    if args.name is None:
+        data_fname = os.path.splitext(os.path.basename(args.data))[0]
+        args.name = data_fname
     
     if config["type"] not in VALID_TYPES:
         raise ValueError(f"Unknown model type '{config['type']}'. Valid types are: {VALID_TYPES}")
@@ -54,13 +55,15 @@ def main():
     dataloader = get_dataloader(config)
 
     # ----- Save slots -----
-    output_path = os.path.join(base_dir, f"{args.name}_slots.h5")
-    print(f"Saving slots to {output_path}...")
-    save_slots(model, dataloader, output_path, base_dir, args.display_samples, args.info_prints)
-    print("Finished saving slots.")
+    output_fname = f"{args.name}_slots.h5"
+    save_slots(model, dataloader, output_fname, base_dir, args.display_samples, args.info_prints)
+    print("Finished.")
 
 
-def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_path: str, output_dir: str, num_figures: int, info_prints: bool):
+def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_fname: str, output_dir: str, num_figures: int, info_prints: bool):
+    output_path = os.path.join(output_dir, output_fname)
+    print(f"Saving slots to '{output_path}'...")
+
     with torch.no_grad(), h5py.File(output_path, "w") as hf:
             for batch_index, batch in enumerate(tqdm(dataloader)):
                 orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
@@ -188,8 +191,8 @@ def get_dataloader(config: dict) -> data.DataLoader:
     if config["type"] == "slot_attention":
         dataset = PerturbedImageSequenceDataset(
             npz_path=config["data_path"], 
-            in_format=config["model"]["obs_format"],
-            T=config["model"]["seq_length"],
+            in_format=config["data"]["obs_format"],
+            T=config["data"]["seq_length"],
             only_original=False
         )
     elif config["type"] == "explicit_latents":
@@ -198,7 +201,7 @@ def get_dataloader(config: dict) -> data.DataLoader:
     dataloader = data.DataLoader(
         dataset,
         batch_size=config["train"]["batch_size"],
-        num_workers=config["train"]["num_workers"],
+        num_workers=config["num_workers"],
         shuffle=False,
         drop_last=False
     )
@@ -273,7 +276,6 @@ def evaluate_slot_alignment(slots_t0, slots_t1):
     separation = mean_pos - mean_neg
 
     return mean_pos, mean_neg.item(), slot_match_acc, separation.item()
-
 
 
 if __name__ == "__main__":
