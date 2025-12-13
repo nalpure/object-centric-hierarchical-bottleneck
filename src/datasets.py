@@ -33,7 +33,7 @@ def transpose_array(arr, in_fmt: str, out_fmt: str):
 
 class ImageDataset(data.Dataset):
     def __init__(self, npz_path, in_format="HWC", out_format="CHW",
-                 only_first=False, only_original=False):
+                 seq_length=None, only_original=False):
         """
         Dataset over flat .npz arrays:
             img_o: (N, T, H, W, C)
@@ -43,18 +43,27 @@ class ImageDataset(data.Dataset):
         data = np.load(npz_path)
         self.img_o = data["img_o"]
         self.img_p = data["img_p"]
-        self.in_format, self.out_format = in_format, out_format
-        self.only_first, self.only_original = only_first, only_original
+        self.in_format = in_format
+        self.out_format = out_format
+        self.seq_length = seq_length
+        self.only_original = only_original
 
         if self.img_o.max() > 1.0:
             self.img_o = self.img_o.astype(np.float32) / 255.0
             self.img_p = self.img_p.astype(np.float32) / 255.0
 
         N, T = self.img_o.shape[:2]
+
+        if seq_length is None:
+            self.seq_length = T
+
+        if seq_length > T:
+            raise ValueError(f"Requested seq_length {seq_length} exceeds dataset length {T}.")
+
         self.idx2ep = [
             (n, t, pert)
             for n in range(N)
-            for t in ([0] if only_first else range(T))
+            for t in range(self.seq_length)
             for pert in ([False] if only_original else [False, True])
         ]
 

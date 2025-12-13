@@ -55,6 +55,43 @@ class SlotAttentionAETrainStep(TrainStep):
         return batch_loss / self.loss_divisor
     
 
+class ExplicitAETrainStep(TrainStep):
+    def __init__(self, model, device, loss_divisor, recon_weight, disentangle_weight, noise_mag=0.0):
+        super().__init__(model, device, loss_divisor)
+        self.recon_weight = recon_weight
+        self.disentangle_weight = disentangle_weight
+        self.noise_mag = noise_mag
+        self.criterion = torch.nn.MSELoss()
+
+    def __call__(self, batch) -> torch.Tensor:
+        batch_loss = 0.0
+        slots_orig, slots_pert, magnitude, obj, prop = (b.to(self.device) for b in batch)
+        prop = reorder_perturbation_indices(prop)
+        B, O, E = slots_orig.shape
+
+        if self.noise_mag > 0.0:
+            noise = torch.randn_like(slots_orig)
+            slots_orig = slots_orig + noise * self.noise_mag
+            slots_pert = slots_pert + noise * self.noise_mag
+        
+        slots_all = torch.cat([slots_orig, slots_pert], dim=0)  # [2*B, O, E]
+        slot_recon_all, z = self.model(slots_all)
+        z_orig, z_pert = z.split(B, dim=0)
+
+        recon_loss = self.criterion(slots_all, slot_recon_all) * self.recon_weight
+        batch_loss += recon_loss
+        self._add_loss("reconstruction", recon_loss)
+
+        if self.disentangle_weight > 0.0:
+            disent_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop, magnitude=magnitude)
+            disent_loss = disent_loss * self.disentangle_weight
+            batch_loss += disent_loss
+            self._add_loss("disentanglement", disent_loss)
+
+        self._add_loss("total", batch_loss)
+
+        return batch_loss / self.loss_divisor
+    
 
 class ImplicitDynamicsTrainStep(TrainStep):
     def __init__(self, model, device, loss_divisor, noise_mag, pred_loss_weight, disentangle_loss_weight, t_past, t_future):
