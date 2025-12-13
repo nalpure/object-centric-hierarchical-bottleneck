@@ -5,7 +5,7 @@ import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils import data
 
-from losses import disentanglement_loss
+from losses import attention_loss, disentanglement_loss
 from utils import reorder_perturbation_indices
 
 
@@ -32,18 +32,28 @@ class TrainStep:
     
 
 class SlotAttentionAETrainStep(TrainStep):
-    def __init__(self, model, device, loss_divisor):
+    def __init__(self, model, device, loss_divisor, recon_weight, bg_attn_weight):
         super().__init__(model, device, loss_divisor)
+        self.recon_weight = recon_weight
+        self.bg_attn_weight = bg_attn_weight
         self.criterion = torch.nn.MSELoss()
 
     def __call__(self, batch) -> torch.Tensor:
+        batch_loss = 0.0
         obs = batch.to(self.device)
-        recon_combined, _, _, _ = self.model(obs)
-        batch_loss = self.criterion(obs, recon_combined)
-        self._add_loss("reconstruction", batch_loss)
-        self._add_loss("total", batch_loss)
+        recon_combined, _, _, attn = self.model(obs)
+        recon_loss = self.criterion(obs, recon_combined) * self.recon_weight
+        batch_loss += recon_loss
+        self._add_loss("reconstruction", recon_loss)
 
+        if self.bg_attn_weight > 0.0:
+            attn_loss = attention_loss(attn) * self.bg_attn_weight
+            batch_loss += attn_loss
+            self._add_loss("attention", attn_loss)
+
+        self._add_loss("total", batch_loss)
         return batch_loss / self.loss_divisor
+    
 
 
 class ImplicitDynamicsTrainStep(TrainStep):
@@ -97,21 +107,21 @@ class ImplicitDynamicsTrainStep(TrainStep):
     
 
 class TrainManager:
-    def __init__(self, train_step : TrainStep, dataloader : data.DataLoader, lr: float, warmup_epochs : int, decay_epochs: int, decay_rate: float):
+    def __init__(self, train_step : TrainStep, dataloader : data.DataLoader, lr: float, warmup_epochs : int, decay_epochs: int, decay_rate: float, weight_decay: float):
         self.train_step = train_step
         self.dataloader = dataloader
         self.warmup_epochs = warmup_epochs
         self.decay_epochs = decay_epochs
         self.decay_rate = decay_rate
+        self.weight_decay = weight_decay
 
         self.model = train_step.model
         self.model.train()
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = self._get_lr_schedule()
         self.current_epoch = 0
         self.best_epoch = None
         self.best_loss = 1e9
-
 
     def _get_lr_schedule(self):
         """ Creates a learning rate scheduler with warmup and exponential decay."""
@@ -126,7 +136,6 @@ class TrainManager:
         
         return LambdaLR(self.optimizer, lr_lambda)
     
-
     def train_epoch(self):
         self.train_step.reset_losses()
         self.current_epoch += 1
@@ -143,7 +152,6 @@ class TrainManager:
         if epoch_loss < self.best_loss:
             self.best_loss = epoch_loss
             self.best_epoch = self.current_epoch
-
         
     def save_checkpoint(self, ckpt_path: str, overwrite: bool = False):
         if exists(ckpt_path) and not overwrite:
@@ -160,7 +168,6 @@ class TrainManager:
             "epoch": self.current_epoch
         }, ckpt_path)
 
-    
     def save_if_best(self, ckpt_path: str):
         if self.current_epoch == self.best_epoch:
             self.save_checkpoint(ckpt_path, overwrite=True)
