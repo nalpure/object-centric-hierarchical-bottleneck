@@ -3,7 +3,6 @@
 import argparse
 from datetime import datetime
 from datetime import timedelta
-import json
 import os
 from os.path import exists
 import random
@@ -15,15 +14,17 @@ import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 import tomli
 import tomli_w
-from importlib import resources
+from torch.utils import data
 
 import torch
 from torch import nn
 
-EPS = 1e-17
-CONFIG_DIR = "configs/"
+from datasets import ImageDataset, PerturbedImageSequenceDataset, PerturbedSlotSequenceDataset
+from explicit_latents.autoencoder import ExplicitLatentAutoEncoder
+from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
+from slot_attention.autoencoder import SlotAttentionAutoEncoder
+
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-IMG_CHANNELS = 3
 
 # Define the mappings between property names and numerical codes
 # Default: attributes are not ordered by explicit / implicit distinction
@@ -50,91 +51,7 @@ STRING_TO_CODE_SORTED = {
 CODE_TO_STRING_DEFAULT = {v: k for k, v in STRING_TO_CODE_DEFAULT.items()}
 CODE_TO_STRING_SORTED = {v: k for k, v in STRING_TO_CODE_SORTED.items()}
 
-DEFAULT_CONFIG = {
-    "slot_attention": {
-        # General parameters
-        "train_path": "data/observations/training_data.h5",
-        "init_ckpt": None,
-        "ckpt_path": "checkpoints/slot_attention/checkpoint.ckpt",
-        "save_path": "data/slots/slots.h5",
-        "seed": 0,
-        "num_workers": 8,
-        # Image parameters
-        "in_format": "HWC",
-        "resolution": [64, 64],
-        # Slot Attention parameters
-        "num_slots": 4,
-        "num_iterations": 3,
-        "slots_dim": 64,
-        "encdec_dim": 32,
-        # Training parameters
-        "batch_size": 64,
-        "optimizer": "adam",
-        "mixed_precision": False,
-        "num_epochs": 100,
-        "learning_rate": 0.0003,
-        "rec_loss_weight": 10000,
-        "attn_loss_weight": 1,
-        "contrastive_loss_weight": 5000,
-        "warmup_epochs": 20,
-        "decay_epochs": 80,
-        "decay_rate": 0.5
-    },
-    "explicit_latents": {
-        # General parameters
-        "train_path": "data/slots/slots.h5",
-        "init_ckpt": None,
-        "ckpt_path": "checkpoints/explicit_latents/checkpoint.ckpt",
-        "save_path": "data/explicit_latents/expl_latents.h5",
-        "seed": 0,
-        "num_workers": 4,
-        # Training parameters
-        "batch_size": 128,
-        "optimizer": "adam",
-        "num_epochs": 500,
-        "learning_rate": 0.0004,
-        "warmup_epochs": 0,
-        "decay_epochs": 500,
-        "decay_rate": 0.5,
-        # Further model parameters
-        "explicit_dim": 3,
-        "implicit_dim": 2,
-        "normalize": True,
-        "noise": 0.0,
-        "disentanglement_loss_weight": 0,
-        "prediction_loss_weight": 1,
-        "reconstruction_loss_weight": 0,
-        "freeze_ae": False,
-        "edge_dim": 64,
-        "latent_edge_dim": 64,
-        "log_note": ""
-    },
-    "implicit_latents": {
-        # General parameters
-        "train_path": "data/explicit_latents/expl_latents.h5",
-        "init_ckpt": None,
-        "ckpt_path": "checkpoints/implicit_latents/checkpoint.ckpt",
-        "seed": 0,
-        "num_workers": 0,
-        # Training parameters
-        "batch_size": 128,
-        "optimizer": "adam",
-        "num_epochs": 500,
-        "learning_rate": 0.0004,
-        "warmup_epochs": 0,
-        "decay_epochs": 500,
-        "decay_rate": 0.5,
-        # Further model parameters
-        "latent_dim": 5,
-        "edge_dim": 64,
-        "latent_edge_dim": 64,
-        "normalize": True,
-        "noise": 0.0,
-        "prediction_loss_weight": 1,
-        "reconstruction_loss_weight": 1,
-        "disentanglement_loss_weight": 0
-    }
-}
+
 
 def get_config_argument():  
     parser = argparse.ArgumentParser()
@@ -572,7 +489,6 @@ def save_norm_stats(mean, std, path):
 
 def load_config_by_name(name):
     try:
-        #path = resources.files("FS-SWM").joinpath("../../configs", name)
         path = Path(__file__).parent.parent / "configs" / (name + ".toml")
 
         with path.open("rb") as f:
@@ -597,3 +513,114 @@ def load_config(path):
 def save_config(config, path):
     with open(path, "wb") as f:
         tomli_w.dump(config, f)
+
+
+def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
+    print("Loading training data...")
+
+    if config["type"] == "slot_attention":
+        # In save mode, load sequences
+        if save_mode:
+            dataset = PerturbedImageSequenceDataset(
+                npz_path=config["data"]["path"],
+                in_format=config["data"]["obs_format"],
+                T=config["data"]["seq_length"],
+                only_original=False
+            )
+        # Otherwise, load individual images
+        else:
+            dataset = ImageDataset(
+                npz_path=config["data"]["path"],
+                in_format=config["data"]["obs_format"],
+                seq_length=config["data"]["seq_length"],
+                only_original=not config["data"]["include_perturbed"]
+            )
+
+    elif config["type"] == "explicit_latents":
+        prop_skip_codes = [] if save_mode else get_implicit_codes()
+        normalize = config["data"]["normalize"] if "normalize" in config["data"] else False
+        mean = None
+        std = None
+        norm_stats_path = config["data"]["path"].replace(".h5", "_norm_stats.pt")
+
+        if normalize and os.path.exists(norm_stats_path):
+            print("Loading normalization stats from", norm_stats_path)
+            stats = torch.load(norm_stats_path, weights_only=True)
+            mean = stats["mean"]
+            std = stats["std"]
+
+        dataset = PerturbedSlotSequenceDataset(
+            hdf5_file=config["data"]["path"],
+            feature_mean=mean,
+            feature_std=std,
+            normalize=normalize,
+            timesteps=config["data"]["seq_length"],
+            prop_skip_codes=prop_skip_codes
+        )            
+
+        if normalize and not os.path.exists(norm_stats_path):
+            print("Saving normalization stats to", norm_stats_path)
+            torch.save({"mean": dataset.feature_mean, "std": dataset.feature_std}, norm_stats_path)
+
+    elif config["type"] == "implicit_dynamics":
+        t_past = config["model"]["t_past"]
+        t_future = config["train"]["t_future"]
+        
+        dataset = PerturbedSlotSequenceDataset(
+            hdf5_file=config["data"]["path"], 
+            normalize=False, 
+            timesteps=t_past + t_future,
+            prop_skip_codes=get_explicit_codes()
+        ) 
+    
+    train_dataloader = data.DataLoader(
+        dataset=dataset, 
+        batch_size=config["train"]["batch_size"], 
+        shuffle=True, 
+        drop_last=True, 
+        num_workers=config["num_workers"]
+    )
+    print(f"Finished loading all {config['train']['batch_size'] * len(train_dataloader)} training samples.")
+    return train_dataloader
+
+
+def initialize_model(dataloader: data.DataLoader, config: dict, eval_mode: bool) -> torch.nn.Module:
+    if config["type"] == "slot_attention":
+        model = SlotAttentionAutoEncoder(
+            resolution=(config["model"]["obs_height"], config["model"]["obs_width"]),
+            num_channels=config["model"]["obs_channels"],
+            num_slots=config["slot"]["num_slots"],
+            num_iterations=config["slot"]["sa_iterations"],
+            slots_dim=config["model"]["slot_size"],
+            encdec_dim=config["model"]["mlp_size"]
+        )
+    elif config["type"] == "explicit_latents":
+        slots_dim = next(iter(dataloader))[0].shape[-1]
+        model = ExplicitLatentAutoEncoder(
+            config["model"]["explicit_dim"],
+            slots_dim
+        )
+    elif config["type"] == "implicit_dynamics":
+        explicit_dim = next(iter(dataloader))[0].shape[-1]
+        model = RelationalLatentDynamics(
+            explicit_dim=explicit_dim,
+            implicit_dim=config["model"]["latent_dim"] - explicit_dim,
+            seq_len=config["model"]["t_past"],
+            edge_dim=config["model"]["edge_dim"],
+            latent_edge_dim=config["model"]["latent_edge_dim"]
+        )
+
+    model = model.to(DEVICE)
+    if eval_mode:
+        model.eval()
+    else:
+        model.train()
+
+    ckpt = config['base_ckpt']
+    if ckpt != "":
+        print(f"Loading model weights from {ckpt}")
+        checkpoint = torch.load(ckpt, weights_only=True)
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+    print(f"Finished loading model. Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    return model

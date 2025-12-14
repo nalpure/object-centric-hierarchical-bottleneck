@@ -33,32 +33,29 @@ def transpose_array(arr, in_fmt: str, out_fmt: str):
 
 class ImageDataset(data.Dataset):
     def __init__(self, npz_path, in_format="HWC", out_format="CHW",
-                 seq_length=None, only_original=False):
+                 seq_length=None, only_original=False, scale_images_255=True):
         """
         Dataset over flat .npz arrays:
             img_o: (N, T, H, W, C)
             img_p: (N, T, H, W, C)
         Returns individual images.
         """
-        data = np.load(npz_path)
+        data = np.load(npz_path, mmap_mode='r')
         self.img_o = data["img_o"]
         self.img_p = data["img_p"]
-        self.in_format = in_format
-        self.out_format = out_format
-        self.seq_length = seq_length
-        self.only_original = only_original
 
-        if self.img_o.max() > 1.0:
+        if scale_images_255:
             self.img_o = self.img_o.astype(np.float32) / 255.0
             self.img_p = self.img_p.astype(np.float32) / 255.0
 
+        self.img_o = transpose_array(self.img_o, in_format, out_format)
+        self.img_p = transpose_array(self.img_p, in_format, out_format)
+
         N, T = self.img_o.shape[:2]
+        self.seq_length = T if seq_length is None else seq_length
 
-        if seq_length is None:
-            self.seq_length = T
-
-        if seq_length > T:
-            raise ValueError(f"Requested seq_length {seq_length} exceeds dataset length {T}.")
+        if self.seq_length > T:
+            raise ValueError(f"Requested seq_length {self.seq_length} exceeds dataset length {T}.")
 
         self.idx2ep = [
             (n, t, pert)
@@ -73,7 +70,6 @@ class ImageDataset(data.Dataset):
     def __getitem__(self, idx):
         n, t, is_pert = self.idx2ep[idx]
         img = self.img_p[n, t] if is_pert else self.img_o[n, t]
-        img = transpose_array(img, self.in_format, self.out_format)
         return torch.from_numpy(img).float()
     
 
@@ -118,6 +114,7 @@ class PerturbedImageSequenceDataset(data.Dataset):
 class ImageSequencePairDataset(data.Dataset):
     """
     Returns consecutive frame pairs (t, t+1) from the 'img_o' sequences.
+    If only_first is True, only the first two frames of each sequence are used.
     """
     def __init__(self, npz_path, in_format="HWC", out_format="CHW", only_first=True):
         data = np.load(npz_path)
@@ -246,46 +243,45 @@ class PerturbedSlotSequenceDataset(data.Dataset):
 
 
     def _load_slots_data(self):
-            data = { 'orig_seq': [], 'pert_seq': [],
-                    'magnitude': [], 'obj_index': [], 'prop_index': [] }
+        data = { 'orig_seq': [], 'pert_seq': [],
+                'magnitude': [], 'obj_index': [], 'prop_index': [] }
 
-            with h5py.File(self.hdf5_file, 'r') as f:
-                for key in f.keys():
-                    for k in data:
-                        if k in key:
-                            data[k].append(f[key][...])
-                            break
+        with h5py.File(self.hdf5_file, 'r') as f:
+            for key in f.keys():
+                for k in data:
+                    if k in key:
+                        data[k].append(f[key][...])
+                        break
 
-            # Stack everything
-            orig_seq = np.concatenate(data['orig_seq'], axis=0)
-            pert_seq = np.concatenate(data['pert_seq'], axis=0)
-            magnitude = np.concatenate(data['magnitude'], axis=0)
-            obj_index = np.concatenate(data['obj_index'], axis=0)
-            prop_index = np.concatenate(data['prop_index'], axis=0)
+        # Stack everything
+        orig_seq = np.concatenate(data['orig_seq'], axis=0)
+        pert_seq = np.concatenate(data['pert_seq'], axis=0)
+        magnitude = np.concatenate(data['magnitude'], axis=0)
+        obj_index = np.concatenate(data['obj_index'], axis=0)
+        prop_index = np.concatenate(data['prop_index'], axis=0)
 
-            orig_seq = orig_seq[:, :self.T]   # (B, O, S, T)
-            pert_seq = pert_seq[:, :self.T]   # (B, O, S, T)
+        if self.T == 1:
+            orig_seq = orig_seq[:, 0]  # (B, O, S)
+            pert_seq = pert_seq[:, 0]  # (B, O, S)
+        else:
+            orig_seq = orig_seq[:, :self.T]   # (B, T, O, S)
+            pert_seq = pert_seq[:, :self.T]   # (B, T, O, S)
 
-            if self.T == 1:
-                orig_seq = np.squeeze(orig_seq, axis=-1)  # (B, O, S)
-                pert_seq = np.squeeze(pert_seq, axis=-1)  # (B, O, S)
+        if self.prop_skip_codes is not None:
+            mask = ~np.isin(prop_index, self.prop_skip_codes)
+            orig_seq = orig_seq[mask]
+            pert_seq = pert_seq[mask]
+            magnitude = magnitude[mask]
+            obj_index = obj_index[mask]
+            prop_index = prop_index[mask]
+        # Convert to tensors
+        orig_seq = torch.tensor(orig_seq, dtype=torch.float32)
+        pert_seq = torch.tensor(pert_seq, dtype=torch.float32)
+        magnitude = torch.tensor(magnitude, dtype=torch.float32)
+        obj_index = torch.tensor(obj_index, dtype=torch.int64)
+        prop_index = torch.tensor(prop_index, dtype=torch.int64)
 
-            if self.prop_skip_codes is not None:
-                mask = ~np.isin(prop_index, self.prop_skip_codes)
-                orig_seq = orig_seq[mask]
-                pert_seq = pert_seq[mask]
-                magnitude = magnitude[mask]
-                obj_index = obj_index[mask]
-                prop_index = prop_index[mask]
-
-            # Convert to tensors
-            orig_seq = torch.tensor(orig_seq, dtype=torch.float32)
-            pert_seq = torch.tensor(pert_seq, dtype=torch.float32)
-            magnitude = torch.tensor(magnitude, dtype=torch.float32)
-            obj_index = torch.tensor(obj_index, dtype=torch.int64)
-            prop_index = torch.tensor(prop_index, dtype=torch.int64)
-
-            return orig_seq, pert_seq, magnitude, obj_index, prop_index
+        return orig_seq, pert_seq, magnitude, obj_index, prop_index
 
     def _compute_mean_std(self):
         with torch.no_grad():
