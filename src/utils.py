@@ -14,12 +14,14 @@ import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 import tomli
 import tomli_w
-from torch.utils import data
+from pathlib import Path
+from PIL import Image
 
+from torch.utils import data
 import torch
 from torch import nn
 
-from datasets import ImageDataset, PerturbedImageSequenceDataset, PerturbedSlotSequenceDataset
+from datasets import ImageDataset, ImageSequencePairDataset, PerturbedImageSequenceDataset, PerturbedSlotSequenceDataset
 from explicit_latents.autoencoder import ExplicitLatentAutoEncoder
 from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
 from slot_attention.autoencoder import SlotAttentionAutoEncoder
@@ -427,7 +429,6 @@ def create_trail(img_seq, highlight="last"):
 
     return final_img
 
-from PIL import Image
 
 def save_gif_from_array(frames, output_path="rollout.gif", fps=30, scale=4.0, loop=0):
     """
@@ -463,8 +464,6 @@ def save_gif_from_array(frames, output_path="rollout.gif", fps=30, scale=4.0, lo
     imageio.mimsave(output_path, frames, duration=1/fps, loop=loop)
     print(f"GIF saved to {output_path}")
 
-
-from pathlib import Path
 
 def load_norm_stats(path):    
     if exists(path):
@@ -519,6 +518,7 @@ def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
     print("Loading training data...")
 
     if config["type"] == "slot_attention":
+        train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
         # In save mode, load sequences
         if save_mode:
             dataset = PerturbedImageSequenceDataset(
@@ -526,6 +526,15 @@ def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
                 in_format=config["data"]["obs_format"],
                 T=config["data"]["seq_length"],
                 only_original=False
+            )
+        # With contrastive learning, load image pairs
+        elif train_contrastive:
+            if "include_perturbed" in config["data"] and config["data"]["include_perturbed"]:
+                raise Warning("Contrastive training with perturbed images is not supported. Training will proceed with only original images.")
+            dataset = ImageSequencePairDataset(
+                npz_path=config["data"]["path"],
+                in_format=config["data"]["obs_format"],
+                seq_length=config["data"]["seq_length"]
             )
         # Otherwise, load individual images
         else:
@@ -584,7 +593,7 @@ def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
     return train_dataloader
 
 
-def initialize_model(dataloader: data.DataLoader, config: dict, eval_mode: bool) -> torch.nn.Module:
+def initialize_model(config: dict, dataloader: data.DataLoader, eval_mode: bool) -> torch.nn.Module:
     if config["type"] == "slot_attention":
         model = SlotAttentionAutoEncoder(
             resolution=(config["model"]["obs_height"], config["model"]["obs_width"]),
@@ -618,9 +627,9 @@ def initialize_model(dataloader: data.DataLoader, config: dict, eval_mode: bool)
 
     ckpt = config['base_ckpt']
     if ckpt != "":
-        print(f"Loading model weights from {ckpt}")
         checkpoint = torch.load(ckpt, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Succesfully model weights from {ckpt}, corresponding to epoch {checkpoint['epoch']}.")
 
     print(f"Finished loading model. Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     return model

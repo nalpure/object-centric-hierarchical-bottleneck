@@ -5,8 +5,8 @@ import torch
 from torch.utils import data
 from tqdm import tqdm
 
-from src.utils import  get_dataloader, initialize_model, load_config, load_config_by_name, save_config, set_seed, DEVICE
-from train_classes import ExplicitAETrainStep, ImplicitDynamicsTrainStep, SlotAttentionAETrainStep, TrainManager
+from src.utils import  get_dataloader, initialize_model, load_config_by_name, save_config, set_seed, DEVICE
+from train_classes import ExplicitAETrainStep, ImplicitDynamicsTrainStep, SlotAttentionAETrainStep, SlotAttentionContrastiveTrainStep, TrainManager, TrainStep
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
 
@@ -16,7 +16,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Model and training configuration")
-    parser.add_argument("-n", "--name", help="Name for the training run.")
+    parser.add_argument("-n", "--name", help="Name of the training run.")
     parser.add_argument("-d", "--data", help="Dataset path.")
     parser.add_argument("-b", "--base", help="Base model name.")    
     parser.add_argument(
@@ -24,6 +24,7 @@ def main():
         "--base-epoch",
         help="Base model epoch. If not provided, best epoch is selected.",
     )
+    parser.add_argument("-ev", "--eval", help="Evaluation mode.", action="store_true")
     args = parser.parse_args()
 
 
@@ -57,7 +58,7 @@ def main():
     config["base_ckpt"] = ""
 
     if args.base is None:
-        print("No base model specified.")
+        print("No base model specified. Training from scratch.")
     else:        
         if args.base_epoch is None:
             config["base_ckpt"] = os.path.join(out_dir, args.base, "ckpt_best.pt")
@@ -68,13 +69,28 @@ def main():
     if config["type"] not in VALID_TYPES:
         raise ValueError(f"Unknown training type '{config['type']}'. Valid types are: {VALID_TYPES}")
 
-    # For explicit latents, set sequence length to 1
+    # For explicit latents, set sequence length to 1 (since disentanglement can only be applied to first frame)
     if config["type"] == "explicit_latents":
         config["data"]["seq_length"] = 1
 
 
-    # ----- Create output folder -----
+    # ----- Load dataset, model, and train manager -----
+    
+    eval_mode = args.eval
+    set_seed(config['seed'])
+    dataloader = get_dataloader(config)
+    model = initialize_model(config, dataloader, eval_mode=eval_mode)
+    train_step = get_train_step(config, dataloader, model)
 
+    if not args.eval:
+        train(config, dataloader, train_step, out_dir)
+    else:
+        eval(dataloader, train_step)
+  
+
+
+def train(config: dict, train_dataloader: data.DataLoader, train_step: TrainStep, out_dir: str):
+    # ----- Create output folder -----
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
 
@@ -91,61 +107,7 @@ def main():
     save_config(config, os.path.join(output_path, "config.toml"))
     print(f"Created new output directory at '{output_path}'.")
 
-
-    # ----- Load dataset, model, and train manager -----
-    
-    set_seed(config['seed'])
-    dataloader = get_dataloader(config)
-    model = initialize_model(dataloader, config, eval_mode=False)
-    train_manager = get_train_manager(model, dataloader, config)
-
-
-    # ----- Train model -----
-
-    print("Starting training...")
-    for epoch in tqdm(range(config["train"]["epochs"])):
-        train_manager.train_epoch()
-        if (epoch + 1) % config["train"]["ckpt_rate"] == 0:
-            train_manager.save_checkpoint(f"{output_path}/ckpt_epoch_{epoch+1}.pt")
-        train_manager.save_if_best(f"{output_path}/ckpt_best.pt")
-        train_manager.save_losses_to_csv(f"{output_path}/losses.csv")
-
-    print(f"Finished. Best epoch: {train_manager.best_epoch} with loss {train_manager.best_loss:.4f}.")
-
-
-def get_train_manager(model: torch.nn.Module, train_dataloader: data.DataLoader, config: dict) -> TrainManager:
-    if config["type"] == "slot_attention":
-        train_step = SlotAttentionAETrainStep(
-            model=model,
-            device=DEVICE,
-            loss_divisor=len(train_dataloader),
-            recon_weight=config["train"]["weights"]["reconstruction"],
-            bg_attn_weight=config["train"]["weights"]["bg_attention"]
-        )
-    elif config["type"] == "explicit_latents":
-        noise_mag = config["data"]["noise"] if "noise" in config["data"] else 0.0
-        train_step = ExplicitAETrainStep(
-            model=model,
-            device=DEVICE,
-            loss_divisor=len(train_dataloader),
-            recon_weight=config["train"]["weights"]["reconstruction"],
-            disentangle_weight=config["train"]["weights"]["disentanglement"],
-            noise_mag=noise_mag
-        )
-    elif config["type"] == "implicit_dynamics":
-        train_step = ImplicitDynamicsTrainStep(
-            model=model,
-            device=DEVICE,
-            loss_divisor=len(train_dataloader),
-            noise_mag=0.0,
-            pred_loss_weight=config["train"]["weights"]["prediction"],
-            disentangle_loss_weight=config["train"]["weights"]["disentanglement"],
-            t_past=config["model"]["t_past"],
-            t_future=config["train"]["t_future"]
-        )
-    else:
-        raise NotImplementedError(f"Train manager for training type '{config['type']}' is not implemented.")
-
+    # ----- Create train manager -----
     train_manager = TrainManager(
         train_step=train_step,
         dataloader=train_dataloader,
@@ -156,7 +118,65 @@ def get_train_manager(model: torch.nn.Module, train_dataloader: data.DataLoader,
         weight_decay=config["train"]["opt"]["weight_decay"]
     )
     print("Initialized train manager.")
-    return train_manager
+
+
+    # ----- Train model -----
+    print("Starting training...")
+    for epoch in tqdm(range(config["train"]["epochs"])):
+        train_manager.train_epoch()
+        if (epoch + 1) % config["train"]["ckpt_rate"] == 0:
+            train_manager.save_checkpoint(f"{output_path}/ckpt_epoch_{epoch+1}.pt")
+        train_manager.save_if_best(f"{output_path}/ckpt_best.pt")
+        train_manager.save_losses_to_csv(f"{output_path}/losses.csv")
+
+    print(f"Finished. Best epoch: {train_manager.best_epoch_idx} with loss {train_manager.best_loss:.4f}.")
+
+
+def eval(eval_dataloader: data.DataLoader, train_step: TrainStep):
+    batch_loss = 0.0
+    for batch in eval_dataloader:
+        batch_loss += train_step(batch)
+    print(f"Evaluation loss: {batch_loss / len(eval_dataloader):.4f}")
+
+
+def get_train_step(config: dict, train_dataloader: data.DataLoader, model: torch.nn.Module) -> TrainStep:
+    if config["type"] == "slot_attention":
+        train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
+        if train_contrastive:
+            train_step = SlotAttentionContrastiveTrainStep(
+                model=model,
+                device=DEVICE,
+                recon_weight=config["train"]["weights"]["reconstruction"],
+                bg_attn_weight=config["train"]["weights"]["bg_attention"],
+                contrastive_weight=config["train"]["weights"]["contrastive"]
+            )
+        else:
+            train_step = SlotAttentionAETrainStep(
+                model=model,
+                device=DEVICE,
+                recon_weight=config["train"]["weights"]["reconstruction"],
+                bg_attn_weight=config["train"]["weights"]["bg_attention"]
+            )
+    elif config["type"] == "explicit_latents":
+        noise_mag = config["data"]["noise"] if "noise" in config["data"] else 0.0
+        train_step = ExplicitAETrainStep(
+            model=model,
+            device=DEVICE,
+            recon_weight=config["train"]["weights"]["reconstruction"],
+            disentangle_weight=config["train"]["weights"]["disentanglement"],
+            noise_mag=noise_mag
+        )
+    elif config["type"] == "implicit_dynamics":
+        train_step = ImplicitDynamicsTrainStep(
+            model=model,
+            device=DEVICE,
+            noise_mag=0.0,
+            pred_loss_weight=config["train"]["weights"]["prediction"],
+            disentangle_loss_weight=config["train"]["weights"]["disentanglement"],
+            t_past=config["model"]["t_past"],
+            t_future=config["train"]["t_future"]
+        )
+    return train_step
 
 
 if __name__ == "__main__":

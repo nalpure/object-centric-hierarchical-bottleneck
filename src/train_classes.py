@@ -5,66 +5,114 @@ import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils import data
 
-from losses import attention_loss, disentanglement_loss
+from explicit_latents.autoencoder import ExplicitLatentAutoEncoder
+from losses import attention_loss, disentanglement_loss, slot_slot_contrastive_loss
+from slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
 from utils import reorder_perturbation_indices
 
 
 class TrainStep:    
-    def __init__(self, model : torch.nn.Module, device : torch.device, loss_divisor : int):
+    def __init__(self, model : torch.nn.Module, device : torch.device):
         self.model = model
         self.device = device
-        self.loss_divisor = loss_divisor
-        self.epoch_loss_dict = {"total": 0.0}
 
     def __call__(self, batch) -> torch.Tensor:
         raise NotImplementedError("TrainStep is an abstract base class")
     
-    def get_losses(self) -> dict:
-        return self.epoch_loss_dict
-    
-    def reset_losses(self):
-        self.epoch_loss_dict = {}
-    
-    def _add_loss(self, name : str, value : torch.Tensor):
-        if name not in self.epoch_loss_dict:
-            self.epoch_loss_dict[name] = 0.0
-        self.epoch_loss_dict[name] += value.item() / self.loss_divisor
-    
 
 class SlotAttentionAETrainStep(TrainStep):
-    def __init__(self, model, device, loss_divisor, recon_weight, bg_attn_weight):
-        super().__init__(model, device, loss_divisor)
+    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight):
+        super().__init__(model, device)
         self.recon_weight = recon_weight
         self.bg_attn_weight = bg_attn_weight
         self.criterion = torch.nn.MSELoss()
 
     def __call__(self, batch) -> torch.Tensor:
-        batch_loss = 0.0
+        # Compute reconstruction
         obs = batch.to(self.device)
-        recon_combined, _, _, attn = self.model(obs)
+        recon_combined, recons, masks, attn = self.model(obs)
+
+        # Compute losses
+        loss_dict = {}
         recon_loss = self.criterion(obs, recon_combined) * self.recon_weight
-        batch_loss += recon_loss
-        self._add_loss("reconstruction", recon_loss)
+        loss_dict["reconstruction"] = recon_loss
 
         if self.bg_attn_weight > 0.0:
             attn_loss = attention_loss(attn) * self.bg_attn_weight
-            batch_loss += attn_loss
-            self._add_loss("attention", attn_loss)
+            loss_dict["attention"] = attn_loss
 
-        self._add_loss("total", batch_loss)
-        return batch_loss / self.loss_divisor
+        info_dict = {
+            "orig": obs.detach().cpu(),
+            "recon_combined": recon_combined.detach().cpu(),
+            "recons": recons.detach().cpu(),
+            "masks": masks.detach().cpu(),
+            "attn": attn.detach().cpu(),
+        }
+
+        return loss_dict, info_dict
+    
+
+class SlotAttentionContrastiveTrainStep(TrainStep):
+    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight, contrastive_weight):
+        super().__init__(model, device)
+        self.recon_weight = recon_weight
+        self.bg_attn_weight = bg_attn_weight
+        self.contrastive_weight = contrastive_weight
+        self.criterion = torch.nn.MSELoss()
+
+    def __call__(self, batch) -> torch.Tensor:
+        img_seq = batch.to(self.device) # (B, T, C, H, W)
+        B, T, C, H, W = img_seq.shape
+        S = self.model.num_slots
+        D = self.model.slots_dim
+        O = S - 1
+
+        # Encode all timesteps, initialized with previous slots
+        active_slots = torch.empty((B, T, O, D), device=self.device)
+        bg_slot = torch.empty((B, T, 1, D), device=self.device)
+        attn = torch.empty((B, T, S, H*W), device=self.device)
+
+        prev_slots = None
+        prev_attn = None
+
+        for t in range(T):
+            slots_current, attn_current = self.model.encode(img_seq[:, t], slots_init=prev_slots)
+            slots_current, attn_current = order_slots(slots_current, attn_current, prev_slots, prev_attn)
+
+            active_slots[:, t] = slots_current[:, 1:]
+            bg_slot[:, t] = slots_current[:, :1]
+            attn[:, t] = attn_current
+
+            prev_slots = slots_current
+            prev_attn = attn_current
+
+        # Decode all timesteps at once for speedup
+        slots = torch.cat((active_slots, bg_slot), dim=2) # (B, T, S, D)
+        slots_flat = slots.view(B * T, S, -1)
+        recon_flat, _, _ = self.model.decode(slots_flat)
+        recon = recon_flat.view(B, T, C, H, W)
+
+        # Calculate losses
+        loss_dict = {
+            "reconstruction": self.criterion(recon, img_seq) * self.recon_weight,
+            "contrastive": slot_slot_contrastive_loss(active_slots) * self.contrastive_weight,
+            "attention": attention_loss(attn.view(B * T, S, H * W)) * self.bg_attn_weight
+        }
+
+        info_dict = {}
+        
+        return loss_dict, info_dict
     
 
 class ExplicitAETrainStep(TrainStep):
-    def __init__(self, model, device, loss_divisor, recon_weight, disentangle_weight, noise_mag=0.0):
-        super().__init__(model, device, loss_divisor)
+    def __init__(self, model: ExplicitLatentAutoEncoder, device, recon_weight, disentangle_weight, noise_mag=0.0):
+        super().__init__(model, device)
         self.recon_weight = recon_weight
         self.disentangle_weight = disentangle_weight
         self.noise_mag = noise_mag
         self.criterion = torch.nn.MSELoss()
 
     def __call__(self, batch) -> torch.Tensor:
-        batch_loss = 0.0
         slots_orig, slots_pert, magnitude, obj, prop = (b.to(self.device) for b in batch)
         prop = reorder_perturbation_indices(prop)
         B, O, E = slots_orig.shape
@@ -78,24 +126,22 @@ class ExplicitAETrainStep(TrainStep):
         slot_recon_all, z = self.model(slots_all)
         z_orig, z_pert = z.split(B, dim=0)
 
-        recon_loss = self.criterion(slots_all, slot_recon_all) * self.recon_weight
-        batch_loss += recon_loss
-        self._add_loss("reconstruction", recon_loss)
+        loss_dict = {
+            "reconstruction": self.criterion(slots_all, slot_recon_all) * self.recon_weight
+        }
 
         if self.disentangle_weight > 0.0:
             disent_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop, magnitude=magnitude)
-            disent_loss = disent_loss * self.disentangle_weight
-            batch_loss += disent_loss
-            self._add_loss("disentanglement", disent_loss)
+            loss_dict["disentanglement"] = disent_loss * self.disentangle_weight
 
-        self._add_loss("total", batch_loss)
+        info_dict = {}
 
-        return batch_loss / self.loss_divisor
+        return loss_dict, info_dict
     
 
 class ImplicitDynamicsTrainStep(TrainStep):
-    def __init__(self, model, device, loss_divisor, noise_mag, pred_loss_weight, disentangle_loss_weight, t_past, t_future):
-        super().__init__(model, device, loss_divisor)
+    def __init__(self, model, device, noise_mag, pred_loss_weight, disentangle_loss_weight, t_past, t_future):
+        super().__init__(model, device)
         self.noise_mag = noise_mag
         self.pred_loss_weight = pred_loss_weight
         self.disentangle_loss_weight = disentangle_loss_weight
@@ -103,7 +149,6 @@ class ImplicitDynamicsTrainStep(TrainStep):
         self.t_future = t_future
 
     def __call__(self, batch) -> torch.Tensor:
-        batch_loss = 0.0
         criterion = torch.nn.MSELoss()
         disentangle = self.disentangle_loss_weight > 0.0
         orig_seq, pert_seq, magnitude, obj_index, prop_index = (a.to(self.device) for a in batch)
@@ -128,19 +173,17 @@ class ImplicitDynamicsTrainStep(TrainStep):
 
         # ===== COMPUTE LOSSES =====                
         pred_loss = (criterion(orig_seq_future, orig_seq_pred) + criterion(pert_seq_future, pert_seq_pred)) / 2.0
-        pred_loss = pred_loss * self.pred_loss_weight
-        self._add_loss("prediction", pred_loss)
-        batch_loss += pred_loss
+        loss_dict = {
+            "prediction": pred_loss * self.pred_loss_weight
+        }
 
         if disentangle:
             dis_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop_index, magnitude=magnitude)
-            dis_loss = dis_loss * self.disentangle_loss_weight
-            self._add_loss("disentanglement", dis_loss)
-            batch_loss += dis_loss
+            loss_dict["disentanglement"] = dis_loss * self.disentangle_loss_weight
 
-        self._add_loss("total", batch_loss)
+        info_dict = {}
 
-        return batch_loss / self.loss_divisor
+        return loss_dict, info_dict
     
 
 class TrainManager:
@@ -156,8 +199,9 @@ class TrainManager:
         self.model.train()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = self._get_lr_schedule()
-        self.current_epoch = 0
-        self.best_epoch = None
+        self.epoch_idx = 0
+        self.epoch_losses = {}
+        self.best_epoch_idx = None
         self.best_loss = 1e9
 
     def _get_lr_schedule(self):
@@ -174,21 +218,21 @@ class TrainManager:
         return LambdaLR(self.optimizer, lr_lambda)
     
     def train_epoch(self):
-        self.train_step.reset_losses()
-        self.current_epoch += 1
+        self.epoch_idx += 1
+        self.epoch_loss_dict = {}
 
         for batch in self.dataloader:
-            batch_loss = self.train_step(batch)
+            loss_dict, _ = self.train_step(batch)
+            batch_loss = sum(loss_dict.values())
+
             self.optimizer.zero_grad()
             batch_loss.backward()
             self.optimizer.step()
+            self._add_losses_to_epoch(loss_dict)
 
         self.scheduler.step()  # Adjust the learning rates
-        epoch_loss = self.train_step.get_losses()["total"]
-
-        if epoch_loss < self.best_loss:
-            self.best_loss = epoch_loss
-            self.best_epoch = self.current_epoch
+        self._normalize_epoch_losses()
+        self._update_best()
         
     def save_checkpoint(self, ckpt_path: str, overwrite: bool = False):
         if exists(ckpt_path) and not overwrite:
@@ -202,29 +246,42 @@ class TrainManager:
         torch.save({
             "model_state_dict": self.model.state_dict(),
             "optim_state_dict": self.optimizer.state_dict(),
-            "epoch": self.current_epoch
+            "epoch": self.epoch_idx
         }, ckpt_path)
 
     def save_if_best(self, ckpt_path: str):
-        if self.current_epoch == self.best_epoch:
+        if self.epoch_idx == self.best_epoch_idx:
             self.save_checkpoint(ckpt_path, overwrite=True)
 
     def log_losses(self):
-        loss_dict = self.train_step.get_losses()
-        msg = f'Epoch #{self.current_epoch}: '
-        msg += ', '.join([f'{key}: {value:.6f}' for key, value in loss_dict.items()])
+        msg = f'Epoch #{self.epoch_idx}: '
+        msg += ', '.join([f'{key}: {value:.6f}' for key, value in self.epoch_losses.items()])
         msg += f', lr: {self.scheduler.get_last_lr()[0]:.6f}'
         print(msg)
 
     def save_losses_to_csv(self, csv_path: str):
-        loss_dict = self.train_step.get_losses()
         file_exists = exists(csv_path)
         with open(csv_path, 'a') as f:
             if not file_exists:
                 # Write header
-                header = 'epoch,' + ','.join(loss_dict.keys()) + '\n'
+                header = 'epoch,' + ','.join(self.epoch_losses.keys()) + '\n'
                 f.write(header)
             # Write losses
-            line = f"{self.current_epoch}," + ','.join([f"{value}" for value in loss_dict.values()]) + '\n'
+            line = f"{self.epoch_idx}," + ','.join([f"{value}" for value in self.epoch_losses.values()]) + '\n'
             f.write(line)
 
+    def _update_best(self):
+        current_loss = sum(self.epoch_losses.values())
+        if current_loss < self.best_loss:
+            self.best_loss = current_loss
+            self.best_epoch_idx = self.epoch_idx
+
+    def _add_losses_to_epoch(self, loss_dict):
+        for key, value in loss_dict.items():
+            if key not in self.epoch_losses:
+                self.epoch_losses[key] = 0.0
+            self.epoch_losses[key] += value.item()
+    
+    def _normalize_epoch_losses(self):
+        for key in self.epoch_losses:
+            self.epoch_losses[key] /= len(self.dataloader)
