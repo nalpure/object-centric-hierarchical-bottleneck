@@ -114,21 +114,25 @@ class PerturbedImageSequenceDataset(data.Dataset):
 class ImageSequencePairDataset(data.Dataset):
     """
     Returns consecutive frame pairs (t, t+1) from the 'img_o' sequences.
-    If only_first is True, only the first two frames of each sequence are used.
+    If seq_length=2, only the first pair (0,1) is returned per sequence.
     """
-    def __init__(self, npz_path, in_format="HWC", out_format="CHW", only_first=True):
-        data = np.load(npz_path)
+    def __init__(self, npz_path, in_format="HWC", out_format="CHW", seq_length=2):
+        if seq_length < 2:
+            raise ValueError("seq_length must be at least 2 to form pairs.")
         
-        if only_first:
-            self.img_o = data["img_o"][:, 0:2]
-        else:
-            self.img_o = data["img_o"]
+        data = np.load(npz_path)
+
+        if seq_length > data["img_o"].shape[1]:
+                raise ValueError(f"Requested seq_length {seq_length} exceeds dataset length {data['img_o'].shape[1]}.")
+        
+        self.img_o = data["img_o"][:, :seq_length].astype(np.float32) / 255.0
+        self.only_first = seq_length == 2
+        
+        if self.only_first:
             N, T = self.img_o.shape[:2]
             self.idx2pair = [(n, t) for n in range(N) for t in range(T - 1)]
         
         self.in_format, self.out_format = in_format, out_format
-        self.change_type = True if self.img_o.max() > 1.0 else False
-        self.only_first = only_first
 
     def __len__(self):
         return len(self.img_o)
@@ -139,9 +143,6 @@ class ImageSequencePairDataset(data.Dataset):
         else:
             n, t = self.idx2pair[idx]
             pair = self.img_o[n, t:t+2]
-
-        if self.change_type:
-            pair = pair.astype(np.float32) / 255.0
 
         pair = transpose_array(pair, self.in_format, self.out_format)
         return torch.from_numpy(pair).float()

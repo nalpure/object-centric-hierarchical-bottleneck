@@ -61,7 +61,7 @@ def main():
     # ----- Initialize model and dataloader -----
     set_seed(config["seed"])
     dataloader = get_dataloader(config, save_mode=True)
-    model = initialize_model(dataloader, config, eval_mode=True)
+    model = initialize_model(config, dataloader, eval_mode=True)
 
     # ----- Save slots -----
     if config["type"] == "slot_attention":
