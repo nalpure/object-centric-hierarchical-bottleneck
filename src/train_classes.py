@@ -43,11 +43,14 @@ class SlotAttentionAETrainStep(TrainStep):
 
         info_dict = {
             "orig": obs.detach().cpu(),
-            "recon_combined": recon_combined.detach().cpu(),
-            "recons": recons.detach().cpu(),
-            "masks": masks.detach().cpu(),
-            "attn": attn.detach().cpu(),
+            "recon_combined": recon_combined.detach().cpu()
         }
+
+        num_slots = masks.shape[1]
+        for slot_idx in range(num_slots):
+            info_dict[f"mask_{slot_idx}"] = masks[:, slot_idx].detach().cpu()
+            info_dict[f"recon_{slot_idx}"] = recons[:, slot_idx].detach().cpu()
+            info_dict[f"attn_{slot_idx}"] = attn[:, slot_idx].detach().cpu()
 
         return loss_dict, info_dict
     
@@ -246,6 +249,7 @@ class TrainManager:
         torch.save({
             "model_state_dict": self.model.state_dict(),
             "optim_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
             "epoch": self.epoch_idx
         }, ckpt_path)
 
