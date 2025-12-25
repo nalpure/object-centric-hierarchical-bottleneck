@@ -190,39 +190,24 @@ class ImplicitDynamicsTrainStep(TrainStep):
     
 
 class TrainManager:
-    def __init__(self, train_step : TrainStep, dataloader : data.DataLoader, lr: float, warmup_epochs : int, decay_epochs: int, decay_rate: float, weight_decay: float):
+    def __init__(self, train_step: TrainStep, dataloader: data.DataLoader, optimizer: torch.optim.Optimizer, lr_scheduler: LambdaLR, lr: float):
         self.train_step = train_step
         self.dataloader = dataloader
-        self.warmup_epochs = warmup_epochs
-        self.decay_epochs = decay_epochs
-        self.decay_rate = decay_rate
-        self.weight_decay = weight_decay
-
+        self.optimizer = optimizer
+        self.scheduler = lr_scheduler
+    
         self.model = train_step.model
         self.model.train()
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        self.scheduler = self._get_lr_schedule()
         self.epoch_idx = 0
         self.epoch_losses = {}
         self.best_epoch_idx = None
         self.best_loss = 1e9
-
-    def _get_lr_schedule(self):
-        """ Creates a learning rate scheduler with warmup and exponential decay."""
-        def lr_lambda(current_step):
-            if current_step < self.warmup_epochs:
-                # Linear warmup
-                return float(current_step) / float(max(1, self.warmup_epochs))
-            else:
-                # Exponential decay after warmup
-                decay_factor = (current_step - self.warmup_epochs) / self.decay_epochs
-                return self.decay_rate ** decay_factor
-        
-        return LambdaLR(self.optimizer, lr_lambda)
     
     def train_epoch(self):
         self.epoch_idx += 1
         self.epoch_loss_dict = {}
+
+        print(f"Learning rate: {self.scheduler.get_last_lr()[0]:.6f}")
 
         for batch in self.dataloader:
             loss_dict, _ = self.train_step(batch)
@@ -265,13 +250,17 @@ class TrainManager:
 
     def save_losses_to_csv(self, csv_path: str):
         file_exists = exists(csv_path)
+        save_dict = self.epoch_losses.copy()
+        save_dict["total"] = sum(self.epoch_losses.values())
+        save_dict["lr"] = self.scheduler.get_last_lr()[0]
+
         with open(csv_path, 'a') as f:
             if not file_exists:
                 # Write header
-                header = 'epoch,' + ','.join(self.epoch_losses.keys()) + '\n'
+                header = 'epoch,' + ','.join(save_dict.keys()) + '\n'
                 f.write(header)
             # Write losses
-            line = f"{self.epoch_idx}," + ','.join([f"{value}" for value in self.epoch_losses.values()]) + '\n'
+            line = f"{self.epoch_idx}," + ','.join([f"{value}" for value in save_dict.values()]) + '\n'
             f.write(line)
 
     def _update_best(self):

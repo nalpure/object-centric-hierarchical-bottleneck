@@ -513,6 +513,51 @@ def save_config(config, path):
     with open(path, "wb") as f:
         tomli_w.dump(config, f)
 
+def make_unique_dir(parent_dir, dirname):
+    """ Get a unique save path by appending an index if the file already exists. """
+    if not os.path.exists(parent_dir):
+        os.mkdir(parent_dir)
+    if os.path.exists(os.path.join(parent_dir, dirname)):
+        run_index = 0
+        while os.path.exists(os.path.join(parent_dir, f"{dirname}_{run_index}")):
+            run_index += 1
+        run_name = f"{dirname}_{run_index}"
+    else:
+        run_name = dirname
+    
+    dir_path = os.path.join(parent_dir, run_name)
+    os.mkdir(dir_path)
+    return dir_path
+
+
+def get_lr_scheduler(config, optimizer, adjust_for_checkpoint=False):
+    """ Creates a learning rate scheduler with warmup and exponential decay."""
+    def lr_lambda(current_step):
+        if current_step < config["train"]["opt"]["lr_warmup_epochs"]:
+            # Linear warmup
+            return float(current_step) / float(max(1, config["train"]["opt"]["lr_warmup_epochs"]))
+        else:
+            # Exponential decay after warmup
+            decay_factor = (current_step - config["train"]["opt"]["lr_warmup_epochs"]) / config["train"]["opt"]["lr_decay_epochs"]
+            return config["train"]["opt"]["lr_decay_rate"] ** decay_factor
+        
+    scheduler = LambdaLR(optimizer, lr_lambda)
+
+    if adjust_for_checkpoint:
+        if config['base_ckpt'] == "":
+            print("Warning: adjust_for_checkpoint is True but base_ckpt is empty. No adjustment will be made.")
+        else:
+            scheduler = LambdaLR(optimizer, lr_lambda)
+            ckpt = config['base_ckpt']
+            if ckpt != "":
+                checkpoint = torch.load(ckpt, weights_only=True)
+                start_epoch = checkpoint['epoch']
+                for _ in range(start_epoch):
+                    scheduler.step()
+                print(f"Adjusted learning rate scheduler to epoch {start_epoch}.")
+    
+    return scheduler
+
 
 def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
     print("Loading training data...")
@@ -601,7 +646,7 @@ def initialize_model(config: dict, dataloader: data.DataLoader, eval_mode: bool)
             num_slots=config["slot"]["num_slots"],
             num_iterations=config["slot"]["sa_iterations"],
             slots_dim=config["model"]["slot_size"],
-            encdec_dim=config["model"]["mlp_size"]
+            encdec_dim=config["model"]["encdec_dim"]
         )
     elif config["type"] == "explicit_latents":
         slots_dim = next(iter(dataloader))[0].shape[-1]
@@ -626,10 +671,23 @@ def initialize_model(config: dict, dataloader: data.DataLoader, eval_mode: bool)
         model.train()
 
     ckpt = config['base_ckpt']
+    start_epoch = 0
     if ckpt != "":
         checkpoint = torch.load(ckpt, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
-        print(f"Succesfully model weights from {ckpt}, corresponding to epoch {checkpoint['epoch']}.")
+        start_epoch = checkpoint['epoch']
+        print(f"Succesfully model weights from {ckpt}, corresponding to epoch {start_epoch}.")
 
     print(f"Finished loading model. Number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     return model
+
+def get_optimizer(config: dict, model: torch.nn.Module) -> torch.optim.Optimizer:
+    if config["train"]["opt"]["type"] == "adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=config["train"]["opt"]["lr"],
+            weight_decay=config["train"]["opt"]["weight_decay"]
+        )
+    else:
+        raise ValueError(f"Unknown optimizer type: {config['train']['opt']['type']}")
+    return optimizer

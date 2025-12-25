@@ -5,7 +5,7 @@ import torch
 from torch.utils import data
 from tqdm import tqdm
 
-from src.utils import  get_dataloader, initialize_model, load_config_by_name, save_config, set_seed, DEVICE
+from src.utils import  get_dataloader, get_lr_scheduler, get_optimizer, initialize_model, load_config_by_name, make_unique_dir, save_config, set_seed, DEVICE
 from train_classes import ExplicitAETrainStep, ImplicitDynamicsTrainStep, SlotAttentionAETrainStep, SlotAttentionContrastiveTrainStep, TrainManager, TrainStep
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
@@ -24,7 +24,7 @@ def main():
         "--base-epoch",
         help="Base model epoch. If not provided, best epoch is selected.",
     )
-    parser.add_argument("-ev", "--eval", help="Evaluation mode.", action="store_true")
+    parser.add_argument("-s", "--scheduler-adjust", action="store_true", help="Adjust LR scheduler for loaded checkpoint.")
     args = parser.parse_args()
 
 
@@ -72,52 +72,30 @@ def main():
     # For explicit latents, set sequence length to 1 (since disentanglement can only be applied to first frame)
     if config["type"] == "explicit_latents":
         config["data"]["seq_length"] = 1
+    
+    if "type" not in config["train"]["opt"]:
+        config["train"]["opt"]["type"] = "adam"
 
 
     # ----- Load dataset, model, and train manager -----
     
-    eval_mode = args.eval
     set_seed(config['seed'])
     dataloader = get_dataloader(config)
-    model = initialize_model(config, dataloader, eval_mode=eval_mode)
-    train_step = get_train_step(config, dataloader, model)
-
-    if not args.eval:
-        train(config, dataloader, train_step, out_dir)
-    else:
-        eval(dataloader, train_step)
-  
+    model = initialize_model(config, dataloader, eval_mode=False)
+    optimizer = get_optimizer(config, model)
+    scheduler = get_lr_scheduler(config, optimizer, adjust_for_checkpoint=args.scheduler_adjust)
+    train_step = get_train_step(config, model)
+    lr = config["train"]["opt"]["lr"]
+    train_manager = TrainManager(train_step, dataloader, optimizer, scheduler, lr)
 
 
-def train(config: dict, train_dataloader: data.DataLoader, train_step: TrainStep, out_dir: str):
     # ----- Create output folder -----
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
 
-    if os.path.exists(os.path.join(out_dir, config["name"])):
-        run_index = 0
-        while os.path.exists(os.path.join(out_dir, f"{config['name']}_{run_index}")):
-            run_index += 1
-        run_name = f"{config['name']}_{run_index}"
-    else:
-        run_name = config["name"]
-
-    output_path = os.path.join(out_dir, run_name)
-    os.mkdir(output_path)
+    output_path = make_unique_dir(out_dir, config["name"])
     save_config(config, os.path.join(output_path, "config.toml"))
     print(f"Created new output directory at '{output_path}'.")
-
-    # ----- Create train manager -----
-    train_manager = TrainManager(
-        train_step=train_step,
-        dataloader=train_dataloader,
-        lr=config["train"]["opt"]["lr"],
-        warmup_epochs=config["train"]["opt"]["lr_warmup_epochs"],
-        decay_epochs=config["train"]["opt"]["lr_decay_epochs"],
-        decay_rate=config["train"]["opt"]["lr_decay_rate"],
-        weight_decay=config["train"]["opt"]["weight_decay"]
-    )
-    print("Initialized train manager.")
 
 
     # ----- Train model -----
@@ -132,14 +110,9 @@ def train(config: dict, train_dataloader: data.DataLoader, train_step: TrainStep
     print(f"Finished. Best epoch: {train_manager.best_epoch_idx} with loss {train_manager.best_loss:.4f}.")
 
 
-def eval(eval_dataloader: data.DataLoader, train_step: TrainStep):
-    batch_loss = 0.0
-    for batch in eval_dataloader:
-        batch_loss += train_step(batch)
-    print(f"Evaluation loss: {batch_loss / len(eval_dataloader):.4f}")
 
 
-def get_train_step(config: dict, train_dataloader: data.DataLoader, model: torch.nn.Module) -> TrainStep:
+def get_train_step(config: dict, model: torch.nn.Module) -> TrainStep:
     if config["type"] == "slot_attention":
         train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
         if train_contrastive:
