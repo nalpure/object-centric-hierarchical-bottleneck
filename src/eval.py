@@ -2,12 +2,10 @@ import argparse
 import os
 import numpy as np
 import torch
-from torch.utils import data
 from tqdm import tqdm
 
 from src.utils import  get_dataloader, make_unique_dir, initialize_model, load_config, load_config_by_name, plot_images, save_config, set_seed, DEVICE
 from train import get_train_step
-from train_classes import ExplicitAETrainStep, ImplicitDynamicsTrainStep, SlotAttentionAETrainStep, SlotAttentionContrastiveTrainStep, TrainManager
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
 
@@ -41,7 +39,7 @@ def main():
     
     config["data"]["path"] = args.data
 
-    if "seq_length" in config["data"]:
+    if "seq_length" in config["data"] and "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] == 0:
         config["data"]["seq_length"] = 1
     
     if "include_perturbed" in config["data"]:
