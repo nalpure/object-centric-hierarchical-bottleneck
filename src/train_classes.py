@@ -1,6 +1,7 @@
 import os
 from os import makedirs
 from os.path import exists
+import time
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils import data
@@ -92,17 +93,27 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
         # Decode all timesteps at once for speedup
         slots = torch.cat((active_slots, bg_slot), dim=2) # (B, T, S, D)
         slots_flat = slots.view(B * T, S, -1)
-        recon_flat, _, _ = self.model.decode(slots_flat)
-        recon = recon_flat.view(B, T, C, H, W)
+        recon_combined_flat, recons_flat, masks_flat = self.model.decode(slots_flat)
+        recon_combined = recon_combined_flat.view(B, T, C, H, W)
+        recons = recons_flat.view(B, T, S, C, H, W)
+        masks = masks_flat.view(B, T, S, 1, H, W)
 
         # Calculate losses
         loss_dict = {
-            "reconstruction": self.criterion(recon, img_seq) * self.recon_weight,
+            "reconstruction": self.criterion(recon_combined, img_seq) * self.recon_weight,
             "contrastive": slot_slot_contrastive_loss(active_slots) * self.contrastive_weight,
             "attention": attention_loss(attn.view(B * T, S, H * W)) * self.bg_attn_weight
         }
 
-        info_dict = {}
+        # Prepare info dict for visualization of first timestep
+        info_dict = {
+            "orig": img_seq[:, 0].detach().cpu(),
+            "recon_combined": recon_combined[:, 0].detach().cpu()
+        }
+        for slot_idx in range(S):
+            info_dict[f"mask_{slot_idx}"] = masks[:, 0, slot_idx].detach().cpu()
+            info_dict[f"recon_{slot_idx}"] = recons[:, 0, slot_idx].detach().cpu()
+            info_dict[f"attn_{slot_idx}"] = attn[:, 0, slot_idx].detach().cpu()
         
         return loss_dict, info_dict
     
@@ -202,12 +213,14 @@ class TrainManager:
         self.epoch_losses = {}
         self.best_epoch_idx = None
         self.best_loss = 1e9
+        self.start_time = None
     
     def train_epoch(self):
         self.epoch_idx += 1
         self.epoch_loss_dict = {}
 
-        print(f"Learning rate: {self.scheduler.get_last_lr()[0]:.6f}")
+        if self.start_time is None:
+            self.start_time = time.time()
 
         for batch in self.dataloader:
             loss_dict, _ = self.train_step(batch)
@@ -253,6 +266,7 @@ class TrainManager:
         save_dict = self.epoch_losses.copy()
         save_dict["total"] = sum(self.epoch_losses.values())
         save_dict["lr"] = self.scheduler.get_last_lr()[0]
+        save_dict["elapsed_time"] = time.time() - self.start_time
 
         with open(csv_path, 'a') as f:
             if not file_exists:
