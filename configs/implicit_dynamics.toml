@@ -1,0 +1,26 @@
+# Default implicit dynamics configuration
+type = "implicit_dynamics"
+seed = 0
+
+[model]
+latent_dim = 5
+edge_dim = 64
+latent_edge_dim = 64
+t_past = 4
+
+[train]
+batch_size = 128
+epochs = 750
+ckpt_rate = 10
+t_future = 4
+
+[train.opt]
+lr = 0.0004
+lr_warmup_epochs= 0
+lr_decay_epochs = 250
+lr_decay_rate = 0.5
+weight_decay = 0.0
+
+[train.weights]
+prediction = 1
+disentanglement = 1

@@ -1,0 +1,26 @@
+# Default slot attention autoencoder configuration
+type = "explicit_latents"
+seed = 0
+
+[model]
+explicit_dim = 3
+
+[data]
+normalize = true
+noise = 0.05
+
+[train]
+batch_size = 128
+epochs = 1000
+ckpt_rate = 100
+
+[train.opt]
+lr = 0.0004
+lr_warmup_epochs = 0
+lr_decay_epochs = 400
+lr_decay_rate = 0.5
+weight_decay = 0.0
+
+[train.weights]
+reconstruction = 1
+disentanglement = 0
