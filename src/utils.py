@@ -560,7 +560,7 @@ def get_lr_scheduler(config, optimizer, adjust_for_checkpoint=False):
 
 
 def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
-    print("Loading training data...")
+    print(f"Loading data from '{config['data']['path']}'")
 
     if config["type"] == "slot_attention":
         train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
@@ -638,7 +638,7 @@ def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
     return train_dataloader
 
 
-def initialize_model(config: dict, dataloader: data.DataLoader, eval_mode: bool) -> torch.nn.Module:
+def initialize_model(config: dict, eval_mode: bool) -> torch.nn.Module:
     if config["type"] == "slot_attention":
         model = SlotAttentionAutoEncoder(
             resolution=(config["model"]["obs_height"], config["model"]["obs_width"]),
@@ -649,16 +649,14 @@ def initialize_model(config: dict, dataloader: data.DataLoader, eval_mode: bool)
             encdec_dim=config["model"]["encdec_dim"]
         )
     elif config["type"] == "explicit_latents":
-        slots_dim = next(iter(dataloader))[0].shape[-1]
         model = ExplicitLatentAutoEncoder(
             config["model"]["explicit_dim"],
-            slots_dim
+            config["model"]["slot_size"],
         )
     elif config["type"] == "implicit_dynamics":
-        explicit_dim = next(iter(dataloader))[0].shape[-1]
         model = RelationalLatentDynamics(
-            explicit_dim=explicit_dim,
-            implicit_dim=config["model"]["latent_dim"] - explicit_dim,
+            explicit_dim=config["model"]["explicit_dim"],
+            implicit_dim=config["model"]["latent_dim"] - config["model"]["explicit_dim"],
             seq_len=config["model"]["t_past"],
             edge_dim=config["model"]["edge_dim"],
             latent_edge_dim=config["model"]["latent_edge_dim"]
@@ -673,7 +671,7 @@ def initialize_model(config: dict, dataloader: data.DataLoader, eval_mode: bool)
     ckpt = config['base_ckpt']
     start_epoch = 0
     if ckpt != "":
-        checkpoint = torch.load(ckpt, weights_only=True)
+        checkpoint = torch.load(ckpt, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         start_epoch = checkpoint['epoch']
         print(f"Succesfully model weights from {ckpt}, corresponding to epoch {start_epoch}.")
