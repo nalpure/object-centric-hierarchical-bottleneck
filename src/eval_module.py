@@ -45,6 +45,13 @@ def main():
     if "include_perturbed" in config["data"]:
         config["data"]["include_perturbed"] = False
 
+    if args.figures > 0 and config["type"] != "slot_attention":
+        print("Warning: Figures can only be generated for slot attention models.")
+        args.figures = 0
+
+    if "noise" in config["data"]:
+        config["data"]["noise"] = 0.0
+
     
     # ----- Set up evaluation -----
     set_seed(config["seed"])
@@ -74,6 +81,9 @@ def main():
             f.write(f"{key} loss: {value:.6f}\n")
 
     # ----- Create plots -----
+    if args.figures == 0:
+        return
+    
     num_slots = config["slot"]["num_slots"]
     plot_keys = ["orig", "recon_combined"]
     plot_keys += [f"mask_{i}" for i in range(num_slots)]
