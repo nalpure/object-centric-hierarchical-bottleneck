@@ -4,7 +4,7 @@ from os.path import dirname
 import numpy as np
 import torch
 
-from slot_attention.autoencoder import order_slots
+from slot_attention_AE import order_slots
 from src.utils import get_dataloader, make_unique_dir, initialize_model, load_config, set_seed, DEVICE
 import utils
 

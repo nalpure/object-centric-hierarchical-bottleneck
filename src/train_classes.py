@@ -6,9 +6,9 @@ import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils import data
 
-from explicit_latents.autoencoder import ExplicitLatentAutoEncoder
+from explicit_AE import ExplicitLatentAutoEncoder
 from losses import attention_loss, disentanglement_loss, slot_slot_contrastive_loss
-from slot_attention.autoencoder import SlotAttentionAutoEncoder, order_slots
+from slot_attention_AE import SlotAttentionAutoEncoder, order_slots
 from utils import reorder_perturbation_indices
 
 

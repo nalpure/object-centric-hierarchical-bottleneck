@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from slot_attention.autoencoder import order_slots
-from src.utils import denormalize_slots, get_dataloader, make_unique_dir, initialize_model, load_config, plot_grid, set_seed, DEVICE
+from slot_attention_AE import order_slots
+from src.utils import get_dataloader, make_unique_dir, initialize_model, load_config, plot_grid, set_seed, DEVICE
 import utils
 
 def main():

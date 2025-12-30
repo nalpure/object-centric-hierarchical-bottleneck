@@ -22,9 +22,9 @@ import torch
 from torch import nn
 
 from datasets import ImageDataset, ImageSequencePairDataset, PerturbedImageSequenceDataset, PerturbedSlotSequenceDataset
-from explicit_latents.autoencoder import ExplicitLatentAutoEncoder
-from implicit_latents.relational_latent_dynamics import RelationalLatentDynamics
-from slot_attention.autoencoder import SlotAttentionAutoEncoder
+from explicit_AE import ExplicitLatentAutoEncoder
+from relational_latent_dynamics import RelationalLatentDynamics
+from slot_attention_AE import SlotAttentionAutoEncoder
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
