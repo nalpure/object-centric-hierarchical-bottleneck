@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
-from src.slot_attention.slot_attention import SlotAttention
+from slot_attention import SlotAttention
 
 
 def spatial_broadcast(slots, resolution):
