@@ -3,7 +3,7 @@ type = "explicit_latents"
 seed = 0
 
 [model]
-slots_dim = 32
+slot_size = 32
 explicit_dim = 3
 
 [data]
@@ -12,16 +12,16 @@ noise = 0.05
 
 [train]
 batch_size = 128
-epochs = 1000
+epochs = 500
 ckpt_rate = 100
 
 [train.opt]
 lr = 0.0004
 lr_warmup_epochs = 0
-lr_decay_epochs = 400
+lr_decay_epochs = 500
 lr_decay_rate = 0.5
 weight_decay = 0.0
 
 [train.weights]
 reconstruction = 1
-disentanglement = 0
+disentanglement = 100
