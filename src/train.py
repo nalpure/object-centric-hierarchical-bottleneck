@@ -81,7 +81,7 @@ def main():
     
     set_seed(config['seed'])
     dataloader = get_dataloader(config)
-    model = initialize_model(config, dataloader, eval_mode=False)
+    model = initialize_model(config, eval_mode=False)
     optimizer = get_optimizer(config, model)
     scheduler = get_lr_scheduler(config, optimizer, adjust_for_checkpoint=args.scheduler_adjust)
     train_step = get_train_step(config, model)
