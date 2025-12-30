@@ -6,8 +6,8 @@ import torch
 from tqdm import tqdm
 
 from slot_attention.autoencoder import order_slots
-from src.utils import  get_dataloader, make_unique_dir, initialize_model, load_config, load_config_by_name, plot_grid, plot_images, save_config, set_seed, DEVICE
-from train import get_train_step
+from src.utils import denormalize_slots, get_dataloader, make_unique_dir, initialize_model, load_config, plot_grid, set_seed, DEVICE
+import utils
 
 def main():
     # ----- Parse arguments -----
@@ -56,10 +56,10 @@ def main():
     config_SA["base_ckpt"] = os.path.join(slot_dir, "ckpt_best.pt")
 
     if "seq_length" in config_SA["data"]:
-        old_seq_length = config_SA["data"]["seq_length"]
+        current_seq_length = config_SA["data"]["seq_length"]
         expected_seq_length = config_impl["model"]["t_past"] + args.timesteps
-        if old_seq_length != expected_seq_length:
-            print(f"Overriding seq_length from {old_seq_length} to {expected_seq_length}.")
+        if current_seq_length != expected_seq_length:
+            print(f"Overriding seq_length from {current_seq_length} to {expected_seq_length}.")
             config_SA["data"]["seq_length"] = expected_seq_length
     
     # ----- Set up evaluation -----
@@ -78,7 +78,7 @@ def main():
         "expl + dyn": [], 
         "SA + expl + dyn": []
     }
-    mean_slots, std_slots = get_normalization_stats(config_explicit)
+    mean_slots, std_slots = utils.get_normalization_stats(config_explicit)
 
     with torch.no_grad():
         for batch in tqdm(obs_dataloader, desc="Evaluating", unit="batch"):
@@ -105,7 +105,7 @@ def main():
                 prev_slots = slots_t
                 prev_attn = attn_t
             
-            slot_seq["true"] = normalize_slots(slots, mean_slots, std_slots)
+            slot_seq["true"] = utils.normalize_slots(slots, mean_slots, std_slots)
 
             # ----- Explicit Latents Encoding -----
             active_slots = slot_seq["true"][:, :, 1:]  # Exclude background slot
@@ -117,10 +117,10 @@ def main():
             # ----- Implicit Dynamics Prediction -----
             t_past = config_impl["model"]["t_past"]
             t_future = config_impl["train"]["t_future"]
-            expl_seq_past_flat = expl_seq["true"][:, :t_past].reshape(B, t_past, S - 1, D_expl)
+            expl_seq_past = expl_seq["true"][:, :t_past].reshape(B, t_past, S - 1, D_expl)
 
             z_pred_future, z_implicit_first = model_impl(
-                expl_seq_past_flat, t_future, disentangle=True
+                expl_seq_past, t_future, disentangle=True
             )
             expl_seq["pred_future_impl"] = z_pred_future[:, :, :, :D_expl]  # [B, t_future, O, E]
             
@@ -135,7 +135,7 @@ def main():
 
             # ----- Decode Slots -----
             recon_combined, recons, masks = model_SA.decode(
-                denormalize_slots(
+                utils.denormalize_slots(
                     slot_seq["true"].view(B * T, S, D_slot),
                     mean_slots,
                     std_slots
@@ -144,7 +144,7 @@ def main():
             img_seq["recon_SA"] = recon_combined.view(B, T, C, H, W)  
 
             recon_combined_expl, recons_expl, masks_expl = model_SA.decode(
-                denormalize_slots(
+                utils.denormalize_slots(
                     torch.cat([
                         slot_seq["true"][:, :, :1],  # Background slots
                         slot_seq["active_recon_expl"]
@@ -156,7 +156,7 @@ def main():
             img_seq["recon_expl"] = recon_combined_expl.view(B, T, C, H, W)
 
             recon_combined_impl, recons_impl, masks_impl = model_SA.decode(
-                denormalize_slots(
+                utils.denormalize_slots(
                     torch.cat([
                         slot_seq["true"][:, t_past:t_past+t_future, :1],  # Future background slots
                         slot_seq["active_pred_impl"]
@@ -227,32 +227,6 @@ def main():
         column_labels = [f"t={t}" for t in range(1 - t_past, 1 + t_future)]
         save_path = os.path.join(eval_dir, f"eval_fig_{i}.png")
         plot_grid(rows, row_labels, column_labels, save_path)
-
-
-def get_normalization_stats(config_explicit):
-    if config_explicit["data"]["normalize"]:
-        norm_stats_path = config_explicit["data"]["path"].replace(".h5", "_norm_stats.pt")
-        if os.path.exists(norm_stats_path):
-            print("Loading normalization stats from", norm_stats_path)
-            stats_slots = torch.load(norm_stats_path, weights_only=True)
-            mean_slots = stats_slots["mean"].to(DEVICE)
-            std_slots = stats_slots["std"].to(DEVICE)
-            print(f"mean: {mean_slots}, std: {std_slots}")
-        else:
-            raise FileNotFoundError(f"Normalization stats file not found: {norm_stats_path}")
-    else:
-        mean_slots = 0.0
-        std_slots = 1.0
-
-    return mean_slots, std_slots
-
-
-def normalize_slots(slots, mean, std):
-    return (slots - mean) / std
-
-
-def denormalize_slots(slots, mean, std):
-    return slots * std + mean
 
 
 if __name__ == "__main__":

@@ -689,3 +689,28 @@ def get_optimizer(config: dict, model: torch.nn.Module) -> torch.optim.Optimizer
     else:
         raise ValueError(f"Unknown optimizer type: {config['train']['opt']['type']}")
     return optimizer
+
+def get_normalization_stats(config_explicit):
+    if config_explicit["data"]["normalize"]:
+        norm_stats_path = config_explicit["data"]["path"].replace(".h5", "_norm_stats.pt")
+        if os.path.exists(norm_stats_path):
+            print("Loading normalization stats from", norm_stats_path)
+            stats_slots = torch.load(norm_stats_path, weights_only=True)
+            mean_slots = stats_slots["mean"].to(DEVICE)
+            std_slots = stats_slots["std"].to(DEVICE)
+            print(f"mean: {mean_slots}, std: {std_slots}")
+        else:
+            raise FileNotFoundError(f"Normalization stats file not found: {norm_stats_path}")
+    else:
+        mean_slots = 0.0
+        std_slots = 1.0
+
+    return mean_slots, std_slots
+
+
+def normalize_slots(slots, mean, std):
+    return (slots - mean) / std
+
+
+def denormalize_slots(slots, mean, std):
+    return slots * std + mean
