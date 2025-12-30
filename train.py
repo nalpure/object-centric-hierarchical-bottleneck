@@ -2,10 +2,9 @@ import argparse
 import os
 import numpy as np
 import torch
-from torch.utils import data
 from tqdm import tqdm
 
-from src.utils import  get_dataloader, get_lr_scheduler, get_optimizer, initialize_model, load_config_by_name, make_unique_dir, save_config, set_seed, DEVICE
+from utils import get_dataloader, get_lr_scheduler, get_optimizer, initialize_model, load_config_by_name, make_unique_dir, save_config, set_seed, DEVICE
 from train_classes import ExplicitAETrainStep, ImplicitDynamicsTrainStep, SlotAttentionAETrainStep, SlotAttentionContrastiveTrainStep, TrainManager, TrainStep
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
@@ -76,7 +75,6 @@ def main():
     if "type" not in config["train"]["opt"]:
         config["train"]["opt"]["type"] = "adam"
 
-
     # ----- Load dataset, model, and train manager -----
     
     set_seed(config['seed'])
@@ -85,8 +83,8 @@ def main():
     optimizer = get_optimizer(config, model)
     scheduler = get_lr_scheduler(config, optimizer, adjust_for_checkpoint=args.scheduler_adjust)
     train_step = get_train_step(config, model)
-    lr = config["train"]["opt"]["lr"]
-    train_manager = TrainManager(train_step, dataloader, optimizer, scheduler, lr)
+    anneal_epochs = config["train"]["opt"].get("weight_anneal_epochs", 0)
+    train_manager = TrainManager(train_step, dataloader, optimizer, scheduler, anneal_epochs)
 
 
     # ----- Create output folder -----

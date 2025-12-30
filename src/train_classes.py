@@ -2,6 +2,7 @@ import os
 from os import makedirs
 from os.path import exists
 import time
+from typing import Dict, Tuple
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils import data
@@ -201,35 +202,54 @@ class ImplicitDynamicsTrainStep(TrainStep):
     
 
 class TrainManager:
-    def __init__(self, train_step: TrainStep, dataloader: data.DataLoader, optimizer: torch.optim.Optimizer, lr_scheduler: LambdaLR, lr: float):
+    def __init__(self, train_step: TrainStep, dataloader: data.DataLoader, optimizer: torch.optim.Optimizer, lr_scheduler: LambdaLR, anneal_epochs=0):
         self.train_step = train_step
         self.dataloader = dataloader
         self.optimizer = optimizer
         self.scheduler = lr_scheduler
+        self.anneal_epochs = anneal_epochs
+        self.anneal = False
+
+        if anneal_epochs > 0:
+            if isinstance(self.train_step, SlotAttentionContrastiveTrainStep):
+                self.anneal = True
+                self.anneal_loss_keys = ["attention", "contrastive"]
+            else:
+                raise ValueError("Learning rate annealing is only implemented for SlotAttentionContrastiveTrainStep.")
     
         self.model = train_step.model
         self.model.train()
+        
+        self.epoch_losses_raw: Dict[str, float] = {}
+        self.epoch_losses_annealed: Dict[str, float] = {}
+
         self.epoch_idx = 0
-        self.epoch_losses = {}
         self.best_epoch_idx = None
-        self.best_loss = 1e9
+        self.best_loss = float('inf')
         self.start_time = None
     
     def train_epoch(self):
         self.epoch_idx += 1
-        self.epoch_loss_dict = {}
 
         if self.start_time is None:
             self.start_time = time.time()
 
+        self._reset_epoch_accumulators()
+
         for batch in self.dataloader:
             loss_dict, _ = self.train_step(batch)
-            batch_loss = sum(loss_dict.values())
+            raw_total = sum(loss_dict.values())
+
+            if self.anneal:
+                batch_loss, annealed_values = self._apply_annealing(loss_dict)
+            else:
+                batch_loss = raw_total
+                annealed_values = {}
 
             self.optimizer.zero_grad()
             batch_loss.backward()
             self.optimizer.step()
-            self._add_losses_to_epoch(loss_dict)
+            self._accumulate_batch_losses(loss_dict, annealed_values)
 
         self.scheduler.step()  # Adjust the learning rates
         self._normalize_epoch_losses()
@@ -255,16 +275,11 @@ class TrainManager:
         if self.epoch_idx == self.best_epoch_idx:
             self.save_checkpoint(ckpt_path, overwrite=True)
 
-    def log_losses(self):
-        msg = f'Epoch #{self.epoch_idx}: '
-        msg += ', '.join([f'{key}: {value:.6f}' for key, value in self.epoch_losses.items()])
-        msg += f', lr: {self.scheduler.get_last_lr()[0]:.6f}'
-        print(msg)
-
     def save_losses_to_csv(self, csv_path: str):
         file_exists = exists(csv_path)
-        save_dict = self.epoch_losses.copy()
-        save_dict["total"] = sum(self.epoch_losses.values())
+        save_dict = self.epoch_losses_raw.copy()
+        save_dict["total"] = sum(self.epoch_losses_raw.values())
+        save_dict.update(self.epoch_losses_annealed)
         save_dict["lr"] = self.scheduler.get_last_lr()[0]
         save_dict["elapsed_time"] = time.time() - self.start_time
 
@@ -277,18 +292,45 @@ class TrainManager:
             line = f"{self.epoch_idx}," + ','.join([f"{value}" for value in save_dict.values()]) + '\n'
             f.write(line)
 
+    def _reset_epoch_accumulators(self):
+        self.epoch_losses_raw = {}
+        self.epoch_losses_annealed = {}
+
+    def _apply_annealing(self, loss_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        anneal_factor = min(1.0, self.epoch_idx / max(1.0, float(self.anneal_epochs)))
+        total_annealed_loss = torch.tensor(0.0, device=self.train_step.device)
+        annealed_values: Dict[str, torch.Tensor] = {}
+
+        for key, value in loss_dict.items():
+            if key in getattr(self, "anneal_loss_keys", []):
+                annealed_loss = value * anneal_factor
+                annealed_values[key] = annealed_loss
+                total_annealed_loss += annealed_loss
+            else:
+                total_annealed_loss += value
+
+        return total_annealed_loss, annealed_values
+
     def _update_best(self):
-        current_loss = sum(self.epoch_losses.values())
+        current_loss = sum(self.epoch_losses_raw.values())
         if current_loss < self.best_loss:
             self.best_loss = current_loss
             self.best_epoch_idx = self.epoch_idx
 
-    def _add_losses_to_epoch(self, loss_dict):
-        for key, value in loss_dict.items():
-            if key not in self.epoch_losses:
-                self.epoch_losses[key] = 0.0
-            self.epoch_losses[key] += value.item()
+    def _accumulate_batch_losses(self, loss_dict_raw, loss_dict_annealed):
+        for key, value in loss_dict_raw.items():
+            if key not in self.epoch_losses_raw:
+                self.epoch_losses_raw[key] = 0.0
+            self.epoch_losses_raw[key] += value.item()
+
+        for key, value in loss_dict_annealed.items():
+            out_key = f"{key}_annealed"
+            if out_key not in self.epoch_losses_annealed:
+                self.epoch_losses_annealed[out_key] = 0.0
+            self.epoch_losses_annealed[out_key] += value.item()
     
     def _normalize_epoch_losses(self):
-        for key in self.epoch_losses:
-            self.epoch_losses[key] /= len(self.dataloader)
+        for key in self.epoch_losses_raw:
+            self.epoch_losses_raw[key] /= len(self.dataloader)
+        for key in self.epoch_losses_annealed:
+            self.epoch_losses_annealed[key] /= len(self.dataloader)
