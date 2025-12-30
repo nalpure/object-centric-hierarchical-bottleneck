@@ -84,33 +84,25 @@ class RelationalLatentDynamics(nn.Module):
     """
     Model for predicting future explicit latents by building an internal implicit latent representation.
     """
-    def __init__(self, explicit_dim, implicit_dim, seq_len, edge_dim=64, latent_edge_dim=64, attn_temperature=0.5, disentangle=False):
+    def __init__(self, explicit_dim, implicit_dim, seq_len, edge_dim=64, latent_edge_dim=64):
         super().__init__()
         self.E = explicit_dim
         self.I = implicit_dim
         self.T = seq_len
         self.H = edge_dim
         self.H_latent = latent_edge_dim
-        self.attn_temperature = attn_temperature
-        self.disentangle = disentangle
 
         self.EI = self.E + self.I
         self.TE = self.T * self.E
 
         self.edge_encoder = EdgeEncoder(self.TE * 2, self.H)
-        if self.disentangle:
-            self.node_encoder_first = NodeEncoder(self.TE + self.H, self.I)
-        self.node_encoder_current = NodeEncoder(self.TE + self.H, self.I)
+        self.node_encoder = NodeEncoder(self.TE + self.H, self.I)
 
         self.latent_edge_encoder = LatentEdgeEncoder(self.EI * 2, self.H_latent)
         self.latent_transition = LatentTransition(self.EI + self.H_latent, self.EI)
 
-        
-        # gate projection
-        self.gate_proj = nn.Linear(self.H + self.EI, 1)
 
-
-    def forward(self, z_explicit_seq, t_future):
+    def forward(self, z_explicit_seq, t_future, disentangle):
         """
         Predict future explicit latents given a sequence of past explicit latents.
         Args:
@@ -129,29 +121,28 @@ class RelationalLatentDynamics(nn.Module):
         B, T, O, E = z_explicit_seq.shape
         assert T == self.T
         assert E == self.E
-        assert T >= 2, "Sequence length must be at least 2"
-        assert t_future >= 1, "t_future must be at least 1"
         
         z_explicit_current = z_explicit_seq[:, -1, :, :]  # [B, O, E]
 
         # Build latent for current time step, rollout to predict future sequence
         source = self.define_source(z_explicit_seq)
         edge_agg = self.get_edges(source, self.edge_encoder)
-        z_implicit_current = self.compute_implicit(source, edge_agg, self.node_encoder_current)  # [B, O, I]
+        z_implicit_current = self.compute_implicit(source, edge_agg, self.node_encoder)  # [B, O, I]
         z_current = torch.cat([z_explicit_current, z_implicit_current], dim=-1)  # [B, O, E + I]
         z_pred_future = self.rollout(z_current, num_steps=t_future)  # [B, t_future, O, E]
 
-        if self.disentangle:
-            z_explicit_seq_inv = z_explicit_seq.flip(dims=[1])  # [B, T, O, E]
-            source_inv = self.define_source(z_explicit_seq_inv)
-            edge_inv_agg = self.get_edges(source_inv, self.edge_encoder)
-            # Build latent for first time step, rollout to reconstruct input sequence
-            z_implicit_first = (-1) * self.compute_implicit(source_inv, edge_inv_agg, self.node_encoder_current)  # [B, O, I]
-            return z_pred_future, z_implicit_first
-        else:
+        if not disentangle:
             return z_pred_future, None
+
+        # Flip sequence to compute implicit latent at first time step
+        z_explicit_seq_inv = z_explicit_seq.flip(dims=[1])  # [B, T, O, E]
+        source_inv = self.define_source(z_explicit_seq_inv) # [B, O, T*E]
+        edge_inv_agg = self.get_edges(source_inv, self.edge_encoder) # [B, O, H]
+        z_implicit_first = (-1) * self.compute_implicit(source_inv, edge_inv_agg, self.node_encoder)  # [B, O, I]
+        return z_pred_future, z_implicit_first
+            
     
-    def define_source(self, z_explicit_seq):
+    def _define_source(self, z_explicit_seq):
         B, T, O, E = z_explicit_seq.shape
         z_explicit_first = z_explicit_seq[:, 0:1, :, :]  # [B, 1, O, E]
         z_explicit_diffs = z_explicit_seq[:, 1:, :, :] - z_explicit_seq[:, :-1, :, :]  # [B, T-1, O, E]
@@ -159,7 +150,7 @@ class RelationalLatentDynamics(nn.Module):
         source = source.permute(0, 2, 1, 3).reshape(B, O, T*E)
         return source
 
-    def get_edges(self, source, edge_encoder: EdgeEncoder):
+    def _get_edges(self, source, edge_encoder: EdgeEncoder):
         """
         Antisymmetric, direction-preserving pairwise interactions.
 
@@ -199,7 +190,7 @@ class RelationalLatentDynamics(nn.Module):
         return edge_agg
     
 
-    def compute_implicit(self, source, edge_agg, node_encoder:NodeEncoder):
+    def _compute_implicit(self, source, edge_agg, node_encoder:NodeEncoder):
         """
         Compute implicit latent from source information and aggregated edges.
         Args:
@@ -225,7 +216,7 @@ class RelationalLatentDynamics(nn.Module):
         return z_impl
     
     
-    def predict(self, z):
+    def _predict(self, z):
         """
         Args:
             z: torch.Tensor of shape [B, O, E + I]
@@ -248,7 +239,7 @@ class RelationalLatentDynamics(nn.Module):
         return z_new
     
 
-    def rollout(self, z, num_steps):
+    def _rollout(self, z, num_steps):
         """
         Args:
             z: torch.Tensor of shape [B, O, E + I]
@@ -256,15 +247,15 @@ class RelationalLatentDynamics(nn.Module):
             num_steps: int
                 Number of time steps to predict
         Returns:
-            z_explicit_pred: torch.Tensor of shape [B, num_steps, O, E]
-                The sequence of predicted explicit latents
+            z_pred: torch.Tensor of shape [B, num_steps, O, E]
+                The sequence of predicted latents
         """
         B, O, EI = z.shape
-        E = self.E
-        z_explicit_pred = torch.zeros(B, num_steps, O, E, device=z.device)
+        assert EI == self.EI
+        z_pred = torch.zeros(B, num_steps, O, EI, device=z.device)
 
         for t in range(num_steps):
-            z = self.predict(z)                         # predict next timestep
-            z_explicit_pred[:, t, :, :] = z[:, :, :E]   # store explicit part of prediction
-
-        return z_explicit_pred
+            z = self.predict(z)
+            z_pred[:, t, :, :] = z
+        
+        return z_pred
