@@ -471,17 +471,16 @@ def load_norm_stats(path):
         stats = torch.load(path, weights_only=True)
         mean = stats["mean"]
         std = stats["std"]
-        print(f"mean: {mean}, std: {std}")
     else:
         raise ValueError(f"Normalization stats file not found at {path}.")
 
     return mean, std
 
+
 def save_norm_stats(mean, std, path):
     if exists(path):
         raise ValueError(f"Normalization stats file already exists at {path}. Please provide a new path to save the stats.")
     else:
-        print(f"mean: {mean}, std: {std}")
         print("Saving normalization stats to", path)
         torch.save({"mean": mean, "std": std}, path)
 
