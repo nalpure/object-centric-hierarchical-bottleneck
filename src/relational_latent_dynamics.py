@@ -125,20 +125,20 @@ class RelationalLatentDynamics(nn.Module):
         z_explicit_current = z_explicit_seq[:, -1, :, :]  # [B, O, E]
 
         # Build latent for current time step, rollout to predict future sequence
-        source = self.define_source(z_explicit_seq)
-        edge_agg = self.get_edges(source, self.edge_encoder)
-        z_implicit_current = self.compute_implicit(source, edge_agg, self.node_encoder)  # [B, O, I]
+        source = self._define_source(z_explicit_seq)
+        edge_agg = self._get_edges(source, self.edge_encoder)
+        z_implicit_current = self._compute_implicit(source, edge_agg, self.node_encoder)  # [B, O, I]
         z_current = torch.cat([z_explicit_current, z_implicit_current], dim=-1)  # [B, O, E + I]
-        z_pred_future = self.rollout(z_current, num_steps=t_future)  # [B, t_future, O, E]
+        z_pred_future = self._rollout(z_current, num_steps=t_future)  # [B, t_future, O, E]
 
         if not disentangle:
             return z_pred_future, None
 
         # Flip sequence to compute implicit latent at first time step
         z_explicit_seq_inv = z_explicit_seq.flip(dims=[1])  # [B, T, O, E]
-        source_inv = self.define_source(z_explicit_seq_inv) # [B, O, T*E]
-        edge_inv_agg = self.get_edges(source_inv, self.edge_encoder) # [B, O, H]
-        z_implicit_first = (-1) * self.compute_implicit(source_inv, edge_inv_agg, self.node_encoder)  # [B, O, I]
+        source_inv = self._define_source(z_explicit_seq_inv) # [B, O, T*E]
+        edge_inv_agg = self._get_edges(source_inv, self.edge_encoder) # [B, O, H]
+        z_implicit_first = (-1) * self._compute_implicit(source_inv, edge_inv_agg, self.node_encoder)  # [B, O, I]
         return z_pred_future, z_implicit_first
             
     
@@ -230,7 +230,7 @@ class RelationalLatentDynamics(nn.Module):
         flat_z = z.reshape(B * O, EI)
 
         # 1) compute aggregated edges in latent space
-        edge_agg = self.get_edges(z, self.latent_edge_encoder)  # [B, O, H_latent]
+        edge_agg = self._get_edges(z, self.latent_edge_encoder)  # [B, O, H_latent]
         flat_edges = edge_agg.reshape(B * O, H_latent)
 
         # 2) compute new latents
@@ -255,7 +255,7 @@ class RelationalLatentDynamics(nn.Module):
         z_pred = torch.zeros(B, num_steps, O, EI, device=z.device)
 
         for t in range(num_steps):
-            z = self.predict(z)
+            z = self._predict(z)
             z_pred[:, t, :, :] = z
         
         return z_pred
