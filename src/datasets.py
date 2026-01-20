@@ -74,7 +74,7 @@ class ImageDataset(data.Dataset):
     
 
 class PerturbedImageSequenceDataset(data.Dataset):
-    def __init__(self, npz_path, in_format="HWC", out_format="CHW", T=None, only_original=False):
+    def __init__(self, npz_path, in_format="HWC", out_format="CHW", T=None, only_original=False, groundtruth=False):
         """
         Loads full observation/perturbation sequences:
             img_o, img_p: (N, T, H, W, C)
@@ -85,6 +85,7 @@ class PerturbedImageSequenceDataset(data.Dataset):
             "Requested T exceeds dataset length."
         self.in_format, self.out_format = in_format, out_format
         self.only_original = only_original
+        self.groundtruth = groundtruth
         self.img_o = data["img_o"][:, :T]
 
         if not only_original:
@@ -92,23 +93,41 @@ class PerturbedImageSequenceDataset(data.Dataset):
             self.mags = data["magnitudes"]
             self.inds = data["indices"]
             self.props = data["properties"]
+
+            if groundtruth:
+                self.groundtruth_o = data["groundtruth_o"]
+                self.masks_o = data["masks_o"]
+                self.groundtruth_p = data["groundtruth_p"]
+                self.masks_p = data["masks_p"]
+            else:
+                raise NotImplementedError("Ground truth data loading for only_original=True is not implemented.")
         
     def __len__(self):
         return self.img_o.shape[0]
 
     def __getitem__(self, idx):
         orig = transpose_array(self.img_o[idx], self.in_format, self.out_format)
+        orig = torch.from_numpy(orig / 255.0).float()
+        
         if self.only_original:
-            return torch.from_numpy(orig / 255.0).float()
-        else:
-            pert = transpose_array(self.img_p[idx], self.in_format, self.out_format)
-            return (
-                torch.from_numpy(orig / 255.0).float(),
-                torch.from_numpy(pert / 255.0).float(),
-                torch.tensor(self.mags[idx], dtype=torch.float32),
-                torch.tensor(self.inds[idx], dtype=torch.int8),
-                torch.tensor(self.props[idx], dtype=torch.int8),
-            )
+            return orig
+        
+        pert = transpose_array(self.img_p[idx], self.in_format, self.out_format)
+        pert = torch.from_numpy(pert / 255.0).float()
+        mags = torch.tensor(self.mags[idx], dtype=torch.float32)
+        inds = torch.tensor(self.inds[idx], dtype=torch.int8)
+        props = torch.tensor(self.props[idx], dtype=torch.int8)
+        
+        if not self.groundtruth:
+            return orig, pert, mags, inds, props
+
+        groundtruth_o = torch.from_numpy(self.groundtruth_o[idx]).float()
+        masks_o = torch.from_numpy(self.masks_o[idx]).bool()
+        groundtruth_p = torch.from_numpy(self.groundtruth_p[idx]).float()
+        masks_p = torch.from_numpy(self.masks_p[idx]).bool()
+        return (orig, pert, mags, inds, props,
+                groundtruth_o, masks_o,
+                groundtruth_p, masks_p)
 
 
 class ImageSequencePairDataset(data.Dataset):

@@ -558,8 +558,10 @@ def get_lr_scheduler(config, optimizer, adjust_for_checkpoint=False):
     return scheduler
 
 
-def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
+def get_dataloader(config: dict, save_mode=False, groundtruth=False) -> data.DataLoader:
     print(f"Loading data from '{config['data']['path']}'")
+    if groundtruth and (config["type"] != "slot_attention" or not save_mode):
+        raise NotImplementedError("Ground truth data loading is only implemented for slot_attention in save mode.")
 
     if config["type"] == "slot_attention":
         train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
@@ -569,7 +571,8 @@ def get_dataloader(config: dict, save_mode=False) -> data.DataLoader:
                 npz_path=config["data"]["path"],
                 in_format=config["data"]["obs_format"],
                 T=config["data"]["seq_length"],
-                only_original=False
+                only_original=False,
+                groundtruth=groundtruth
             )
         # With contrastive learning, load image pairs
         elif train_contrastive:
