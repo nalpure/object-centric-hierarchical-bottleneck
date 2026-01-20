@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from slot_attention_AE import order_slots
+from match import order_slots_temporal
 from src.utils import get_dataloader, make_unique_dir, initialize_model, load_config, plot_grid, set_seed, DEVICE
 import utils
 
@@ -64,7 +64,7 @@ def main():
     
     # ----- Set up evaluation -----
     set_seed(config_impl["seed"])
-    obs_dataloader = get_dataloader(config_SA, save_mode=True)
+    obs_dataloader = get_dataloader(config_SA, save_mode=True, groundtruth=True)
     model_SA = initialize_model(config_SA, eval_mode=True)
     model_expl = initialize_model(config_explicit, eval_mode=True)
     model_impl = initialize_model(config_impl, eval_mode=True)
@@ -81,9 +81,12 @@ def main():
     mean_slots, std_slots = utils.get_normalization_stats(config_explicit)
 
     with torch.no_grad():
+        truths = []
         for batch in tqdm(obs_dataloader, desc="Evaluating", unit="batch"):
-            orig, pert_seq, magnitude, obj_index, prop_index = batch
+            orig, _, _, _, _, groundtruth_o, masks_o, _, _ = batch
             orig = orig.to(DEVICE)
+            masks_o = masks_o.to(DEVICE)
+            truths.extend(groundtruth_o)
             B, T, C, H, W = orig.shape
             S = model_SA.num_slots
             D_slot = model_SA.slots_dim
@@ -100,7 +103,7 @@ def main():
 
             for t in range(T):
                 slots_t, attn_t = model_SA.encode(orig[:, t], slots_init=prev_slots)
-                slots_t, attn_t = order_slots(slots_t, attn_t, prev_slots, prev_attn)
+                slots_t, attn_t = order_slots_temporal(slots_t, attn_t, prev_slots, prev_attn)
                 slots[:, t] = slots_t
                 prev_slots = slots_t
                 prev_attn = attn_t

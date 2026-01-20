@@ -4,7 +4,7 @@ from os.path import dirname
 import numpy as np
 import torch
 
-from slot_attention_AE import order_slots
+from match import order_slots_temporal
 from src.utils import get_dataloader, make_unique_dir, initialize_model, load_config, set_seed, DEVICE
 import utils
 
@@ -88,7 +88,7 @@ def main():
 
         for t in range(T_past):
             slots_t, attn_t = model_SA.encode(orig[:, t], slots_init=prev_slots)
-            slots_t, attn_t = order_slots(slots_t, attn_t, prev_slots, prev_attn)
+            slots_t, attn_t = order_slots_temporal(slots_t, attn_t, prev_slots, prev_attn)
             prev_slots = slots_t
             prev_attn = attn_t
             slots[:, t] = utils.normalize_slots(slots_t, mean_slots, std_slots)

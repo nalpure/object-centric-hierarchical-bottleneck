@@ -7,7 +7,7 @@ from torch.utils import data
 import torch
 from torch.nn import functional as F
 
-from slot_attention_AE import order_slots
+from match import order_slots_temporal
 from src.utils import get_dataloader, initialize_model, load_config, plot_grid, save_dict_h5py, set_seed, DEVICE
 
 
@@ -96,7 +96,7 @@ def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_fname
 
         for t in range(T):
             slots_orig, attn_orig = model.encode(orig_seq[:, t], slots_init=prev_slots_orig)
-            slots_orig, attn_orig = order_slots(slots_orig, attn_orig, prev_slots_orig, prev_attn_orig)
+            slots_orig, attn_orig = order_slots_temporal(slots_orig, attn_orig, prev_slots_orig, prev_attn_orig)
 
             if t == 0:
                 # Make sure both sequences start with the same slot order
@@ -104,7 +104,7 @@ def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_fname
                 prev_attn_pert = attn_orig
             
             slots_pert, attn_pert = model.encode(pert_seq[:, t], slots_init=prev_slots_pert)
-            slots_pert, attn_pert = order_slots(slots_pert, attn_pert, prev_slots_pert, prev_attn_pert)
+            slots_pert, attn_pert = order_slots_temporal(slots_pert, attn_pert, prev_slots_pert, prev_attn_pert)
 
             active_slots_orig[:, t, :, :] = slots_orig[:, 1:, :]
             active_slots_pert[:, t, :, :] = slots_pert[:, 1:, :]
@@ -227,7 +227,7 @@ def evaluate_slot_alignment(slots_t0, slots_t1):
 def slot_stats_prints(model: torch.nn.Module, orig_seq: torch.Tensor, active_slots_orig: torch.Tensor, prev_slots_orig: torch.Tensor, prev_attn_orig: torch.Tensor):
     # ----- Debug prints for slot similarity at t=0 within single observations -----
     slots_orig_no_init, attn_orig_no_init = model.encode(orig_seq[:, 0])
-    slots_orig_no_init_ordered, attn_orig_no_init_ordered = order_slots(slots_orig_no_init, attn_orig_no_init, prev_slots_orig, prev_attn_orig)
+    slots_orig_no_init_ordered, attn_orig_no_init_ordered = order_slots_temporal(slots_orig_no_init, attn_orig_no_init, prev_slots_orig, prev_attn_orig)
 
     prev_slots_orig_norm = F.normalize(prev_slots_orig, dim=-1)
     slots_orig_no_init_ordered_norm = F.normalize(slots_orig_no_init_ordered, dim=-1)
