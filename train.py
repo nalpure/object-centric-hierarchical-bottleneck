@@ -44,6 +44,7 @@ def main():
         if not "path" in config["data"]:
             raise "Provide a dataset path!"
     else:
+        config.setdefault("data", {})
         config["data"]["path"] = args.data
 
     if "num_workers" not in config:
