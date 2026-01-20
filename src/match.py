@@ -116,3 +116,31 @@ def order_slots_temporal(slots, attention_scores, prev_slots=None, prev_attentio
         attn = torch.cat([attn_bg, attn_active], dim=1)
     
     return slots, attn
+
+
+def find_gt_slot_alignment(masks_pred: torch.Tensor,
+                           masks: torch.Tensor):
+    """
+    Args:
+        masks_pred: (T, S, H, W) predicted masks
+        masks:      (T, S, H, W) ground-truth masks
+
+    Returns:
+        perm: (S,) permutation aligning predicted slots to GT objects
+    """
+    T, S, H, W = masks_pred.shape
+
+    flat_pred = masks_pred.reshape(T, S, -1)
+    flat_gt = masks.reshape(T, S, -1).float()
+
+    # cost[i, j] = sum_t ||gt_i - pred_j||^2
+    cost = torch.sum(
+        (flat_gt[:, :, None, :] - flat_pred[:, None, :, :]) ** 2,
+        dim=(0, 3)
+    )  # (S, S)
+
+    row_ind, col_ind = linear_sum_assignment(cost.cpu().numpy())
+
+    perm = torch.as_tensor(col_ind, device=masks_pred.device)
+
+    return perm
