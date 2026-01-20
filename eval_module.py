@@ -46,7 +46,7 @@ def main():
         config["data"]["include_perturbed"] = False
 
     if args.figures > 0 and config["type"] != "slot_attention":
-        print("Warning: Figures can only be generated for slot attention models.")
+        print("WARNING: Figures can only be generated for slot attention models.")
         args.figures = 0
 
     if "noise" in config["data"]:
@@ -56,7 +56,7 @@ def main():
     # ----- Set up evaluation -----
     set_seed(config["seed"])
     dataloader = get_dataloader(config)
-    model = initialize_model(config, dataloader, eval_mode=True)
+    model = initialize_model(config, eval_mode=True)
     train_step = get_train_step(config, model)
 
     losses = {}
