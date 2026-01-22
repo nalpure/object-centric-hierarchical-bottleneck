@@ -94,13 +94,13 @@ class PerturbedImageSequenceDataset(data.Dataset):
             self.inds = data["indices"]
             self.props = data["properties"]
 
-            if groundtruth:
-                self.groundtruth_o = data["groundtruth_o"]
-                self.masks_o = data["masks_o"]
-                self.groundtruth_p = data["groundtruth_p"]
-                self.masks_p = data["masks_p"]
-            else:
-                raise NotImplementedError("Ground truth data loading for only_original=True is not implemented.")
+            if self.groundtruth:
+                self.groundtruth_o = data["groundtruth_o"][:, :T]
+                self.masks_o = data["masks_o"][:, :T]
+                self.groundtruth_p = data["groundtruth_p"][:, :T]
+                self.masks_p = data["masks_p"][:, :T]
+        elif self.groundtruth:
+            raise NotImplementedError("Ground truth data loading for only_original=True is not implemented.")
         
     def __len__(self):
         return self.img_o.shape[0]
