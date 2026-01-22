@@ -5,15 +5,16 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from match import order_slots_temporal
-from src.utils import get_dataloader, make_unique_dir, initialize_model, load_config, plot_grid, set_seed, DEVICE
+from match.groundtruth import find_gt_slot_alignment, get_linear_mcc
+from match.temporal import order_slots_temporal
+from utils import get_dataloader, make_unique_dir, initialize_model, load_config, plot_grid, set_seed, DEVICE
 import utils
 
 def main():
     # ----- Parse arguments -----
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--ckpt", help="Checkpoint path.")
+    parser.add_argument("-c", "--ckpt", help="Dynamics checkpoint path.")
     parser.add_argument("-d", "--data", help="Evaluation dataset path.")
     parser.add_argument("-t", "--timesteps", help="Number of future time steps to predict.", type=int, default=4)
     parser.add_argument("-f", "--figures", help="Number of figures to save.", type=int, default=5)
@@ -80,23 +81,32 @@ def main():
     }
     mean_slots, std_slots = utils.get_normalization_stats(config_explicit)
 
+    batch = next(iter(obs_dataloader))
+    B, T, C, H, W = batch[0].shape
+    S = model_SA.num_slots
+    D_slot = model_SA.slots_dim
+    D_expl = model_expl.latent_dim
+    D_impl = model_impl.I
+    D_latent = D_expl + D_impl
+    num_samples = len(obs_dataloader.dataset)
+
+    truth_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
+    slot_all = torch.empty((num_samples, S - 1, D_slot), device=DEVICE)
+    z_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
+    
     with torch.no_grad():
-        truths = []
-        for batch in tqdm(obs_dataloader, desc="Evaluating", unit="batch"):
+
+        for batch_idx, batch in enumerate(tqdm(obs_dataloader, desc="Evaluating", unit="batch")):
             orig, _, _, _, _, groundtruth_o, masks_o, _, _ = batch
             orig = orig.to(DEVICE)
             masks_o = masks_o.to(DEVICE)
-            truths.extend(groundtruth_o)
-            B, T, C, H, W = orig.shape
-            S = model_SA.num_slots
-            D_slot = model_SA.slots_dim
-            D_expl = model_expl.latent_dim
+            truth_all[batch_idx * B : (batch_idx + 1) * B] = groundtruth_o[:, 0].to(DEVICE)
 
             img_seq = {"true": orig}
             slot_seq = {}
             expl_seq = {}
 
-            # ----- Slot Attention Encoding -----
+            # ----- Slot Attention Encoding and temporal ordering -----
             slots = torch.empty((B, T, S, D_slot), device=DEVICE)
             prev_slots = None
             prev_attn = None
@@ -104,11 +114,49 @@ def main():
             for t in range(T):
                 slots_t, attn_t = model_SA.encode(orig[:, t], slots_init=prev_slots)
                 slots_t, attn_t = order_slots_temporal(slots_t, attn_t, prev_slots, prev_attn)
+                # background slot is first after ordering
                 slots[:, t] = slots_t
                 prev_slots = slots_t
                 prev_attn = attn_t
+
+            # ----- Decode slots to get masks for alignment -----
+            recon_combined, _, masks_predicted = model_SA.decode(
+                slots.view(B * T, S, D_slot)
+            )
+            img_seq["recon_SA"] = recon_combined.view(B, T, C, H, W)  
+            masks_predicted = masks_predicted.view(B, T, S, H, W)
+
+            # ----- Align slots with ground-truths based on masks -----
+            bg_slots = slots[:, :, :1]  # [B, T, 1, D]
+            active_slots = slots[:, :, 1:]  # [B, T, S-1, D]
+            active_masks_pred = masks_predicted[:, :, 1:]  # [B, T, S-1, H, W]
+            t_past = config_impl["model"]["t_past"]
+            t_future = config_impl["train"]["t_future"]
+            active_slots_aligned = torch.empty_like(active_slots)
+
+            for b in range(B):
+                gt_masks_b = masks_o[b]  # [T, O, H, W]
+                masks_b_recon = active_masks_pred[b]  # [T, S-1, H, W]
+                perm = find_gt_slot_alignment(masks_b_recon, gt_masks_b)
+                active_slots_aligned[b] = active_slots[b][:, perm, :]
             
-            slot_seq["true"] = utils.normalize_slots(slots, mean_slots, std_slots)
+            slots_aligned = torch.cat([bg_slots, active_slots_aligned], dim=2)  # [B, T, S, D]
+            slot_seq["true"] = utils.normalize_slots(
+                slots_aligned,
+                mean_slots,
+                std_slots
+            )
+            slot_all[batch_idx * B : (batch_idx + 1) * B] = slots_aligned[:, 0, 1:]  # Exclude background slot
+
+            """
+            # TODO: Remove, testing purpose only!
+            # ----- Plot aligned slots -----
+            rows = [masks_o[0, :, s] for s in range(S-1)] \
+                + [active_masks_aligned[0, :, s] for s in range(S-1)] \
+                + [active_masks_pred[0, :, s] for s in range(S-1)]
+            row_labels = ["GT Masks"] * (S-1) + ["Predicted Masks (aligned)"] * (S-1) + ["Predicted Slots (unaligned)"] * (S-1)
+            column_labels = [f"Timestep {t+1}" for t in range(T)]
+            plot_grid(rows, row_labels, column_labels, "out/aligned_slots.png")"""
 
             # ----- Explicit Latents Encoding -----
             active_slots = slot_seq["true"][:, :, 1:]  # Exclude background slot
@@ -118,8 +166,6 @@ def main():
             expl_seq["true"] = z_expl.view(B, T, S - 1, D_expl)
 
             # ----- Implicit Dynamics Prediction -----
-            t_past = config_impl["model"]["t_past"]
-            t_future = config_impl["train"]["t_future"]
             expl_seq_past = expl_seq["true"][:, :t_past].reshape(B, t_past, S - 1, D_expl)
 
             z_pred_future, z_implicit_first = model_impl(
@@ -127,6 +173,13 @@ def main():
             )
             expl_seq["pred_future_impl"] = z_pred_future[:, :, :, :D_expl]  # [B, t_future, O, E]
             
+            # ----- Collect latents for MCC -----
+            z_first = torch.cat([
+                expl_seq["pred_future_impl"][:, 0],
+                z_implicit_first
+            ], dim=-1)  # [B, O, E + I]
+            z_all[batch_idx * B : (batch_idx + 1) * B] = z_first
+
             # ----- Decode Explicit Latents -----
             slot_seq["active_recon_expl"] = model_expl.decode(
                 expl_seq["true"].view(B * T, S - 1, D_expl)
@@ -137,14 +190,6 @@ def main():
             ).view(B, t_future, S - 1, D_slot)
 
             # ----- Decode Slots -----
-            recon_combined, recons, masks = model_SA.decode(
-                utils.denormalize_slots(
-                    slot_seq["true"].view(B * T, S, D_slot),
-                    mean_slots,
-                    std_slots
-                )
-            )
-            img_seq["recon_SA"] = recon_combined.view(B, T, C, H, W)  
 
             recon_combined_expl, recons_expl, masks_expl = model_SA.decode(
                 utils.denormalize_slots(
@@ -194,7 +239,9 @@ def main():
                 img_seq["pred_impl"]
             ).item())
 
-    
+    losses["MCC latent"] = get_linear_mcc(truth_all, z_all)
+    losses["MCC slot"] = get_linear_mcc(truth_all, slot_all)
+
     # ----- Print results -----
     for key, value in losses.items():
         print(f"{key} loss: {np.mean(value):.6f}")

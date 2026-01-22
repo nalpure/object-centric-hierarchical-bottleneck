@@ -7,7 +7,7 @@ from torch.utils import data
 import torch
 from torch.nn import functional as F
 
-from match import order_slots_temporal
+from match.temporal import order_slots_temporal
 from src.utils import get_dataloader, initialize_model, load_config, plot_grid, save_dict_h5py, set_seed, DEVICE
 
 

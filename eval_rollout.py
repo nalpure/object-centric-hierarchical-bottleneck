@@ -4,7 +4,7 @@ from os.path import dirname
 import numpy as np
 import torch
 
-from match import order_slots_temporal
+from match.temporal import order_slots_temporal
 from src.utils import get_dataloader, make_unique_dir, initialize_model, load_config, set_seed, DEVICE
 import utils
 
