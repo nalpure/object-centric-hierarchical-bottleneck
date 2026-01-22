@@ -2,7 +2,7 @@ import numpy as np
 from torch import nn
 import torch
 import torch.nn.functional as F
-from match import match_slots_temporal
+from match.temporal import match_slots_temporal
 
 from slot_attention import SlotAttention
 
