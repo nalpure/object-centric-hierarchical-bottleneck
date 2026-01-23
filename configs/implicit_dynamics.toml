@@ -1,6 +1,8 @@
 # Default implicit dynamics configuration
 type = "implicit_dynamics"
-seed = 0
+
+[data]
+skip_explicit_perts = false
 
 [model]
 explicit_dim = 3
@@ -11,14 +13,14 @@ t_past = 4
 
 [train]
 batch_size = 128
-epochs = 800
+epochs = 500
 ckpt_rate = 100
 t_future = 4
 
 [train.opt]
 lr = 0.0004
 lr_warmup_epochs= 0
-lr_decay_epochs = 250
+lr_decay_epochs = 200
 lr_decay_rate = 0.5
 weight_decay = 0.0
 

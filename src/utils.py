@@ -621,12 +621,17 @@ def get_dataloader(config: dict, save_mode=False, groundtruth=False) -> data.Dat
     elif config["type"] == "implicit_dynamics":
         t_past = config["model"]["t_past"]
         t_future = config["train"]["t_future"]
+        skip_explicit_perts = config["data"].get("skip_explicit_perts", False)
+        prop_skip_codes = get_explicit_codes() if skip_explicit_perts else []
+
+        if not skip_explicit_perts and config["train"]["weights"]["disentanglement"] > 0.0:
+            raise ValueError("Explicit perturbations must be skipped when training with disentanglement loss.")
         
         dataset = PerturbedSlotSequenceDataset(
             hdf5_file=config["data"]["path"], 
             normalize=False, 
             timesteps=t_past + t_future,
-            prop_skip_codes=get_explicit_codes()
+            prop_skip_codes=prop_skip_codes
         ) 
     
     train_dataloader = data.DataLoader(
