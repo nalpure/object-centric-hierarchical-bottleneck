@@ -42,55 +42,77 @@ def attention_loss(attention):
     return loss
 
 
-def disentanglement_loss(z_orig, z_pert, latent_idx, magnitude):
+def disentanglement_loss(z_orig, z_pert, latent_idx, magnitude, disentangle_type="closest_magnitude"):
     """
     z_orig:     [B, O, EI]
     z_pert:     [B, O, EI]
     latent_idx: [B]       (int indices 0..EI-1)
     magnitude:  [B]       (scalar magnitude per batch item)
+    disentangle_type: str  -- "closest_magnitude", "max_response", "averaged_matching"
     Returns scalar loss.
     """
     B, O, EI = z_orig.shape
-    assert z_orig.shape == z_pert.shape
-    assert latent_idx.shape == (B,)
-    assert magnitude.shape == (B,)
 
-    device = z_orig.device
-    delta = z_pert - z_orig                      # [B, O, EI]
+    if disentangle_type == "closest_magnitude":
+        latent_idx_exp = latent_idx.view(B, 1, 1).expand(B, O, 1)
+        z_o = torch.gather(z_orig, dim=2, index=latent_idx_exp).squeeze(-1)     # [B, O]
+        z_p = torch.gather(z_pert, dim=2, index=latent_idx_exp).squeeze(-1)     # [B, O]
+        mag = magnitude.view(B, 1)
+        sq_diff = (z_p - z_o - mag) ** 2
+        min_sq_diff = sq_diff.min(dim=1).values
+        return min_sq_diff.mean()
 
-    # Build mask of shape [O, O] where mask[c, j] = 1 if j == c else 0
-    eye_O = torch.eye(O, device=device)         # [O, O]
+    elif disentangle_type == "max_response":
+        latent_idx_exp = latent_idx.view(B, 1, 1).expand(B, O, 1)
+        z_o = torch.gather(z_orig, dim=2, index=latent_idx_exp).squeeze(-1)     # [B, O]
+        z_p = torch.gather(z_pert, dim=2, index=latent_idx_exp).squeeze(-1)     # [B, O]
 
-    # We'll build target_exp shaped [B, O_choice, O_object, EI]
-    # Start with zeros:
-    target_exp = torch.zeros((B, O, O, EI), device=device)  # [B, O_choice, O_object, EI]
+        pert_z_idx = torch.abs(z_p - z_o).argmax(dim=1).view(B, 1)
+        z_p_pert = torch.gather(z_p, dim=1, index=pert_z_idx).squeeze(-1)  # [B]
+        z_o_pert = torch.gather(z_o, dim=1, index=pert_z_idx).squeeze(-1)  # [B]
+        diff = (z_p_pert - z_o_pert - magnitude) ** 2
+        return diff.mean()
+    
+    elif disentangle_type == "averaged_matching":
+        device = z_orig.device
+        delta = z_pert - z_orig                      # [B, O, EI]
 
-    # We need to set target_exp[b, c, j, latent_idx[b]] = magnitude[b] if j == c
-    # Use broadcasting: eye_O[None, :, :] has shape [1, O, O]
-    # Expand magnitude and latent indices to match batch/hypothesis dims
-    mask = eye_O[None, :, :].expand(B, -1, -1)          # [B, O, O]
-    # latent_idx expanded to [B, 1, 1] so it can index into the EI dim
-    lat_idx_exp = latent_idx.view(B, 1, 1)              # [B, 1, 1]
-    mag_exp     = magnitude.view(B, 1, 1)               # [B, 1, 1]
+        # Build mask of shape [O, O] where mask[c, j] = 1 if j == c else 0
+        eye_O = torch.eye(O, device=device)         # [O, O]
 
-    # Use scatter to place magnitude at the correct latent index only where mask==1
-    # For scatter we need indices of shape [B, O, O, 1] and values shape [B, O, O, 1]
-    idx_for_scatter = lat_idx_exp.expand(B, O, O).unsqueeze(-1)  # [B, O, O, 1]
-    values_for_scatter = (mask.unsqueeze(-1) * mag_exp.unsqueeze(-1))  # [B, O, O, 1]
+        # We'll build target_exp shaped [B, O_choice, O_object, EI]
+        # Start with zeros:
+        target_exp = torch.zeros((B, O, O, EI), device=device)  # [B, O_choice, O_object, EI]
 
-    # scatter_ along last dim (dim=-1)
-    target_exp.scatter_(-1, idx_for_scatter, values_for_scatter)  # places magnitude only where mask==1
+        # We need to set target_exp[b, c, j, latent_idx[b]] = magnitude[b] if j == c
+        # Use broadcasting: eye_O[None, :, :] has shape [1, O, O]
+        # Expand magnitude and latent indices to match batch/hypothesis dims
+        mask = eye_O[None, :, :].expand(B, -1, -1)          # [B, O, O]
+        # latent_idx expanded to [B, 1, 1] so it can index into the EI dim
+        lat_idx_exp = latent_idx.view(B, 1, 1)              # [B, 1, 1]
+        mag_exp     = magnitude.view(B, 1, 1)               # [B, 1, 1]
 
-    # Expand delta to compare: delta_exp [B, 1, O, EI] so it broadcasts with target_exp
-    delta_exp = delta.unsqueeze(1)  # [B, 1, O, EI]
+        # Use scatter to place magnitude at the correct latent index only where mask==1
+        # For scatter we need indices of shape [B, O, O, 1] and values shape [B, O, O, 1]
+        idx_for_scatter = lat_idx_exp.expand(B, O, O).unsqueeze(-1)  # [B, O, O, 1]
+        values_for_scatter = (mask.unsqueeze(-1) * mag_exp.unsqueeze(-1))  # [B, O, O, 1]
 
-    # Compute squared error per latent -> mean over EI gives [B, O_choice, O_object]
-    loss_matrix = (delta_exp - target_exp).pow(2).mean(dim=-1)  # [B, O, O]
+        # scatter_ along last dim (dim=-1)
+        target_exp.scatter_(-1, idx_for_scatter, values_for_scatter)  # places magnitude only where mask==1
 
-    # For a hypothesis 'choice' we average the per-object errors across objects:
-    hypothesis_loss = loss_matrix.mean(dim=-1)  # [B, O]
+        # Expand delta to compare: delta_exp [B, 1, O, EI] so it broadcasts with target_exp
+        delta_exp = delta.unsqueeze(1)  # [B, 1, O, EI]
 
-    # pick best hypothesis per batch item
-    best_loss = hypothesis_loss.min(dim=1).values  # [B]
+        # Compute squared error per latent -> mean over EI gives [B, O_choice, O_object]
+        loss_matrix = (delta_exp - target_exp).pow(2).mean(dim=-1)  # [B, O, O]
 
-    return best_loss.mean()
+        # For a hypothesis 'choice' we average the per-object errors across objects:
+        hypothesis_loss = loss_matrix.mean(dim=-1)  # [B, O]
+
+        # pick best hypothesis per batch item
+        best_loss = hypothesis_loss.min(dim=1).values  # [B]
+
+        return best_loss.mean()
+    
+    else:
+        raise ValueError(f"Unknown disentanglement_type: {disentangle_type}")

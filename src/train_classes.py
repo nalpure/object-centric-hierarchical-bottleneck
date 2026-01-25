@@ -121,10 +121,11 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
     
 
 class ExplicitAETrainStep(TrainStep):
-    def __init__(self, model: ExplicitLatentAutoEncoder, device, recon_weight, disentangle_weight, noise_mag=0.0):
+    def __init__(self, model: ExplicitLatentAutoEncoder, device, recon_weight, disentangle_weight, disentangle_type="closest_magnitude", noise_mag=0.0):
         super().__init__(model, device)
         self.recon_weight = recon_weight
         self.disentangle_weight = disentangle_weight
+        self.disentangle_type = disentangle_type
         self.noise_mag = noise_mag
         self.criterion = torch.nn.MSELoss()
 
@@ -147,7 +148,7 @@ class ExplicitAETrainStep(TrainStep):
         }
 
         if self.disentangle_weight > 0.0:
-            disent_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop, magnitude=magnitude)
+            disent_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop, magnitude=magnitude, disentangle_type=self.disentangle_type)
             loss_dict["disentanglement"] = disent_loss * self.disentangle_weight
 
         info_dict = {}

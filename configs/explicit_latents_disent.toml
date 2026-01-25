@@ -21,6 +21,8 @@ lr_warmup_epochs = 0
 lr_decay_epochs = 500
 lr_decay_rate = 0.5
 weight_decay = 0.0
+disentanglement_type = "max_response"
+# closest_magnitude, max_response, averaged_matching
 
 [train.weights]
 reconstruction = 1

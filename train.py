@@ -76,6 +76,14 @@ def main():
     if "type" not in config["train"]["opt"]:
         config["train"]["opt"]["type"] = "adam"
 
+    disentangle = config["train"]["weights"]["disentanglement"] > 0.0
+    
+    if disentangle and "disentanglement_type" not in config["train"]["opt"]:
+        raise ValueError("Disentanglement type must be specified in training options when disentanglement weight is greater than 0.")
+    
+    if not disentangle:
+        config["train"]["opt"]["disentanglement_type"] = None
+
     # ----- Load dataset, model, and train manager -----
     
     set_seed(config['seed'])
@@ -136,6 +144,7 @@ def get_train_step(config: dict, model: torch.nn.Module) -> TrainStep:
             device=DEVICE,
             recon_weight=config["train"]["weights"]["reconstruction"],
             disentangle_weight=config["train"]["weights"]["disentanglement"],
+            disentangle_type=config["train"]["opt"]["disentanglement_type"],
             noise_mag=noise_mag
         )
     elif config["type"] == "implicit_dynamics":
@@ -145,6 +154,7 @@ def get_train_step(config: dict, model: torch.nn.Module) -> TrainStep:
             noise_mag=0.0,
             pred_loss_weight=config["train"]["weights"]["prediction"],
             disentangle_loss_weight=config["train"]["weights"]["disentanglement"],
+            disentangle_type=config["train"]["opt"]["disentanglement_type"],
             t_past=config["model"]["t_past"],
             t_future=config["train"]["t_future"]
         )
