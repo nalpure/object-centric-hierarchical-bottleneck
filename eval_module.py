@@ -8,7 +8,7 @@ from src.utils import  get_dataloader, make_unique_dir, initialize_model, load_c
 from train import get_train_step
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
-
+PLOT_ATTN = False
 
 def main():
     # ----- Parse arguments -----
@@ -94,6 +94,13 @@ def main():
         fig_name = os.path.join(eval_dir, f"figure_{i}.png")
         figs_dict = {key: info_dict[key][i] for key in plot_keys}
         plot_images(figs_dict.values(), save_path=fig_name, labels=figs_dict.keys(), title=f"Reconstruction Loss: {recon_loss:.6f}")
+
+    if PLOT_ATTN:
+        for i in range(args.figures):
+            attn_fig_name = os.path.join(eval_dir, f"attention_{i}.png")
+            attn = info_dict["attn"][i]
+            attn_dict = {f"slot_{j}": attn[j] for j in range(num_slots)}
+            plot_images(attn_dict.values(), save_path=attn_fig_name, labels=attn_dict.keys(), title="Slot Attention Maps")
 
 if __name__ == "__main__":
     main()

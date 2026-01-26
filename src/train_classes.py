@@ -44,9 +44,12 @@ class SlotAttentionAETrainStep(TrainStep):
             attn_loss = attention_loss(attn) * self.bg_attn_weight
             loss_dict["attention"] = attn_loss
 
+        B, C, H, W = obs.shape
+        S = self.model.num_slots
         info_dict = {
             "orig": obs.detach().cpu(),
-            "recon_combined": recon_combined.detach().cpu()
+            "recon_combined": recon_combined.detach().cpu(),
+            "attn": attn.view(B, S, H, W).detach().cpu()
         }
 
         num_slots = masks.shape[1]
@@ -110,7 +113,8 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
         # Prepare info dict for visualization of first timestep
         info_dict = {
             "orig": img_seq[:, 0].detach().cpu(),
-            "recon_combined": recon_combined[:, 0].detach().cpu()
+            "recon_combined": recon_combined[:, 0].detach().cpu(),
+            "attn": attn[:, 0].view(B, S, H, W).detach().cpu()
         }
         for slot_idx in range(S):
             info_dict[f"mask_{slot_idx}"] = masks[:, 0, slot_idx].detach().cpu()
