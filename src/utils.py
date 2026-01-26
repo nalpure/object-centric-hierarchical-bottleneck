@@ -307,7 +307,7 @@ def set_seed(seed: int, deterministic_cudnn: bool = False) -> torch.Generator:
     return g
 
 
-def plot_images(images, save_path, labels=None, title=None):
+def plot_images(images, save_path, labels=None, title=None, cmap=None):
     """
     Displays all images in a single row and saves the resulting plot.
 
@@ -315,6 +315,8 @@ def plot_images(images, save_path, labels=None, title=None):
         images (iterable): An iterable of images. Each image should be of shape [3, H, W].
         save_path (str): File path to save the plotted image.
         labels (iterable): An iterable of labels for each image.
+        title (str): Optional title for the entire figure.
+        cmap (str): Optional colormap, e.g., 'gray' for grayscale images.
     """
     num_images = len(images)
     images = list(images)
@@ -323,15 +325,11 @@ def plot_images(images, save_path, labels=None, title=None):
             images[i] = images[i].detach().cpu().numpy()
         
         images[i] = np.clip(images[i], 0, 1)
-        cmap = None
 
-        # check if it is a grayscale image
         if images[i].shape[0] == 1:
             images[i] = images[i].squeeze(0)  # shape: [H, W]
-            cmap = 'gray'
-        elif images[i].ndim == 2:
-            cmap = 'gray'
-        elif images[i].shape[0] == 3:
+
+        if images[i].ndim == 3 and images[i].shape[0] == 3:
             images[i] = images[i].transpose(1, 2, 0)  # shape: [H, W, 3]
     
     # Create a figure with one row and as many columns as there are images.
