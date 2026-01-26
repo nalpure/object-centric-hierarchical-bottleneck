@@ -30,7 +30,7 @@ def main():
     # ----- Load and add to configuration -----
     
     config = load_config_by_name(args.config)
-    
+
     if "seed" not in config:
         config["seed"] = np.random.randint(2**31)
 
@@ -76,13 +76,6 @@ def main():
     if "type" not in config["train"]["opt"]:
         config["train"]["opt"]["type"] = "adam"
 
-    disentangle = config["train"]["weights"]["disentanglement"] > 0.0
-    
-    if disentangle and "disentanglement_type" not in config["train"]["opt"]:
-        raise ValueError("Disentanglement type must be specified in training options when disentanglement weight is greater than 0.")
-    
-    if not disentangle:
-        config["train"]["opt"]["disentanglement_type"] = None
 
     # ----- Load dataset, model, and train manager -----
     
@@ -139,6 +132,11 @@ def get_train_step(config: dict, model: torch.nn.Module) -> TrainStep:
             )
     elif config["type"] == "explicit_latents":
         noise_mag = config["data"]["noise"] if "noise" in config["data"] else 0.0
+        if "disentanglement_type" in config["train"]["opt"]:
+            type = config["train"]["opt"]["disentanglement_type"]
+        else:
+            type = None
+
         train_step = ExplicitAETrainStep(
             model=model,
             device=DEVICE,
