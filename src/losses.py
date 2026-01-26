@@ -6,13 +6,14 @@ EPS = 1e-8
 
 def slot_slot_contrastive_loss(slots, temperature=0.075, batch_contrast=True, criterion=torch.nn.CrossEntropyLoss()) -> torch.Tensor:
     """
-    Inter-video slot-slot contrastive loss as defined in
+    Slot-slot contrastive loss as defined in
     'Temporally Consistent Object-Centric Learning by Contrasting Slots'.
-    Adds optional margin and symmetric variants.
 
     Args:
         slots: (B, T, S, D) — slots over time
         temperature: float — τ from the paper
+        batch_contrast: bool — switch between intra-video and inter-video contrastive loss
+        criterion: loss function, default is CrossEntropyLoss
 
     Returns:
         scalar loss
