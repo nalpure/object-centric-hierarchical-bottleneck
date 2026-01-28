@@ -130,32 +130,33 @@ def get_train_step(config: dict, model: torch.nn.Module) -> TrainStep:
                 recon_weight=config["train"]["weights"]["reconstruction"],
                 bg_attn_weight=config["train"]["weights"]["bg_attention"]
             )
-    elif config["type"] == "explicit_latents":
+    else:
         noise_mag = config["data"]["noise"] if "noise" in config["data"] else 0.0
         if "disentanglement_type" in config["train"]["opt"]:
-            type = config["train"]["opt"]["disentanglement_type"]
+            dis_type = config["train"]["opt"]["disentanglement_type"]
         else:
-            type = None
-
-        train_step = ExplicitAETrainStep(
-            model=model,
-            device=DEVICE,
-            recon_weight=config["train"]["weights"]["reconstruction"],
-            disentangle_weight=config["train"]["weights"]["disentanglement"],
-            disentangle_type=config["train"]["opt"]["disentanglement_type"],
-            noise_mag=noise_mag
-        )
-    elif config["type"] == "implicit_dynamics":
-        train_step = ImplicitDynamicsTrainStep(
-            model=model,
-            device=DEVICE,
-            noise_mag=0.0,
-            pred_loss_weight=config["train"]["weights"]["prediction"],
-            disentangle_loss_weight=config["train"]["weights"]["disentanglement"],
-            disentangle_type=config["train"]["opt"]["disentanglement_type"],
-            t_past=config["model"]["t_past"],
-            t_future=config["train"]["t_future"]
-        )
+            dis_type = None
+        
+        if config["type"] == "explicit_latents":
+            train_step = ExplicitAETrainStep(
+                model=model,
+                device=DEVICE,
+                recon_weight=config["train"]["weights"]["reconstruction"],
+                disentangle_weight=config["train"]["weights"]["disentanglement"],
+                disentangle_type=dis_type,
+                noise_mag=noise_mag
+            )
+        elif config["type"] == "implicit_dynamics":
+            train_step = ImplicitDynamicsTrainStep(
+                model=model,
+                device=DEVICE,
+                noise_mag=0.0,
+                pred_loss_weight=config["train"]["weights"]["prediction"],
+                disentangle_loss_weight=config["train"]["weights"]["disentanglement"],
+                disentangle_type=dis_type,
+                t_past=config["model"]["t_past"],
+                t_future=config["train"]["t_future"]
+            )
     return train_step
 
 
