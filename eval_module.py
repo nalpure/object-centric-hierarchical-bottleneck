@@ -8,7 +8,7 @@ from src.utils import  get_dataloader, make_unique_dir, initialize_model, load_c
 from train import get_train_step
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
-PLOT_ATTN = False
+PLOT_ATTN = True
 
 def main():
     # ----- Parse arguments -----
@@ -83,7 +83,7 @@ def main():
     # ----- Create plots -----
     if args.figures == 0:
         return
-    
+        
     num_slots = config["slot"]["num_slots"]
     plot_keys = ["orig", "recon_combined"]
     plot_keys += [f"mask_{i}" for i in range(num_slots)]
@@ -94,13 +94,21 @@ def main():
         fig_name = os.path.join(eval_dir, f"figure_{i}.png")
         figs_dict = {key: info_dict[key][i] for key in plot_keys}
         plot_images(figs_dict.values(), save_path=fig_name, labels=figs_dict.keys(), title=f"Reconstruction Loss: {recon_loss:.6f}")
+    
+    plot_keys = [f"mask_{i}" for i in range(num_slots)]
+    plot_keys += [f"attn_{i}" for i in range(num_slots)]
 
+    for i in range(num_slots):
+        info_dict[f"attn_std_{i}"] = info_dict[f"attn_{i}"].std(dim=(-2, -1))
+
+    print("Saving attention plots...")
     if PLOT_ATTN:
         for i in range(args.figures):
+            labels = [f"Mask {s}" for s in range(num_slots)] + \
+                [f"Attn Map {s} (std: {info_dict[f'attn_std_{s}'][i].item():.4f})" for s in range(num_slots)]
             attn_fig_name = os.path.join(eval_dir, f"attention_{i}.png")
-            attn = info_dict["attn"][i]
-            attn_dict = {f"slot_{j}": attn[j] for j in range(num_slots)}
-            plot_images(attn_dict.values(), save_path=attn_fig_name, labels=attn_dict.keys(), title="Slot Attention Maps")
+            figs_dict = {key: info_dict[key][i] for key in plot_keys}
+            plot_images(figs_dict.values(), save_path=attn_fig_name, labels=labels, title="Slot Attention Masks and Attention Maps")
 
 if __name__ == "__main__":
     main()

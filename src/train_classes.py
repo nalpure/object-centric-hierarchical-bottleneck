@@ -48,15 +48,14 @@ class SlotAttentionAETrainStep(TrainStep):
         S = self.model.num_slots
         info_dict = {
             "orig": obs.detach().cpu(),
-            "recon_combined": recon_combined.detach().cpu(),
-            "attn": attn.view(B, S, H, W).detach().cpu()
+            "recon_combined": recon_combined.detach().cpu()
         }
 
         num_slots = masks.shape[1]
         for slot_idx in range(num_slots):
             info_dict[f"mask_{slot_idx}"] = masks[:, slot_idx].detach().cpu()
             info_dict[f"recon_{slot_idx}"] = recons[:, slot_idx].detach().cpu()
-            info_dict[f"attn_{slot_idx}"] = attn[:, slot_idx].detach().cpu()
+            info_dict[f"attn_{slot_idx}"] = attn[:, slot_idx].view(B, H, W).detach().cpu()
 
         return loss_dict, info_dict
     
@@ -106,20 +105,18 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
         # Calculate losses
         loss_dict = {
             "reconstruction": self.criterion(recon_combined, img_seq) * self.recon_weight,
-            "contrastive": slot_slot_contrastive_loss(active_slots) * self.contrastive_weight,
-            "attention": attention_loss(attn.view(B * T, S, H * W)) * self.bg_attn_weight
+            "contrastive": slot_slot_contrastive_loss(slots) * self.contrastive_weight, # TODO: decide active <-> all slots
         }
 
         # Prepare info dict for visualization of first timestep
         info_dict = {
             "orig": img_seq[:, 0].detach().cpu(),
-            "recon_combined": recon_combined[:, 0].detach().cpu(),
-            "attn": attn[:, 0].view(B, S, H, W).detach().cpu()
+            "recon_combined": recon_combined[:, 0].detach().cpu()
         }
         for slot_idx in range(S):
             info_dict[f"mask_{slot_idx}"] = masks[:, 0, slot_idx].detach().cpu()
             info_dict[f"recon_{slot_idx}"] = recons[:, 0, slot_idx].detach().cpu()
-            info_dict[f"attn_{slot_idx}"] = attn[:, 0, slot_idx].detach().cpu()
+            info_dict[f"attn_{slot_idx}"] = attn[:, 0, slot_idx].view(B, H, W).detach().cpu()
         
         return loss_dict, info_dict
     
@@ -161,11 +158,12 @@ class ExplicitAETrainStep(TrainStep):
     
 
 class ImplicitDynamicsTrainStep(TrainStep):
-    def __init__(self, model, device, noise_mag, pred_loss_weight, disentangle_loss_weight, t_past, t_future):
+    def __init__(self, model, device, noise_mag, pred_loss_weight, disentangle_loss_weight, disentangle_type, t_past, t_future):
         super().__init__(model, device)
         self.noise_mag = noise_mag
         self.pred_loss_weight = pred_loss_weight
         self.disentangle_loss_weight = disentangle_loss_weight
+        self.disentangle_type = disentangle_type
         self.t_past = t_past
         self.t_future = t_future
 
@@ -199,7 +197,7 @@ class ImplicitDynamicsTrainStep(TrainStep):
         }
 
         if disentangle:
-            dis_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop_index, magnitude=magnitude)
+            dis_loss = disentanglement_loss(z_orig, z_pert, latent_idx=prop_index, magnitude=magnitude, disentangle_type=self.disentangle_type)
             loss_dict["disentanglement"] = dis_loss * self.disentangle_loss_weight
 
         info_dict = {}
