@@ -4,9 +4,9 @@ from os.path import dirname
 import numpy as np
 import torch
 
-from match.temporal import order_slots_temporal
-from src.utils import get_dataloader, make_unique_dir, initialize_model, load_config, set_seed, DEVICE
-import utils
+from match import order_slots_temporal
+import math_utils
+import factory as fc
 
 def main():
     # ----- Parse arguments -----
@@ -26,7 +26,7 @@ def main():
     
     impl_dir = dirname(args.ckpt)
     config_impl_path = os.path.join(impl_dir, "config.toml")
-    config_impl = load_config(config_impl_path)
+    config_impl = math_utils.load_config(config_impl_path)
     config_impl["base_ckpt"] = args.ckpt
 
     if "seed" not in config_impl:
@@ -44,14 +44,14 @@ def main():
         # ----- Load explicit latents config -----
     expl_dir = dirname(impl_dir)
     config_explicit_path = os.path.join(expl_dir, "config.toml")
-    config_explicit = load_config(config_explicit_path)
+    config_explicit = math_utils.load_config(config_explicit_path)
     config_explicit["base_ckpt"] = os.path.join(expl_dir, "ckpt_best.pt")
     config_explicit["data"]["noise"] = 0.0
 
     # ----- Load slot attention config -----
     slot_dir = dirname(expl_dir)
     config_SA_path = os.path.join(slot_dir, "config.toml")
-    config_SA = load_config(config_SA_path)
+    config_SA = math_utils.load_config(config_SA_path)
     config_SA["data"]["path"] = args.data
     config_SA["base_ckpt"] = os.path.join(slot_dir, "ckpt_best.pt")
     config_SA["train"]["batch_size"] = args.gifs  # Load only as many samples as needed for gifs
@@ -64,17 +64,17 @@ def main():
             config_SA["data"]["seq_length"] = expected_seq_length
 
     # ----- Set up evaluation -----
-    set_seed(config_impl["seed"])
-    obs_dataloader = get_dataloader(config_SA, save_mode=True)
-    model_SA = initialize_model(config_SA, eval_mode=True)
-    model_expl = initialize_model(config_explicit, eval_mode=True)
-    model_impl = initialize_model(config_impl, eval_mode=True)
-    mean_slots, std_slots = utils.get_normalization_stats(config_explicit)
+    math_utils.set_seed(config_impl["seed"])
+    obs_dataloader = math_utils.get_dataloader(config_SA, save_mode=True)
+    model_SA = fc.build_model(config_SA, eval_mode=True)
+    model_expl = fc.build_model(config_explicit, eval_mode=True)
+    model_impl = fc.build_model(config_impl, eval_mode=True)
+    mean_slots, std_slots = fc.build_normalization_stats(config_explicit)
 
     with torch.no_grad():
         batch = next(iter(obs_dataloader))
         orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
-        orig = orig_seq.to(DEVICE)
+        orig = orig_seq.to(math_utils.DEVICE)
         B, T_past, C, H, W = orig.shape
         S = model_SA.num_slots
         D_slot = model_SA.slots_dim
@@ -82,7 +82,7 @@ def main():
         t_future = args.timesteps
 
         # ----- Slot Attention Encoding -----
-        slots = torch.empty((B, T_past, S, D_slot), device=DEVICE)
+        slots = torch.empty((B, T_past, S, D_slot), device=math_utils.DEVICE)
         prev_slots = None
         prev_attn = None
 
@@ -91,7 +91,7 @@ def main():
             slots_t, attn_t = order_slots_temporal(slots_t, attn_t, prev_slots, prev_attn)
             prev_slots = slots_t
             prev_attn = attn_t
-            slots[:, t] = utils.normalize_slots(slots_t, mean_slots, std_slots)
+            slots[:, t] = math_utils.normalize_slots(slots_t, mean_slots, std_slots)
         
         # ----- Explicit Encoding -----
         z_expl_current = model_expl.encode(
@@ -99,7 +99,7 @@ def main():
         ).view(B, T_past, S - 1, -1)
 
         # ----- Implicit Dynamics Prediction -----
-        z_expl_predict = torch.empty((B, t_future, S - 1, D_expl), device=DEVICE)
+        z_expl_predict = torch.empty((B, t_future, S - 1, D_expl), device=math_utils.DEVICE)
 
         for i in range(t_future // predict_at_once):
             z_pred_future, z_implicit_first = model_impl(z_expl_current, predict_at_once, disentangle=True)
@@ -120,7 +120,7 @@ def main():
 
 
         # ----- Decode explicit -> slots -----
-        slots_pred = torch.zeros((B, t_future, S, D_slot), device=DEVICE)
+        slots_pred = torch.zeros((B, t_future, S, D_slot), device=math_utils.DEVICE)
         bg_slot = slots[:, -1:, 0:1, :].expand(B, t_future, 1, D_slot)
         slots_pred[:, :, 0:1, :] = bg_slot  # Background slot
         slots_pred[:, :, 1:, :] = model_expl.decode(
@@ -128,7 +128,7 @@ def main():
         ).view(B, t_future, S - 1, D_slot)
 
         # ----- Decode slots -> images -----
-        slots_pred = utils.denormalize_slots(
+        slots_pred = math_utils.denormalize_slots(
             slots_pred, mean_slots, std_slots
         )
         img_pred = model_SA.decode(
@@ -137,7 +137,7 @@ def main():
 
 
     # ----- Save GIFs -----
-    save_dir = make_unique_dir(impl_dir, "eval_rollouts")
+    save_dir = math_utils.make_unique_dir(impl_dir, "eval_rollouts")
     num_gifs = min(args.gifs, B)
     img_pred = img_pred.clamp(0.0, 1.0).cpu().numpy()
 
@@ -146,10 +146,10 @@ def main():
         for t in range(t_future - predict_at_once):
             imgs_t = img_pred[i, t : t + predict_at_once]
             imgs_t = np.array(imgs_t)
-            trail_t = utils.create_trail(np.array(imgs_t))
+            trail_t = math_utils.create_trail(np.array(imgs_t))
             imgs.append(trail_t)
         gif_path = os.path.join(save_dir, f"rollout_{i}.gif")
-        utils.save_gif_from_array(np.array(imgs), gif_path)
+        math_utils.save_gif_from_array(np.array(imgs), gif_path)
 
 if __name__ == "__main__":
     main()

@@ -4,8 +4,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from src.utils import  get_dataloader, make_unique_dir, initialize_model, load_config, load_config_by_name, plot_images, save_config, set_seed, DEVICE
-from train import get_train_step
+from math_utils import set_seed
+from io_utils import load_config, make_unique_dir
+from visualization import plot_images
+from factory import build_dataloader, build_model, build_train_step
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
 PLOT_ATTN = True
@@ -55,9 +57,9 @@ def main():
     
     # ----- Set up evaluation -----
     set_seed(config["seed"])
-    dataloader = get_dataloader(config)
-    model = initialize_model(config, eval_mode=True)
-    train_step = get_train_step(config, model)
+    dataloader = build_dataloader(config)
+    model = build_model(config, eval_mode=True)
+    train_step = build_train_step(config, model)
 
     losses = {}
     with torch.no_grad():

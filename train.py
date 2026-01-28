@@ -1,11 +1,13 @@
 import argparse
 import os
 import numpy as np
-import torch
 from tqdm import tqdm
 
-from utils import get_dataloader, get_lr_scheduler, get_optimizer, initialize_model, load_config_by_name, make_unique_dir, save_config, set_seed, DEVICE
-from train_classes import ExplicitAETrainStep, ImplicitDynamicsTrainStep, SlotAttentionAETrainStep, SlotAttentionContrastiveTrainStep, TrainManager, TrainStep
+import math_utils
+import io_utils
+import train_classes as tc
+import factory as fc
+
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
 
@@ -29,7 +31,7 @@ def main():
 
     # ----- Load and add to configuration -----
     
-    config = load_config_by_name(args.config)
+    config = io_utils.load_config_by_name(args.config)
 
     if "seed" not in config:
         config["seed"] = np.random.randint(2**31)
@@ -79,22 +81,22 @@ def main():
 
     # ----- Load dataset, model, and train manager -----
     
-    set_seed(config['seed'])
-    dataloader = get_dataloader(config)
-    model = initialize_model(config, eval_mode=False)
-    optimizer = get_optimizer(config, model)
-    scheduler = get_lr_scheduler(config, optimizer, adjust_for_checkpoint=args.scheduler_adjust)
-    train_step = get_train_step(config, model)
+    math_utils.set_seed(config['seed'])
+    dataloader = fc.build_dataloader(config)
+    model = fc.build_model(config, eval_mode=False)
+    optimizer = fc.build_optimizer(config, model)
+    scheduler = fc.build_scheduler(config, optimizer, adjust_for_checkpoint=args.scheduler_adjust)
+    train_step = fc.build_train_step(config, model)
     anneal_epochs = config["train"]["opt"].get("weight_anneal_epochs", 0)
-    train_manager = TrainManager(train_step, dataloader, optimizer, scheduler, anneal_epochs)
+    train_manager = tc.TrainManager(train_step, dataloader, optimizer, scheduler, anneal_epochs)
 
 
     # ----- Create output folder -----
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
 
-    output_path = make_unique_dir(out_dir, config["name"])
-    save_config(config, os.path.join(output_path, "config.toml"))
+    output_path = io_utils.make_unique_dir(out_dir, config["name"])
+    io_utils.save_config(config, os.path.join(output_path, "config.toml"))
     print(f"Created new output directory at '{output_path}'.")
 
 
@@ -108,56 +110,6 @@ def main():
         train_manager.save_losses_to_csv(f"{output_path}/losses.csv")
 
     print(f"Finished. Best epoch: {train_manager.best_epoch_idx} with loss {train_manager.best_loss:.4f}.")
-
-
-
-
-def get_train_step(config: dict, model: torch.nn.Module) -> TrainStep:
-    if config["type"] == "slot_attention":
-        train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
-        if train_contrastive:
-            train_step = SlotAttentionContrastiveTrainStep(
-                model=model,
-                device=DEVICE,
-                recon_weight=config["train"]["weights"]["reconstruction"],
-                bg_attn_weight=config["train"]["weights"]["bg_attention"],
-                contrastive_weight=config["train"]["weights"]["contrastive"]
-            )
-        else:
-            train_step = SlotAttentionAETrainStep(
-                model=model,
-                device=DEVICE,
-                recon_weight=config["train"]["weights"]["reconstruction"],
-                bg_attn_weight=config["train"]["weights"]["bg_attention"]
-            )
-    else:
-        noise_mag = config["data"]["noise"] if "noise" in config["data"] else 0.0
-        if "disentanglement_type" in config["train"]["opt"]:
-            dis_type = config["train"]["opt"]["disentanglement_type"]
-        else:
-            dis_type = None
-        
-        if config["type"] == "explicit_latents":
-            train_step = ExplicitAETrainStep(
-                model=model,
-                device=DEVICE,
-                recon_weight=config["train"]["weights"]["reconstruction"],
-                disentangle_weight=config["train"]["weights"]["disentanglement"],
-                disentangle_type=dis_type,
-                noise_mag=noise_mag
-            )
-        elif config["type"] == "implicit_dynamics":
-            train_step = ImplicitDynamicsTrainStep(
-                model=model,
-                device=DEVICE,
-                noise_mag=0.0,
-                pred_loss_weight=config["train"]["weights"]["prediction"],
-                disentangle_loss_weight=config["train"]["weights"]["disentanglement"],
-                disentangle_type=dis_type,
-                t_past=config["model"]["t_past"],
-                t_future=config["train"]["t_future"]
-            )
-    return train_step
 
 
 if __name__ == "__main__":

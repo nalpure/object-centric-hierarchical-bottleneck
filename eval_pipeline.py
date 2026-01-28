@@ -5,10 +5,16 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from match.groundtruth import find_gt_slot_alignment, get_linear_mcc
-from match.temporal import order_slots_temporal
-from utils import get_dataloader, make_unique_dir, initialize_model, load_config, plot_grid, set_seed, DEVICE
-import utils
+import io_utils
+from match import find_gt_slot_alignment, order_slots_temporal
+from losses import linear_mcc_loss
+import math_utils
+import factory as fc
+import visualization as vis
+
+
+DEVICE = fc.get_device()
+
 
 def main():
     # ----- Parse arguments -----
@@ -28,7 +34,7 @@ def main():
     
     impl_dir = dirname(args.ckpt)
     config_impl_path = os.path.join(impl_dir, "config.toml")
-    config_impl = load_config(config_impl_path)
+    config_impl = io_utils.load_config(config_impl_path)
     config_impl["base_ckpt"] = args.ckpt
 
     if "seed" not in config_impl:
@@ -45,14 +51,14 @@ def main():
     # ----- Load explicit latents config -----
     expl_dir = dirname(impl_dir)
     config_explicit_path = os.path.join(expl_dir, "config.toml")
-    config_explicit = load_config(config_explicit_path)
+    config_explicit = io_utils.load_config(config_explicit_path)
     config_explicit["base_ckpt"] = os.path.join(expl_dir, "ckpt_best.pt")
     config_explicit["data"]["noise"] = 0.0
 
     # ----- Load slot attention config -----
     slot_dir = dirname(expl_dir)
     config_SA_path = os.path.join(slot_dir, "config.toml")
-    config_SA = load_config(config_SA_path)
+    config_SA = io_utils.load_config(config_SA_path)
     config_SA["data"]["path"] = args.data
     config_SA["base_ckpt"] = os.path.join(slot_dir, "ckpt_best.pt")
 
@@ -64,11 +70,11 @@ def main():
             config_SA["data"]["seq_length"] = expected_seq_length
     
     # ----- Set up evaluation -----
-    set_seed(config_impl["seed"])
-    obs_dataloader = get_dataloader(config_SA, save_mode=True, groundtruth=True)
-    model_SA = initialize_model(config_SA, eval_mode=True)
-    model_expl = initialize_model(config_explicit, eval_mode=True)
-    model_impl = initialize_model(config_impl, eval_mode=True)
+    math_utils.set_seed(config_impl["seed"])
+    obs_dataloader = fc.build_dataloader(config_SA, save_mode=True, groundtruth=True)
+    model_SA = fc.build_model(config_SA, eval_mode=True)
+    model_expl = fc.build_model(config_explicit, eval_mode=True)
+    model_impl = fc.build_model(config_impl, eval_mode=True)
 
     criterion = torch.nn.MSELoss()
     losses = {
@@ -79,7 +85,7 @@ def main():
         "expl + dyn": [], 
         "SA + expl + dyn": []
     }
-    mean_slots, std_slots = utils.get_normalization_stats(config_explicit)
+    mean_slots, std_slots = fc.build_normalization_stats(config_explicit)
 
     batch = next(iter(obs_dataloader))
     B, T, C, H, W = batch[0].shape
@@ -141,7 +147,7 @@ def main():
                 active_slots_aligned[b] = active_slots[b][:, perm, :]
             
             slots_aligned = torch.cat([bg_slots, active_slots_aligned], dim=2)  # [B, T, S, D]
-            slot_seq["true"] = utils.normalize_slots(
+            slot_seq["true"] = math_utils.normalize_slots(
                 slots_aligned,
                 mean_slots,
                 std_slots
@@ -192,7 +198,7 @@ def main():
             # ----- Decode Slots -----
 
             recon_combined_expl, recons_expl, masks_expl = model_SA.decode(
-                utils.denormalize_slots(
+                math_utils.denormalize_slots(
                     torch.cat([
                         slot_seq["true"][:, :, :1],  # Background slots
                         slot_seq["active_recon_expl"]
@@ -204,7 +210,7 @@ def main():
             img_seq["recon_expl"] = recon_combined_expl.view(B, T, C, H, W)
 
             recon_combined_impl, recons_impl, masks_impl = model_SA.decode(
-                utils.denormalize_slots(
+                math_utils.denormalize_slots(
                     torch.cat([
                         slot_seq["true"][:, t_past:t_past+t_future, :1],  # Future background slots
                         slot_seq["active_pred_impl"]
@@ -239,15 +245,15 @@ def main():
                 img_seq["pred_impl"]
             ).item())
 
-    losses["MCC latent"] = get_linear_mcc(truth_all, z_all)
-    losses["MCC slot"] = get_linear_mcc(truth_all, slot_all)
+    losses["MCC latent"] = linear_mcc_loss(truth_all, z_all)
+    losses["MCC slot"] = linear_mcc_loss(truth_all, slot_all)
 
     # ----- Print results -----
     for key, value in losses.items():
         print(f"{key} loss: {np.mean(value):.6f}")
 
     # ----- Save results -----
-    eval_dir = make_unique_dir(parent_dir=os.path.dirname(args.ckpt), dirname="eval_pipeline")
+    eval_dir = io_utils.make_unique_dir(parent_dir=os.path.dirname(args.ckpt), dirname="eval_pipeline")
     with open(os.path.join(eval_dir, "losses.csv"), "w") as f:
         f.write("loss_type,loss_value\n")
         for key, value in losses.items():
@@ -276,7 +282,7 @@ def main():
         ]
         column_labels = [f"t={t}" for t in range(1 - t_past, 1 + t_future)]
         save_path = os.path.join(eval_dir, f"eval_fig_{i}.png")
-        plot_grid(rows, row_labels, column_labels, save_path)
+        vis.plot_grid(rows, row_labels, column_labels, save_path)
 
 
 if __name__ == "__main__":

@@ -3,32 +3,7 @@ import h5py
 import numpy as np
 import torch
 from torch.utils import data
-
-
-def transpose_array(arr, in_fmt: str, out_fmt: str):
-    """
-    Handles conversion between 'HWC' and 'CHW' formats for both
-    single frames and sequences.
-    """
-    if in_fmt == out_fmt:
-        return arr
-
-    if in_fmt == "HWC" and out_fmt == "CHW":
-        if arr.ndim == 3:
-            return np.transpose(arr, (2, 0, 1))
-        elif arr.ndim == 4:
-            return np.transpose(arr, (0, 3, 1, 2))
-        elif arr.ndim == 5:
-            return np.transpose(arr, (0, 1, 4, 2, 3))
-    elif in_fmt == "CHW" and out_fmt == "HWC":
-        if arr.ndim == 3:
-            return np.transpose(arr, (1, 2, 0))
-        elif arr.ndim == 4:
-            return np.transpose(arr, (0, 2, 3, 1))
-        elif arr.ndim == 5:
-            return np.transpose(arr, (0, 1, 2, 3, 4))
-
-    raise ValueError(f"Unsupported transpose for shape {arr.shape} ({in_fmt}→{out_fmt})")
+from math_utils import convert_image_format
 
 
 class ImageDataset(data.Dataset):
@@ -48,8 +23,8 @@ class ImageDataset(data.Dataset):
             self.img_o = self.img_o.astype(np.float32) / 255.0
             self.img_p = self.img_p.astype(np.float32) / 255.0
 
-        self.img_o = transpose_array(self.img_o, in_format, out_format)
-        self.img_p = transpose_array(self.img_p, in_format, out_format)
+        self.img_o = convert_image_format(self.img_o, in_format, out_format)
+        self.img_p = convert_image_format(self.img_p, in_format, out_format)
 
         N, T = self.img_o.shape[:2]
         self.seq_length = T if seq_length is None else seq_length
@@ -106,13 +81,13 @@ class PerturbedImageSequenceDataset(data.Dataset):
         return self.img_o.shape[0]
 
     def __getitem__(self, idx):
-        orig = transpose_array(self.img_o[idx], self.in_format, self.out_format)
+        orig = convert_image_format(self.img_o[idx], self.in_format, self.out_format)
         orig = torch.from_numpy(orig / 255.0).float()
         
         if self.only_original:
             return orig
         
-        pert = transpose_array(self.img_p[idx], self.in_format, self.out_format)
+        pert = convert_image_format(self.img_p[idx], self.in_format, self.out_format)
         pert = torch.from_numpy(pert / 255.0).float()
         mags = torch.tensor(self.mags[idx], dtype=torch.float32)
         inds = torch.tensor(self.inds[idx], dtype=torch.int8)
@@ -163,7 +138,7 @@ class ImageSequencePairDataset(data.Dataset):
             n, t = self.idx2pair[idx]
             pair = self.img_o[n, t:t+2]
 
-        pair = transpose_array(pair, self.in_format, self.out_format)
+        pair = convert_image_format(pair, self.in_format, self.out_format)
         return torch.from_numpy(pair).float()
 
 

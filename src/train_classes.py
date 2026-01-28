@@ -7,11 +7,11 @@ import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils import data
 
-from explicit_AE import ExplicitLatentAutoEncoder
+from models.explicit_latent_autoencoder import ExplicitLatentAutoEncoder
+from models.slot_autoencoder import SlotAttentionAutoEncoder
 from losses import attention_loss, disentanglement_loss, slot_slot_contrastive_loss
-from slot_attention_AE import SlotAttentionAutoEncoder
-from match.temporal import order_slots_temporal
-from utils import reorder_perturbation_indices
+from match import order_slots_temporal
+from properties import reorder_perturbation_indices
 
 
 class TrainStep:    

@@ -1,16 +1,18 @@
 import argparse
 import os
-import h5py
 import numpy as np
 from tqdm import tqdm
 from torch.utils import data
 import torch
 from torch.nn import functional as F
 
-from match.temporal import order_slots_temporal
-from src.utils import get_dataloader, initialize_model, load_config, plot_grid, save_dict_h5py, set_seed, DEVICE
+from match import order_slots_temporal
+from math_utils import set_seed
+from io_utils import load_config, save_dict_h5py
+from factory import build_dataloader, build_model, get_device
+import visualization as vis
 
-
+DEVICE = get_device()
 VALID_TYPES = ["slot_attention", "explicit_latents"]
 
 
@@ -60,8 +62,8 @@ def main():
     
     # ----- Initialize model and dataloader -----
     set_seed(config["seed"])
-    dataloader = get_dataloader(config, save_mode=True)
-    model = initialize_model(config, eval_mode=True)
+    dataloader = build_dataloader(config, save_mode=True)
+    model = build_model(config, eval_mode=True)
 
     # ----- Save slots -----
     if config["type"] == "slot_attention":
@@ -292,7 +294,7 @@ def visualize_slots(model, orig_seq, active_slots_orig, bg_slot_orig, output_dir
                 image_rows[o + 2, t] = masks_t[o].unsqueeze(0).cpu()
 
         output_path = os.path.join(output_dir, f"sample_{sample_idx}_latents.png")
-        plot_grid(image_rows, row_titles, column_titles, output_path)
+        vis.plot_grid(image_rows, row_titles, column_titles, output_path)
 
     print(f"Saved latent visualizations to {output_dir}.")
 

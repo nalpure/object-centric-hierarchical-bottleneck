@@ -2,9 +2,8 @@ import numpy as np
 from torch import nn
 import torch
 import torch.nn.functional as F
-from match.temporal import match_slots_temporal
 
-from slot_attention import SlotAttention
+from models.slot_attention import SlotAttention
 
 
 def spatial_broadcast(slots, resolution):
