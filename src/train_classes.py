@@ -183,7 +183,7 @@ class ImplicitDynamicsTrainStep(TrainStep):
 
         # Predict future explicit latents with implicit dynamics model
         seq_past_flat = torch.cat([orig_seq_past, pert_seq_past], dim=0).reshape(2*B, self.t_past, O, E)  # [2*B*T_past, O, D_slot]
-        z_pred, z_implicit_first = self.model(seq_past_flat, self.t_future, disentangle=disentangle)
+        z_pred, _, z_implicit_first = self.model(seq_past_flat, self.t_future, compute_implicit_first=disentangle)
         seq_pred = z_pred[:, :, :, :E]
         orig_seq_pred, pert_seq_pred = seq_pred.split(B, dim=0)  # Each: [B, T_past + T_future, O, D_slot] or [B, T_future, O, D_slot]
         

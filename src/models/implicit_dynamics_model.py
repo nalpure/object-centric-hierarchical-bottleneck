@@ -102,7 +102,7 @@ class RelationalLatentDynamics(nn.Module):
         self.latent_transition = LatentTransition(self.EI + self.H_latent, self.EI)
 
 
-    def forward(self, z_explicit_seq, t_future, disentangle):
+    def forward(self, z_explicit_seq, t_future, compute_implicit_first):
         """
         Predict future explicit latents given a sequence of past explicit latents.
         Args:
@@ -110,13 +110,15 @@ class RelationalLatentDynamics(nn.Module):
                 The sequence of explicit latents
             t_future: int
                 Number of future time steps to predict
-            reconstruct: bool
-                Whether to reconstruct the input sequence
+            compute_implicit_first: bool
+                Whether to compute implicit latent at first time step (by reversing the sequence)
         Returns:
             seq_return: torch.Tensor of shape [B, T_out, O, E]
-                The predicted sequence of explicit latents, where T_out = T + t_future if reconstruct else t_future
-            z_first: torch.Tensor of shape [B, O, E + I] or None
-                The latent at the first time step used for reconstruction, or None if reconstruct is False
+                The predicted sequence of explicit latents, where T_out = T + t_future
+            z_implicit_current: torch.Tensor of shape [B, O, I]
+                The implicit latent at the current time step
+            z_implicit_first: torch.Tensor of shape [B, O, I] or None
+                The implicit latent at the first time step (if compute_implicit_first=True)
         """
         B, T, O, E = z_explicit_seq.shape
         assert T == self.T
@@ -131,15 +133,15 @@ class RelationalLatentDynamics(nn.Module):
         z_current = torch.cat([z_explicit_current, z_implicit_current], dim=-1)  # [B, O, E + I]
         z_pred_future = self._rollout(z_current, num_steps=t_future)  # [B, t_future, O, E]
 
-        if not disentangle:
-            return z_pred_future, None
+        if not compute_implicit_first:
+            return z_pred_future, z_implicit_current, None
 
         # Flip sequence to compute implicit latent at first time step
         z_explicit_seq_inv = z_explicit_seq.flip(dims=[1])  # [B, T, O, E]
         source_inv = self._define_source(z_explicit_seq_inv) # [B, O, T*E]
         edge_inv_agg = self._get_edges(source_inv, self.edge_encoder) # [B, O, H]
         z_implicit_first = (-1) * self._compute_implicit(source_inv, edge_inv_agg, self.node_encoder)  # [B, O, I]
-        return z_pred_future, z_implicit_first
+        return z_pred_future, z_implicit_current, z_implicit_first
             
     
     def _define_source(self, z_explicit_seq):

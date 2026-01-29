@@ -95,10 +95,13 @@ def main():
     D_impl = model_impl.I
     D_latent = D_expl + D_impl
     num_samples = len(obs_dataloader.dataset)
+    t_past = config_impl["model"]["t_past"]
+    t_future = config_impl["train"]["t_future"]
 
-    truth_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
+    truth_all = torch.empty((num_samples, t_past + t_future, S - 1, D_latent), device=DEVICE)
     slot_all = torch.empty((num_samples, S - 1, D_slot), device=DEVICE)
-    z_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
+    z_first_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
+    z_current_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
     
     with torch.no_grad():
 
@@ -106,7 +109,7 @@ def main():
             orig, _, _, _, _, groundtruth_o, masks_o, _, _ = batch
             orig = orig.to(DEVICE)
             masks_o = masks_o.to(DEVICE)
-            truth_all[batch_idx * B : (batch_idx + 1) * B] = groundtruth_o[:, 0].to(DEVICE)
+            truth_all[batch_idx * B : (batch_idx + 1) * B] = groundtruth_o[:, :t_past + t_future].to(DEVICE)
 
             img_seq = {"true": orig}
             slot_seq = {}
@@ -136,8 +139,6 @@ def main():
             bg_slots = slots[:, :, :1]  # [B, T, 1, D]
             active_slots = slots[:, :, 1:]  # [B, T, S-1, D]
             active_masks_pred = masks_predicted[:, :, 1:]  # [B, T, S-1, H, W]
-            t_past = config_impl["model"]["t_past"]
-            t_future = config_impl["train"]["t_future"]
             active_slots_aligned = torch.empty_like(active_slots)
 
             for b in range(B):
@@ -174,8 +175,8 @@ def main():
             # ----- Implicit Dynamics Prediction -----
             expl_seq_past = expl_seq["true"][:, :t_past].reshape(B, t_past, S - 1, D_expl)
 
-            z_pred_future, z_implicit_first = model_impl(
-                expl_seq_past, t_future, disentangle=True
+            z_pred_future, z_implicit_current, z_implicit_first = model_impl(
+                expl_seq_past, t_future, compute_implicit_first=True
             )
             expl_seq["pred_future_impl"] = z_pred_future[:, :, :, :D_expl]  # [B, t_future, O, E]
             
@@ -184,7 +185,13 @@ def main():
                 expl_seq["pred_future_impl"][:, 0],
                 z_implicit_first
             ], dim=-1)  # [B, O, E + I]
-            z_all[batch_idx * B : (batch_idx + 1) * B] = z_first
+            z_current = torch.cat([
+                expl_seq["true"][:, t_past - 1],
+                z_implicit_current
+            ], dim=-1)  # [B, O, E + I]
+
+            z_first_all[batch_idx * B : (batch_idx + 1) * B] = z_first
+            z_current_all[batch_idx * B : (batch_idx + 1) * B] = z_current
 
             # ----- Decode Explicit Latents -----
             slot_seq["active_recon_expl"] = model_expl.decode(
@@ -245,8 +252,6 @@ def main():
                 img_seq["pred_impl"]
             ).item())
 
-    losses["MCC latent"] = linear_mcc_loss(truth_all, z_all)
-    losses["MCC slot"] = linear_mcc_loss(truth_all, slot_all)
 
     # ----- Print results -----
     for key, value in losses.items():
@@ -258,6 +263,28 @@ def main():
         f.write("loss_type,loss_value\n")
         for key, value in losses.items():
             f.write(f"{key},{np.mean(value)}\n")
+
+
+    # ----- Compute MCC -----
+    mcc_losses = {"truth_timestep": [], "slot_loss": [], "implicit_first_loss": [], "implicit_current_loss": []}
+    for t in range(t_past+t_future):
+        mcc_losses["truth_timestep"].append(t-t_past+1)
+        mcc_losses["slot_loss"].append(linear_mcc_loss(
+            truth_all[:, t],
+            slot_all
+        ))
+        mcc_losses["implicit_first_loss"].append(linear_mcc_loss(
+            truth_all[:, t],
+            z_first_all
+        ))
+        mcc_losses["implicit_current_loss"].append(linear_mcc_loss(
+            truth_all[:, t],
+            z_current_all
+        ))
+    
+    with open(os.path.join(eval_dir, "mcc_losses.csv"), "w") as f:
+        for key, value in mcc_losses.items():
+            f.write(f"{key},{','.join([str(v) for v in value])}\n")
 
     # ----- Create plots (for last batch) -----
     if args.figures == 0:

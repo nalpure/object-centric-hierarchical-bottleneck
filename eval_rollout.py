@@ -102,7 +102,7 @@ def main():
         z_expl_predict = torch.empty((B, t_future, S - 1, D_expl), device=math_utils.DEVICE)
 
         for i in range(t_future // predict_at_once):
-            z_pred_future, z_implicit_first = model_impl(z_expl_current, predict_at_once, disentangle=True)
+            z_pred_future, _, _ = model_impl(z_expl_current, predict_at_once, disentangle=True)
             # z_pred_future: [B, t_future, O, E]
             # z_implicit_first: [B, O, I]
             z_pred_future = z_pred_future[:, :, :, :D_expl]  # Take only explicit part
