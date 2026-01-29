@@ -8,6 +8,7 @@ from tqdm import tqdm
 import io_utils
 from match import find_gt_slot_alignment, order_slots_temporal
 from losses import linear_mcc_loss
+from properties import get_explicit_indices
 import math_utils
 import factory as fc
 import visualization as vis
@@ -100,6 +101,7 @@ def main():
 
     truth_all = torch.empty((num_samples, t_past + t_future, S - 1, D_latent), device=DEVICE)
     slot_all = torch.empty((num_samples, S - 1, D_slot), device=DEVICE)
+    z_explicit_all = torch.empty((num_samples, S - 1, D_expl), device=DEVICE)
     z_first_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
     z_current_all = torch.empty((num_samples, S - 1, D_latent), device=DEVICE)
     
@@ -190,6 +192,7 @@ def main():
                 z_implicit_current
             ], dim=-1)  # [B, O, E + I]
 
+            z_explicit_all[batch_idx * B : (batch_idx + 1) * B] = expl_seq["true"][:, 0]
             z_first_all[batch_idx * B : (batch_idx + 1) * B] = z_first
             z_current_all[batch_idx * B : (batch_idx + 1) * B] = z_current
 
@@ -253,35 +256,40 @@ def main():
             ).item())
 
 
-    # ----- Print results -----
+    # ----- Save results -----
     for key, value in losses.items():
         print(f"{key} loss: {np.mean(value):.6f}")
 
-    # ----- Save results -----
     eval_dir = io_utils.make_unique_dir(parent_dir=os.path.dirname(args.ckpt), dirname="eval_pipeline")
     with open(os.path.join(eval_dir, "losses.csv"), "w") as f:
         f.write("loss_type,loss_value\n")
         for key, value in losses.items():
             f.write(f"{key},{np.mean(value)}\n")
 
-
     # ----- Compute MCC -----
-    mcc_losses = {"truth_timestep": [], "slot_loss": [], "implicit_first_loss": [], "implicit_current_loss": []}
+    explicit_indices = get_explicit_indices()
+    truth_all_explicit = truth_all[:, :, :, explicit_indices]
+    mcc_losses = {"truth_timestep": [], "first_slot_explicit_loss": [], "first_latent_explicit_loss": [], "first_latent_implicit_loss": [], "current_latent_implicit_loss": []}
     for t in range(t_past+t_future):
         mcc_losses["truth_timestep"].append(t-t_past+1)
-        mcc_losses["slot_loss"].append(linear_mcc_loss(
-            truth_all[:, t],
+        mcc_losses["first_slot_explicit_loss"].append(linear_mcc_loss(
+            truth_all_explicit[:, t],
             slot_all
         ))
-        mcc_losses["implicit_first_loss"].append(linear_mcc_loss(
+        mcc_losses["first_latent_explicit_loss"].append(linear_mcc_loss(
+            truth_all_explicit[:, t],
+            z_explicit_all
+        ))
+        mcc_losses["first_latent_implicit_loss"].append(linear_mcc_loss(
             truth_all[:, t],
             z_first_all
         ))
-        mcc_losses["implicit_current_loss"].append(linear_mcc_loss(
+        mcc_losses["current_latent_implicit_loss"].append(linear_mcc_loss(
             truth_all[:, t],
             z_current_all
         ))
-    
+
+    # ---- Save MCC -----
     with open(os.path.join(eval_dir, "mcc_losses.csv"), "w") as f:
         for key, value in mcc_losses.items():
             f.write(f"{key},{','.join([str(v) for v in value])}\n")
