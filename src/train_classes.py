@@ -95,7 +95,7 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
             prev_attn = attn_current
 
         # Decode all timesteps at once for speedup
-        slots = torch.cat((active_slots, bg_slot), dim=2) # (B, T, S, D)
+        slots = torch.cat((bg_slot, active_slots), dim=2) # (B, T, S, D)
         slots_flat = slots.view(B * T, S, -1)
         recon_combined_flat, recons_flat, masks_flat = self.model.decode(slots_flat)
         recon_combined = recon_combined_flat.view(B, T, C, H, W)
