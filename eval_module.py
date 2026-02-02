@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from math_utils import set_seed
 from io_utils import load_config, make_unique_dir
-from visualization import plot_images
+from visualization import plot_grid, plot_images
 from factory import build_dataloader, build_model, build_train_step
 
 VALID_TYPES = ["slot_attention", "explicit_latents", "implicit_dynamics"]
@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--ckpt", help="Checkpoint path.")
     parser.add_argument("-d", "--data", help="Evaluation dataset path.")
+    parser.add_argument("-n", "--name", help="Name for the evaluation run.", type=str, default="eval_module")
     parser.add_argument("-f", "--figures", help="Number of figures to save.", type=int, default=5)
     args = parser.parse_args()
 
@@ -76,7 +77,7 @@ def main():
         print(f"{key} loss: {value:.6f}")
 
     # ----- Save results -----
-    eval_dir = make_unique_dir(parent_dir=os.path.dirname(args.ckpt), dirname="eval")
+    eval_dir = make_unique_dir(parent_dir=os.path.dirname(args.ckpt), dirname=args.name)
     with open(os.path.join(eval_dir, "losses.txt"), "w") as f:
         f.write(f"ckpt: {args.ckpt}\n")
         for key, value in avg_loss.items():
@@ -87,30 +88,26 @@ def main():
         return
         
     num_slots = config["slot"]["num_slots"]
-    plot_keys = ["orig", "recon_combined"]
-    plot_keys += [f"mask_{i}" for i in range(num_slots)]
-    plot_keys += [f"recon_{i}" for i in range(num_slots)]
-        
-    for i in range(args.figures):
-        recon_loss = torch.abs(info_dict["orig"][i] - info_dict["recon_combined"][i]).mean().item()
-        fig_name = os.path.join(eval_dir, f"figure_{i}.png")
-        figs_dict = {key: info_dict[key][i] for key in plot_keys}
-        plot_images(figs_dict.values(), save_path=fig_name, labels=figs_dict.keys(), title=f"Reconstruction Loss: {recon_loss:.6f}")
     
-    plot_keys = [f"mask_{i}" for i in range(num_slots)]
-    plot_keys += [f"attn_{i}" for i in range(num_slots)]
-
     for i in range(num_slots):
         info_dict[f"attn_std_{i}"] = info_dict[f"attn_{i}"].std(dim=(-2, -1))
+        
+    for i in range(args.figures):
+        # Plot masks and attention maps
+        row_titles = ["Masks", "Attention Maps"]
+        column_titles = [f"Slot {s} (std attn: {info_dict[f'attn_std_{s}'][i].item():.4f})" for s in range(num_slots)]
+        masks = [info_dict[f"mask_{s}"][i] for s in range(num_slots)]
+        attn_maps = [info_dict[f"attn_{s}"][i] for s in range(num_slots)]
+        rows = [masks, attn_maps]
+        attn_save_path = os.path.join(eval_dir, f"masks_attn_{i}.png")
+        plot_grid(rows, row_titles, column_titles, attn_save_path)
 
-    print("Saving attention plots...")
-    if PLOT_ATTN:
-        for i in range(args.figures):
-            labels = [f"Mask {s}" for s in range(num_slots)] + \
-                [f"Attn Map {s} (std: {info_dict[f'attn_std_{s}'][i].item():.4f})" for s in range(num_slots)]
-            attn_fig_name = os.path.join(eval_dir, f"attention_{i}.png")
-            figs_dict = {key: info_dict[key][i] for key in plot_keys}
-            plot_images(figs_dict.values(), save_path=attn_fig_name, labels=labels, title="Slot Attention Masks and Attention Maps")
+        # Plot reconstructions
+        recon = info_dict["recon_combined"][i]
+        orig = info_dict["orig"][i]
+        diff = torch.abs(recon - orig)
+        recon_save_path = os.path.join(eval_dir, f"recon_orig_{i}.png")
+        plot_images([orig, recon, diff], recon_save_path, ["Original", "Reconstruction", "Difference"])
 
 if __name__ == "__main__":
     main()

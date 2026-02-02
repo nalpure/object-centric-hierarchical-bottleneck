@@ -23,6 +23,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--ckpt", help="Dynamics checkpoint path.")
     parser.add_argument("-d", "--data", help="Evaluation dataset path.")
+    parser.add_argument("-n", "--name", help="Name for the evaluation run.", type=str, default="eval_pipeline")
     parser.add_argument("-t", "--timesteps", help="Number of future time steps to predict.", type=int, default=4)
     parser.add_argument("-f", "--figures", help="Number of figures to save.", type=int, default=5)
     args = parser.parse_args()
@@ -260,7 +261,7 @@ def main():
     for key, value in losses.items():
         print(f"{key} loss: {np.mean(value):.6f}")
 
-    eval_dir = io_utils.make_unique_dir(parent_dir=os.path.dirname(args.ckpt), dirname="eval_pipeline")
+    eval_dir = io_utils.make_unique_dir(parent_dir=os.path.dirname(args.ckpt), dirname=args.name)
     with open(os.path.join(eval_dir, "losses.csv"), "w") as f:
         f.write("loss_type,loss_value\n")
         for key, value in losses.items():
