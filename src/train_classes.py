@@ -10,7 +10,7 @@ from torch.utils import data
 from models.explicit_latent_autoencoder import ExplicitLatentAutoEncoder
 from models.slot_autoencoder import SlotAttentionAutoEncoder
 from losses import attention_loss, disentanglement_loss, slot_slot_contrastive_loss
-from match import order_slots_temporal
+from match import match_slots_temporal
 from properties import reorder_perturbation_indices
 
 
@@ -61,11 +61,12 @@ class SlotAttentionAETrainStep(TrainStep):
     
 
 class SlotAttentionContrastiveTrainStep(TrainStep):
-    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight, contrastive_weight):
+    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight, contrastive_weight, contrastive_bg=True):
         super().__init__(model, device)
         self.recon_weight = recon_weight
         self.bg_attn_weight = bg_attn_weight
         self.contrastive_weight = contrastive_weight
+        self.contrastive_bg = contrastive_bg
         self.criterion = torch.nn.MSELoss()
 
     def __call__(self, batch) -> torch.Tensor:
@@ -84,15 +85,18 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
         prev_attn = None
 
         for t in range(T):
-            slots_current, attn_current = self.model.encode(img_seq[:, t], slots_init=prev_slots)
-            slots_current, attn_current = order_slots_temporal(slots_current, attn_current, prev_slots, prev_attn)
+            curr_slots, curr_attn = self.model.encode(img_seq[:, t], slots_init=prev_slots)
+            
+            if t > 0:
+                curr_slots, curr_attn, _ = match_slots_temporal(
+                    prev_slots, curr_slots, prev_attn, curr_attn)
 
-            active_slots[:, t] = slots_current[:, 1:]
-            bg_slot[:, t] = slots_current[:, :1]
-            attn[:, t] = attn_current
+            active_slots[:, t] = curr_slots[:, 1:]
+            bg_slot[:, t] = curr_slots[:, :1]
+            attn[:, t] = curr_attn
 
-            prev_slots = slots_current
-            prev_attn = attn_current
+            prev_slots = curr_slots
+            prev_attn = curr_attn
 
         # Decode all timesteps at once for speedup
         slots = torch.cat((bg_slot, active_slots), dim=2) # (B, T, S, D)
@@ -102,11 +106,20 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
         recons = recons_flat.view(B, T, S, C, H, W)
         masks = masks_flat.view(B, T, S, 1, H, W)
 
+        if self.contrastive_bg:
+            slots_contrastive = slots
+        else:
+            slots_contrastive = active_slots
+
         # Calculate losses
         loss_dict = {
             "reconstruction": self.criterion(recon_combined, img_seq) * self.recon_weight,
-            "contrastive": slot_slot_contrastive_loss(slots) * self.contrastive_weight, # TODO: decide active <-> all slots
+            "contrastive": slot_slot_contrastive_loss(slots_contrastive) * self.contrastive_weight
         }
+
+        if self.bg_attn_weight > 0.0:
+            attn = attn.permute(0, 2, 1, 3).view(B, S, T*H*W) 
+            loss_dict["attention"] = attention_loss(attn) * self.bg_attn_weight
 
         # Prepare info dict for visualization of first timestep
         info_dict = {
@@ -122,7 +135,7 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
     
 
 class ExplicitAETrainStep(TrainStep):
-    def __init__(self, model: ExplicitLatentAutoEncoder, device, recon_weight, disentangle_weight, disentangle_type="closest_magnitude", noise_mag=0.0):
+    def __init__(self, model: ExplicitLatentAutoEncoder, device, recon_weight, disentangle_weight, disentangle_type, noise_mag=0.0):
         super().__init__(model, device)
         self.recon_weight = recon_weight
         self.disentangle_weight = disentangle_weight

@@ -4,7 +4,7 @@ from os.path import dirname
 import numpy as np
 import torch
 
-from match import order_slots_temporal
+from match import match_slots_temporal, reorder_slots_background_first
 import math_utils
 import io_utils
 import factory as fc
@@ -86,16 +86,21 @@ def main():
 
         # ----- Slot Attention Encoding -----
         slots = torch.empty((B, T_past, S, D_slot), device=device)
+        attn = torch.empty((B, T_past, S, H * W), device=device)
         prev_slots = None
         prev_attn = None
 
         for t in range(T_past):
             slots_t, attn_t = model_SA.encode(orig[:, t], slots_init=prev_slots)
-            slots_t, attn_t = order_slots_temporal(slots_t, attn_t, prev_slots, prev_attn)
+            if t > 0:
+                slots_t, attn_t = match_slots_temporal(prev_slots, slots_t, prev_attn, attn_t)
             prev_slots = slots_t
             prev_attn = attn_t
             slots[:, t] = math_utils.normalize_slots(slots_t, mean_slots, std_slots)
-        
+            attn[:, t] = attn_t
+
+        reorder_slots_background_first(slots, attn)
+
         # ----- Explicit Encoding -----
         z_expl_current = model_expl.encode(
             slots[:, :, 1:].view(B * T_past, S - 1, D_slot)

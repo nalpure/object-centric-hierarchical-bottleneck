@@ -81,23 +81,27 @@ def match_slots_temporal(prev_slots, curr_slots, prev_attn, curr_attn, w_slot=1.
     return reordered_slots, reordered_attn, assignments
 
 
-def identify_background(slots, attention_scores):
+def reorder_slots_background_first(slots, attention_scores):
     """
-    Separates slots into active and background components while preserving
-    the order of active slots within each batch.
+    Reorders slots such that the background slot (lowest spatial std in attention scores) 
+    becomes index 0 for each batch item. Remaining slots keep their relative order.
 
     Args:
-        slots: torch.Tensor of shape [B, N, D]
-        attention_scores: torch.Tensor of shape [B, N, H*W]
-
-    Returns:
-        active_slots:      [B, N-1, D]
-        background_slot:   [B, 1, D]
-        active_attn:       [B, N-1, H*W]
-        background_attn:   [B, 1, H*W]
+        slots: [B, N, D] or [B, T, N, D]
+        attention_scores: [B, N, H*W] or [B, T, N, H*W]
     """
+
+    if slots.dim() == 4:
+        B, T, N, D = slots.shape
+        _, _, _, HW = attention_scores.shape
+        slots = slots.permute(0, 2, 1, 3).reshape(B, N, T * D)
+        attention_scores = attention_scores.permute(0, 2, 1, 3).reshape(B, N, T * HW)
+        background_idx = reorder_slots_background_first(slots, attention_scores)
+        slots = slots.view(B, N, T, D).permute(0, 2, 1, 3)
+        attention_scores = attention_scores.view(B, N, T, HW).permute(0, 2, 1, 3)
+        return background_idx
+
     B, N, D = slots.shape
-    _, _, HW = attention_scores.shape
 
     # 1. Identify background slot per batch (lowest spatial std)
     background_idx = torch.argmin(torch.std(attention_scores, dim=-1), dim=-1)  # [B]
@@ -112,36 +116,9 @@ def identify_background(slots, attention_scores):
     active_mask = all_idx != background_idx.unsqueeze(1)                 # [B,N]
 
     active_slots = slots[active_mask].view(B, N-1, D)
-    active_attn  = attention_scores[active_mask].view(B, N-1, HW)
+    active_attn  = attention_scores[active_mask].view(B, N-1, -1)
 
-    return active_slots, background_slot, active_attn, background_attn
+    slots[:] = torch.cat([background_slot, active_slots], dim=1)
+    attention_scores[:] = torch.cat([background_attn, active_attn], dim=1)
 
-
-def order_slots_temporal(slots, attention_scores, prev_slots=None, prev_attention=None):
-    """
-    Orders slots by matching them to previous slots using a weighted
-    combination of slot-vector and attention-map similarity.
-
-    Args:
-        slots: [B, N, D]
-        attention_scores: [B, N, H*W]
-        prev_slots: [B, N, D]
-        prev_attention: [B, N, H*W]
-    Returns:
-        ordered_slots: [B, N, D]
-        ordered_attention: [B, N, H*W]
-    """
-    if prev_slots is None or prev_attention is None:
-        slots_active, slot_bg, attn_active, attn_bg = identify_background(slots, attention_scores)
-        slots = torch.cat([slot_bg, slots_active], dim=1)
-        attn = torch.cat([attn_bg, attn_active], dim=1)
-    else:
-        slots_active, slot_bg, attn_active, attn_bg = identify_background(slots, attention_scores)
-        slots_active_prev = prev_slots[:, 1:, :]
-        attn_active_prev = prev_attention[:, 1:, :]
-        slots_active, attn_active, _ = match_slots_temporal(
-            slots_active_prev, slots_active, attn_active_prev, attn_active)
-        slots = torch.cat([slot_bg, slots_active], dim=1)
-        attn = torch.cat([attn_bg, attn_active], dim=1)
-    
-    return slots, attn
+    return background_idx

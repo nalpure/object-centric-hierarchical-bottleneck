@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 
 import io_utils
-from match import find_gt_slot_alignment, order_slots_temporal
+from match import find_gt_slot_alignment, match_slots_temporal, reorder_slots_background_first
 from losses import linear_mcc_loss
 from properties import get_explicit_indices
 import math_utils
@@ -25,7 +25,7 @@ def main():
     parser.add_argument("-d", "--data", help="Evaluation dataset path.")
     parser.add_argument("-n", "--name", help="Name for the evaluation run.", type=str, default="eval_pipeline")
     parser.add_argument("-t", "--timesteps", help="Number of future time steps to predict.", type=int, default=4)
-    parser.add_argument("-f", "--figures", help="Number of figures to save.", type=int, default=5)
+    parser.add_argument("-f", "--figures", help="Number of figures to save.", type=int, default=3)
     args = parser.parse_args()
 
     # ----- Load implicit dynamics config -----
@@ -125,11 +125,15 @@ def main():
 
             for t in range(T):
                 slots_t, attn_t = model_SA.encode(orig[:, t], slots_init=prev_slots)
-                slots_t, attn_t = order_slots_temporal(slots_t, attn_t, prev_slots, prev_attn)
+                if t > 0:
+                    slots_t, attn_t = match_slots_temporal(prev_slots, slots_t, prev_attn, attn_t)
+
                 # background slot is first after ordering
                 slots[:, t] = slots_t
                 prev_slots = slots_t
                 prev_attn = attn_t
+
+            reorder_slots_background_first(slots, attn_t)
 
             # ----- Decode slots to get masks for alignment -----
             recon_combined, _, masks_predicted = model_SA.decode(

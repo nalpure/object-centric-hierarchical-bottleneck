@@ -33,11 +33,12 @@ def slot_slot_contrastive_loss(slots, temperature=0.075, batch_contrast=True, cr
 
 
 def attention_loss(attention):
-    """ 
-    For each slot, compute the standard deviation of its attention values. This is assumed to be the background.
-    The loss is the mean of the minimum standard deviations. 
     """
-    B, S, N = attention.shape
+    Encourages a homogeneous attention map for at least one slot, which is assumed to be the background slot.
+
+    Args:
+    attention: [B, S, HW] or [B, S, THW]
+    """
     std = torch.std(attention, dim=-1)
     loss = std.min(dim=1)[0].mean()
     return loss

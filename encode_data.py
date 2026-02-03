@@ -6,7 +6,7 @@ from torch.utils import data
 import torch
 from torch.nn import functional as F
 
-from match import order_slots_temporal
+from match import match_slots_temporal, reorder_slots_background_first
 from math_utils import set_seed
 from io_utils import load_config, save_dict_h5py
 from factory import build_dataloader, build_model, get_device
@@ -87,40 +87,42 @@ def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_fname
         orig_seq, pert_seq, magnitude, obj_index, prop_index = batch
         orig_seq = orig_seq.to(DEVICE)
         pert_seq = pert_seq.to(DEVICE)
-        num_objects = model.num_slots - 1
         B, T, C, H, W = orig_seq.shape
 
-        active_slots_orig = torch.empty((B, T, num_objects, model.slots_dim), device=DEVICE)
-        active_slots_pert = torch.empty((B, T, num_objects, model.slots_dim), device=DEVICE)
+        slots_orig = torch.empty((B, T, model.num_slots, model.slots_dim), device=DEVICE)
+        slots_pert = torch.empty((B, T, model.num_slots, model.slots_dim), device=DEVICE)
+        attn_orig = torch.empty((B, T, model.num_slots, H * W), device=DEVICE)
+        attn_pert = torch.empty((B, T, model.num_slots, H * W), device=DEVICE)
         bg_slot_orig = torch.empty((B, T, 1, model.slots_dim), device=DEVICE)
         prev_slots_orig = None
         prev_attn_orig = None
 
         for t in range(T):
-            slots_orig, attn_orig = model.encode(orig_seq[:, t], slots_init=prev_slots_orig)
-            slots_orig, attn_orig = order_slots_temporal(slots_orig, attn_orig, prev_slots_orig, prev_attn_orig)
+            curr_slots_orig, curr_attn_orig = model.encode(orig_seq[:, t], slots_init=prev_slots_orig)
 
-            if t == 0:
-                # Make sure both sequences start with the same slot order
-                prev_slots_pert = slots_orig
-                prev_attn_pert = attn_orig
+            if t > 0:
+                curr_slots_orig, curr_attn_orig, _ = match_slots_temporal(prev_slots_orig, curr_slots_orig, prev_attn_orig, curr_attn_orig)
+            else:
+                prev_slots_pert = curr_slots_orig
+                prev_attn_pert = curr_attn_orig
             
-            slots_pert, attn_pert = model.encode(pert_seq[:, t], slots_init=prev_slots_pert)
-            slots_pert, attn_pert = order_slots_temporal(slots_pert, attn_pert, prev_slots_pert, prev_attn_pert)
+            curr_slots_pert, curr_attn_pert = model.encode(pert_seq[:, t], slots_init=prev_slots_pert)
+            curr_slots_pert, curr_attn_pert, _ = match_slots_temporal(prev_slots_pert, curr_slots_pert, prev_attn_pert, curr_attn_pert)
 
-            active_slots_orig[:, t, :, :] = slots_orig[:, 1:, :]
-            active_slots_pert[:, t, :, :] = slots_pert[:, 1:, :]
-            bg_slot_orig[:, t, :, :] = slots_orig[:, :1, :]
+            slots_orig[:, t, :, :] = curr_slots_orig
+            slots_pert[:, t, :, :] = curr_slots_pert
+            prev_slots_orig = curr_slots_orig
+            prev_attn_orig = curr_attn_orig
+            prev_slots_pert = curr_slots_pert
+            prev_attn_pert = curr_attn_pert
 
-            prev_slots_orig = slots_orig
-            prev_attn_orig = attn_orig
-            prev_slots_pert = slots_pert
-            prev_attn_pert = attn_pert
+        reorder_slots_background_first(slots_orig, attn_orig)
+        reorder_slots_background_first(slots_pert, attn_pert)
         
         # ----- Save to HDF5 -----
         data_dict = {
-            f'batch_{batch_index}_orig_seq': active_slots_orig.detach().cpu().numpy(),
-            f'batch_{batch_index}_pert_seq': active_slots_pert.detach().cpu().numpy(),
+            f'batch_{batch_index}_orig_seq': slots_orig.detach().cpu().numpy(),
+            f'batch_{batch_index}_pert_seq': slots_pert.detach().cpu().numpy(),
             f'batch_{batch_index}_magnitude': magnitude,
             f'batch_{batch_index}_obj_index': obj_index,
             f'batch_{batch_index}_prop_index': prop_index
@@ -130,10 +132,11 @@ def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_fname
 
         # ----- Print and visualize for the first batch and last timestep -----
         if info_prints and batch_index == 0:
-            slot_stats_prints(model, orig_seq, active_slots_orig, prev_slots_orig, prev_attn_orig)
+            slot_stats_prints(model, orig_seq, slots_orig, prev_slots_orig, prev_attn_orig)
 
         if num_figures > 0 and batch_index == 0:
-            visualize_slots(model, orig_seq, active_slots_orig, bg_slot_orig, output_dir, num_figures)
+            visualize_slots(model, orig_seq, slots_orig[:, :, 1:], slots_orig[:, :, :1], output_dir, num_figures, perturbed=False)
+            visualize_slots(model, pert_seq, slots_pert[:, :, 1:], slots_pert[:, :, :1], output_dir, num_figures, perturbed=True)
 
 
 def save_latents(model: torch.nn.Module, dataloader: data.DataLoader, output_fname: str, output_dir: str, info_prints: bool):
@@ -226,10 +229,10 @@ def evaluate_slot_alignment(slots_t0, slots_t1):
 
 
 
-def slot_stats_prints(model: torch.nn.Module, orig_seq: torch.Tensor, active_slots_orig: torch.Tensor, prev_slots_orig: torch.Tensor, prev_attn_orig: torch.Tensor):
+def slot_stats_prints(model, orig_seq, active_slots_orig, prev_slots_orig, prev_attn_orig):
     # ----- Debug prints for slot similarity at t=0 within single observations -----
     slots_orig_no_init, attn_orig_no_init = model.encode(orig_seq[:, 0])
-    slots_orig_no_init_ordered, attn_orig_no_init_ordered = order_slots_temporal(slots_orig_no_init, attn_orig_no_init, prev_slots_orig, prev_attn_orig)
+    slots_orig_no_init_ordered, attn_orig_no_init_ordered, _ = match_slots_temporal(slots_orig_no_init, attn_orig_no_init, prev_slots_orig, prev_attn_orig)
 
     prev_slots_orig_norm = F.normalize(prev_slots_orig, dim=-1)
     slots_orig_no_init_ordered_norm = F.normalize(slots_orig_no_init_ordered, dim=-1)
@@ -275,7 +278,7 @@ def slot_stats_prints(model: torch.nn.Module, orig_seq: torch.Tensor, active_slo
         print(similarities_inter[i].cpu().numpy())
 
 
-def visualize_slots(model, orig_seq, active_slots_orig, bg_slot_orig, output_dir, num_figures):
+def visualize_slots(model, orig_seq, active_slots_orig, bg_slot_orig, output_dir, num_figures, perturbed=False):
     T = orig_seq.shape[1]
     for sample_idx in range(num_figures):
         image_rows = np.empty((model.num_slots + 2, T), dtype=object)
@@ -286,6 +289,7 @@ def visualize_slots(model, orig_seq, active_slots_orig, bg_slot_orig, output_dir
         for t in range(T):
             active_slots_t = active_slots_orig[sample_idx][t].unsqueeze(0)
             bg_slot_t = bg_slot_orig[sample_idx][t].unsqueeze(0)
+
             slots_t = torch.cat([bg_slot_t, active_slots_t], dim=1)
             recon_t, _, masks_t = model.decode(slots_t)
             image_rows[0, t] = orig_seq[sample_idx, t].cpu()
@@ -293,7 +297,8 @@ def visualize_slots(model, orig_seq, active_slots_orig, bg_slot_orig, output_dir
             for o in range(model.num_slots):
                 image_rows[o + 2, t] = masks_t[o].unsqueeze(0).cpu()
 
-        output_path = os.path.join(output_dir, f"sample_{sample_idx}_latents.png")
+        suffix = "perturbed" if perturbed else "original"
+        output_path = os.path.join(output_dir, f"sample_{sample_idx}_latents_{suffix}.png")
         vis.plot_grid(image_rows, row_titles, column_titles, output_path)
 
     print(f"Saved latent visualizations to {output_dir}.")
