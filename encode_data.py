@@ -111,6 +111,8 @@ def save_slots(model: torch.nn.Module, dataloader: data.DataLoader, output_fname
 
             slots_orig[:, t, :, :] = curr_slots_orig
             slots_pert[:, t, :, :] = curr_slots_pert
+            attn_orig[:, t, :, :] = curr_attn_orig
+            attn_pert[:, t, :, :] = curr_attn_pert
             prev_slots_orig = curr_slots_orig
             prev_attn_orig = curr_attn_orig
             prev_slots_pert = curr_slots_pert

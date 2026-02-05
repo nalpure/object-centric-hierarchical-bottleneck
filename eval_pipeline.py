@@ -120,20 +120,22 @@ def main():
 
             # ----- Slot Attention Encoding and temporal ordering -----
             slots = torch.empty((B, T, S, D_slot), device=DEVICE)
+            attn = torch.empty((B, T, S, H * W), device=DEVICE)
             prev_slots = None
             prev_attn = None
 
             for t in range(T):
                 slots_t, attn_t = model_SA.encode(orig[:, t], slots_init=prev_slots)
                 if t > 0:
-                    slots_t, attn_t = match_slots_temporal(prev_slots, slots_t, prev_attn, attn_t)
+                    slots_t, attn_t, _ = match_slots_temporal(prev_slots, slots_t, prev_attn, attn_t)
 
                 # background slot is first after ordering
                 slots[:, t] = slots_t
+                attn[:, t] = attn_t
                 prev_slots = slots_t
                 prev_attn = attn_t
 
-            reorder_slots_background_first(slots, attn_t)
+            reorder_slots_background_first(slots, attn)
 
             # ----- Decode slots to get masks for alignment -----
             recon_combined, _, masks_predicted = model_SA.decode(
@@ -271,6 +273,33 @@ def main():
         for key, value in losses.items():
             f.write(f"{key},{np.mean(value)}\n")
 
+
+    # ----- Create plots (for last batch) -----
+    if args.figures == 0:
+        return
+    
+    for i in range(min(args.figures, B)):
+        plot_path = os.path.join(eval_dir, f"eval_fig_{i}.png")
+        rows = [
+            img_seq["true"][i],
+            img_seq["recon_SA"][i],
+            img_seq["recon_expl"][i],
+            torch.cat([
+                torch.ones((t_past, C, H, W), device=DEVICE),
+                img_seq["pred_impl"][i]
+            ])
+        ]
+        row_labels = [
+            "Observation",
+            "Reconstruction (SA)",
+            "Reconstruction (Expl)",
+            "Prediction (Impl Dyn)"
+        ]
+        column_labels = [f"t={t}" for t in range(1 - t_past, 1 + t_future)]
+        save_path = os.path.join(eval_dir, f"eval_fig_{i}.png")
+        vis.plot_grid(rows, row_labels, column_labels, save_path)
+
+
     # ----- Compute MCC -----
     explicit_indices = get_explicit_indices()
     truth_all_explicit = truth_all[:, :, :, explicit_indices]
@@ -299,30 +328,9 @@ def main():
         for key, value in mcc_losses.items():
             f.write(f"{key},{','.join([str(v) for v in value])}\n")
 
-    # ----- Create plots (for last batch) -----
-    if args.figures == 0:
-        return
+    print("Evaluation complete. Results saved to:", eval_dir)
+
     
-    for i in range(min(args.figures, B)):
-        plot_path = os.path.join(eval_dir, f"eval_fig_{i}.png")
-        rows = [
-            img_seq["true"][i],
-            img_seq["recon_SA"][i],
-            img_seq["recon_expl"][i],
-            torch.cat([
-                torch.ones((t_past, C, H, W), device=DEVICE),
-                img_seq["pred_impl"][i]
-            ])
-        ]
-        row_labels = [
-            "Observation",
-            "Reconstruction (SA)",
-            "Reconstruction (Expl)",
-            "Prediction (Impl Dyn)"
-        ]
-        column_labels = [f"t={t}" for t in range(1 - t_past, 1 + t_future)]
-        save_path = os.path.join(eval_dir, f"eval_fig_{i}.png")
-        vis.plot_grid(rows, row_labels, column_labels, save_path)
 
 
 if __name__ == "__main__":
