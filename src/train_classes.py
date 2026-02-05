@@ -118,8 +118,7 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
         }
 
         if self.bg_attn_weight > 0.0:
-            attn = attn.permute(0, 2, 1, 3).view(B, S, T*H*W) 
-            loss_dict["attention"] = attention_loss(attn) * self.bg_attn_weight
+            loss_dict["attention"] = attention_loss(attn.view(B * T, S, H * W)) * self.bg_attn_weight
 
         # Prepare info dict for visualization of first timestep
         info_dict = {
