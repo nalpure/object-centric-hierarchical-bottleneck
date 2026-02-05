@@ -91,34 +91,40 @@ def reorder_slots_background_first(slots, attention_scores):
         attention_scores: [B, N, H*W] or [B, T, N, H*W]
     """
 
-    if slots.dim() == 4:
-        B, T, N, D = slots.shape
-        _, _, _, HW = attention_scores.shape
-        slots = slots.permute(0, 2, 1, 3).reshape(B, N, T * D)
-        attention_scores = attention_scores.permute(0, 2, 1, 3).reshape(B, N, T * HW)
-        background_idx = reorder_slots_background_first(slots, attention_scores)
-        slots = slots.view(B, N, T, D).permute(0, 2, 1, 3)
-        attention_scores = attention_scores.view(B, N, T, HW).permute(0, 2, 1, 3)
-        return background_idx
+    has_time = (slots.dim() == 4)
 
-    B, N, D = slots.shape
+    if not has_time:
+        # add dummy time dimension
+        slots = slots.unsqueeze(1)                 # [B,1,N,D]
+        attention_scores = attention_scores.unsqueeze(1)  # [B,1,N,HW]
 
-    # 1. Identify background slot per batch (lowest spatial std)
-    background_idx = torch.argmin(torch.std(attention_scores, dim=-1), dim=-1)  # [B]
+    B, T, N, D = slots.shape
+    HW = attention_scores.shape[-1]
 
-    # 2. Gather background slot and its attention
+    # ---- background score ----
+    attn_std = torch.std(attention_scores, dim=-1)     # [B,T,N]
+    attn_score = attn_std.mean(dim=1)                  # [B,N]
+    background_idx = torch.argmin(attn_score, dim=-1)  # [B]
+
     batch_idx = torch.arange(B, device=slots.device)
-    background_slot = slots[batch_idx, background_idx].unsqueeze(1)      # [B,1,D]
-    background_attn = attention_scores[batch_idx, background_idx].unsqueeze(1)  # [B,1,HW]
 
-    # 3. Build mask and select active slots/attentions (preserve order)
-    all_idx = torch.arange(N, device=slots.device).unsqueeze(0)          # [1,N]
-    active_mask = all_idx != background_idx.unsqueeze(1)                 # [B,N]
+    # ---- background slot ----
+    background_slot = slots[batch_idx, :, background_idx].unsqueeze(2)       # [B,T,1,D]
+    background_attn = attention_scores[batch_idx, :, background_idx].unsqueeze(2)  # [B,T,1,HW]
 
-    active_slots = slots[active_mask].view(B, N-1, D)
-    active_attn  = attention_scores[active_mask].view(B, N-1, -1)
+    # ---- active slots ----
+    all_idx = torch.arange(N, device=slots.device).unsqueeze(0)
+    active_mask = (all_idx != background_idx.unsqueeze(1))  # [B,N]
+    active_mask = active_mask.unsqueeze(1).expand(B, T, N)  # [B,T,N]
 
-    slots[:] = torch.cat([background_slot, active_slots], dim=1)
-    attention_scores[:] = torch.cat([background_attn, active_attn], dim=1)
+    active_slots = slots[active_mask].view(B, T, N - 1, D)
+    active_attn  = attention_scores[active_mask].view(B, T, N - 1, HW)
 
-    return background_idx
+    slots[:] = torch.cat([background_slot, active_slots], dim=2)
+    attention_scores[:] = torch.cat([background_attn, active_attn], dim=2)
+
+    if not has_time:
+        slots = slots.squeeze(1)
+        attention_scores = attention_scores.squeeze(1)
+
+    return slots, attention_scores, background_idx
