@@ -211,12 +211,16 @@ def build_train_step(config: dict, model: torch.nn.Module) -> tc.TrainStep:
     if config["type"] == "slot_attention":
         train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
         if train_contrastive:
+            if not "contrastive_bg" in config["train"]:
+                config["train"]["contrastive_bg"] = True
+
             train_step = tc.SlotAttentionContrastiveTrainStep(
                 model=model,
                 device=device,
                 recon_weight=config["train"]["weights"]["reconstruction"],
                 bg_attn_weight=config["train"]["weights"]["bg_attention"],
-                contrastive_weight=config["train"]["weights"]["contrastive"]
+                contrastive_weight=config["train"]["weights"]["contrastive"],
+                contrastive_bg=config["train"]["contrastive_bg"]
             )
         else:
             train_step = tc.SlotAttentionAETrainStep(
@@ -227,8 +231,11 @@ def build_train_step(config: dict, model: torch.nn.Module) -> tc.TrainStep:
             )
     else:
         noise_mag = config["data"]["noise"] if "noise" in config["data"] else 0.0
-        if "disentanglement_type" in config["train"]["opt"]:
-            dis_type = config["train"]["opt"]["disentanglement_type"]
+        dis = config["train"]["weights"]["disentanglement"] > 0.0
+        
+        if dis and not "disentanglement_type" in config["train"]:
+            dis_type = "closest_magnitude"
+            config["train"]["disentanglement_type"] = dis_type
         else:
             dis_type = None
         

@@ -1,0 +1,37 @@
+# Default slot attention autoencoder configuration
+type = "slot_attention"
+seed = 0
+
+[model]
+obs_width = 64
+obs_height = 64
+obs_channels = 3
+slot_size = 32
+encdec_dim = 32
+
+[slot]
+sa_iterations = 3
+num_slots = 5
+
+[data]
+obs_format = "HWC"
+seq_length = 2
+
+[train]
+batch_size = 64
+epochs = 250
+ckpt_rate = 50
+contrastive_bg = true
+
+[train.opt]
+lr = 0.0002
+lr_warmup_epochs = 0
+lr_decay_epochs = 100
+lr_decay_rate = 0.5
+weight_decay = 0.0
+weight_anneal_epochs = 100
+
+[train.weights]
+reconstruction = 10_000
+bg_attention = 0
+contrastive = 10
