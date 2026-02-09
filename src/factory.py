@@ -209,7 +209,15 @@ def build_train_step(config: dict, model: torch.nn.Module) -> tc.TrainStep:
     device = get_device()
 
     if config["type"] == "slot_attention":
+
+        if "bg_attention" in config["train"]["weights"] and config["train"]["weights"]["bg_attention"] > 0.0:
+            attn_margin = config["train"].get("attn_margin", 0.001)
+            config["train"]["attn_margin"] = attn_margin
+        else:
+            attn_margin = None
+
         train_contrastive = "contrastive" in config["train"]["weights"] and config["train"]["weights"]["contrastive"] > 0.0
+
         if train_contrastive:
             if not "contrastive_bg" in config["train"]:
                 config["train"]["contrastive_bg"] = True
@@ -220,22 +228,24 @@ def build_train_step(config: dict, model: torch.nn.Module) -> tc.TrainStep:
                 recon_weight=config["train"]["weights"]["reconstruction"],
                 bg_attn_weight=config["train"]["weights"]["bg_attention"],
                 contrastive_weight=config["train"]["weights"]["contrastive"],
-                contrastive_bg=config["train"]["contrastive_bg"]
+                contrastive_bg=config["train"]["contrastive_bg"],
+                attn_margin=attn_margin
             )
         else:
             train_step = tc.SlotAttentionAETrainStep(
                 model=model,
                 device=device,
                 recon_weight=config["train"]["weights"]["reconstruction"],
-                bg_attn_weight=config["train"]["weights"]["bg_attention"]
+                bg_attn_weight=config["train"]["weights"]["bg_attention"],
+                attn_margin=attn_margin
             )
     else:
         noise_mag = config["data"]["noise"] if "noise" in config["data"] else 0.0
         dis = config["train"]["weights"]["disentanglement"] > 0.0
         
-        if dis and not "disentanglement_type" in config["train"]:
-            dis_type = "closest_magnitude"
-            config["train"]["disentanglement_type"] = dis_type
+        if dis:
+            dis_type = config["train"].get("disentanglement_type", "closest_magnitude")
+            config["train"]["disentanglement_type"] = dis_type # Save back to config in case it was not originally specified
         else:
             dis_type = None
         

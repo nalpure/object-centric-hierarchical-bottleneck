@@ -32,16 +32,17 @@ def slot_slot_contrastive_loss(slots, temperature=0.075, batch_contrast=True, cr
     return loss
 
 
-def attention_loss(attention):
+def attention_loss(attention, margin=0.001):
     """
     Encourages a homogeneous attention map for at least one slot, which is assumed to be the background slot.
 
     Args:
-    attention: [B, S, HW] or [B, S, THW]
+    attention: [B, S, HW]
     """
-    std = torch.std(attention, dim=-1)
-    loss = std.min(dim=1)[0].mean()
-    return loss
+    std = torch.std(attention, dim=-1)              # [B, S]
+    min_std = torch.min(std, dim=-1).values         # [B]
+    loss = torch.clamp(min_std - margin, min=0)     # [B]
+    return torch.mean(loss)
 
 
 def disentanglement_loss(z_orig, z_pert, latent_idx, magnitude, disentangle_type="closest_magnitude"):

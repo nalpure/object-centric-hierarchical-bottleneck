@@ -22,6 +22,7 @@ batch_size = 64
 epochs = 250
 ckpt_rate = 50
 contrastive_bg = false
+attn_margin = 0.001
 
 [train.opt]
 lr = 0.0002
@@ -29,9 +30,9 @@ lr_warmup_epochs = 0
 lr_decay_epochs = 200
 lr_decay_rate = 0.5
 weight_decay = 0.0
-weight_anneal_epochs = 100
+weight_anneal_epochs = 25
 
 [train.weights]
 reconstruction = 10_000
-bg_attention = 10_000
-contrastive = 10
+bg_attention = 1_000
+contrastive = 1

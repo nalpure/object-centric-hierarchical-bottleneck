@@ -24,10 +24,11 @@ class TrainStep:
     
 
 class SlotAttentionAETrainStep(TrainStep):
-    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight):
+    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight, attn_margin):
         super().__init__(model, device)
         self.recon_weight = recon_weight
         self.bg_attn_weight = bg_attn_weight
+        self.attn_margin = attn_margin
         self.criterion = torch.nn.MSELoss()
 
     def __call__(self, batch) -> torch.Tensor:
@@ -41,7 +42,7 @@ class SlotAttentionAETrainStep(TrainStep):
         loss_dict["reconstruction"] = recon_loss
 
         if self.bg_attn_weight > 0.0:
-            attn_loss = attention_loss(attn) * self.bg_attn_weight
+            attn_loss = attention_loss(attn, self.attn_margin) * self.bg_attn_weight
             loss_dict["attention"] = attn_loss
 
         B, C, H, W = obs.shape
@@ -61,12 +62,13 @@ class SlotAttentionAETrainStep(TrainStep):
     
 
 class SlotAttentionContrastiveTrainStep(TrainStep):
-    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight, contrastive_weight, contrastive_bg=True):
+    def __init__(self, model: SlotAttentionAutoEncoder, device, recon_weight, bg_attn_weight, contrastive_weight, contrastive_bg=True, attn_margin=0.001):
         super().__init__(model, device)
         self.recon_weight = recon_weight
         self.bg_attn_weight = bg_attn_weight
         self.contrastive_weight = contrastive_weight
         self.contrastive_bg = contrastive_bg
+        self.attn_margin = attn_margin
         self.criterion = torch.nn.MSELoss()
 
     def __call__(self, batch) -> torch.Tensor:
@@ -118,7 +120,7 @@ class SlotAttentionContrastiveTrainStep(TrainStep):
         }
 
         if self.bg_attn_weight > 0.0:
-            loss_dict["attention"] = attention_loss(attn.view(B * T, S, H * W)) * self.bg_attn_weight
+            loss_dict["attention"] = attention_loss(attn.view(B * T, S, H * W), self.attn_margin) * self.bg_attn_weight
 
         # Prepare info dict for visualization of first timestep
         info_dict = {
