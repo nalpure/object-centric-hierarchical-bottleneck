@@ -93,7 +93,7 @@ def main():
         for t in range(T_past):
             slots_t, attn_t = model_SA.encode(orig[:, t], slots_init=prev_slots)
             if t > 0:
-                slots_t, attn_t = match_slots_temporal(prev_slots, slots_t, prev_attn, attn_t)
+                slots_t, attn_t, _ = match_slots_temporal(prev_slots, slots_t, prev_attn, attn_t)
             prev_slots = slots_t
             prev_attn = attn_t
             slots[:, t] = math_utils.normalize_slots(slots_t, mean_slots, std_slots)
