@@ -5,12 +5,12 @@
 To train a standard SlotAttention model for reconstruction on a Slipscape dataset run
 
 ```bash
-python -m train SA --name RUN_NAME --data PATH_TO_DATASET --base 
+python -m train SA --name RUN_NAME --data PATH_TO_DATASET --base RUN_NAME
 ```
 
 To load the checkpoint with lowest total loss (a different checkpoint can be specified using the flag '--base-epoch NUMBER') and continue training with an additional contrastive and background attention loss, run
 ```bash
-python -m train SA --name RUN_NAME_DIS --data PATH_TO_DATSET --base RUN_NAME
+python -m train SA_disent --name RUN_NAME_DIS --data PATH_TO_DATSET --base RUN_NAME
 ```
 
 To convert the original Slipscape dataset into a dataset containing per-frame slot representations using the trained SlotAttention model run

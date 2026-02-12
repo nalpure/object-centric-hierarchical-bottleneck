@@ -1,6 +1,5 @@
 # Default slot attention autoencoder configuration
 type = "slot_attention"
-seed = 0
 num_workers = 8
 
 [model]
@@ -21,7 +20,7 @@ include_perturbed = false
 
 [train]
 batch_size = 64
-epochs = 500
+epochs = 250
 ckpt_rate = 50
 
 [train.opt]
