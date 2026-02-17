@@ -19,15 +19,19 @@ def slot_slot_contrastive_loss(slots, temperature=0.075, batch_contrast=True, cr
         scalar loss
     """
     slots = F.normalize(slots, p=2.0, dim=-1)
+    
     if batch_contrast:
-        slots = slots.split(1)  # [1xTxKxD]
-        slots = torch.cat(slots, dim=-2)  # 1xTxK*BxD
+        slots = slots.split(1)  # [1, T, S, D] * B
+        slots = torch.cat(slots, dim=-2)  # [1, T, B*S, D]
+    
+    B, T, S, D = slots.shape
+    P = T - 1
+
     s1 = slots[:, :-1, :, :]
     s2 = slots[:, 1:, :, :]
-    ss = torch.matmul(s1, s2.transpose(-2, -1)) / temperature
-    B, T, S, D = ss.shape
-    ss = ss.reshape(B * T, S, S)
-    target = torch.eye(S).expand(B * T, S, S).to(ss.device)
+    ss = torch.matmul(s1, s2.transpose(-2, -1)) / temperature # [B, P, S, S]
+    ss = ss.reshape(B * P, S, S)
+    target = torch.eye(S).expand(B * P, S, S).to(ss.device)
     loss = criterion(ss, target)
     return loss
 
