@@ -1,4 +1,4 @@
-# Frame-Stacked Structured World Models (FS-SWM)
+# Object-centric hierarchical bottleneck
 
 
 ## Training
