@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 import io_utils
 from match import find_gt_slot_alignment, match_slots_temporal, reorder_slots_background_first
-from losses import linear_mcc_loss
+from losses import get_ld, get_mcc
 from properties import get_explicit_indices
 import math_utils
 import factory as fc
@@ -300,33 +300,41 @@ def main():
         vis.plot_grid(rows, row_labels, column_labels, save_path)
 
 
-    # ----- Compute MCC -----
+    # ----- Compute and save LD -----
     explicit_indices = get_explicit_indices()
     truth_all_explicit = truth_all[:, :, :, explicit_indices]
-    mcc_losses = {"truth_timestep": [], "first_slot_explicit_loss": [], "first_latent_explicit_loss": [], "first_latent_implicit_loss": [], "current_latent_implicit_loss": []}
+    ld_losses = {"truth_timestep": [], "first_slot_explicit_loss": [], "first_latent_explicit_loss": [], "first_latent_implicit_loss": [], "current_latent_implicit_loss": []}
     for t in range(t_past+t_future):
-        mcc_losses["truth_timestep"].append(t-t_past+1)
-        mcc_losses["first_slot_explicit_loss"].append(linear_mcc_loss(
+        ld_losses["truth_timestep"].append(t-t_past+1)
+        ld_losses["first_slot_explicit_loss"].append(get_ld(
             truth_all_explicit[:, t],
             slot_all
         ))
-        mcc_losses["first_latent_explicit_loss"].append(linear_mcc_loss(
+        ld_losses["first_latent_explicit_loss"].append(get_ld(
             truth_all_explicit[:, t],
             z_explicit_all
         ))
-        mcc_losses["first_latent_implicit_loss"].append(linear_mcc_loss(
+        ld_losses["first_latent_implicit_loss"].append(get_ld(
             truth_all[:, t],
             z_first_all
         ))
-        mcc_losses["current_latent_implicit_loss"].append(linear_mcc_loss(
+        ld_losses["current_latent_implicit_loss"].append(get_ld(
             truth_all[:, t],
             z_current_all
         ))
 
-    # ---- Save MCC -----
-    with open(os.path.join(eval_dir, "mcc_losses.csv"), "w") as f:
-        for key, value in mcc_losses.items():
+    with open(os.path.join(eval_dir, "ld_losses.csv"), "w") as f:
+        for key, value in ld_losses.items():
             f.write(f"{key},{','.join([str(v) for v in value])}\n")
+
+
+    # ---- Compute and save MCC -----
+    mean_corr, per_latent = get_mcc(truth_all[:, t_past-1], z_current_all)
+
+    with open(os.path.join(eval_dir, "mcc_losses.csv"), "w") as f:
+        f.write(f"mean_correlation,{mean_corr}\n")
+        for i, corr in enumerate(per_latent):
+            f.write(f"latent_{i},{corr}\n")
 
     print("Evaluation complete. Results saved to:", eval_dir)
 

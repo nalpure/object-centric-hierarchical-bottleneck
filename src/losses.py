@@ -2,6 +2,7 @@ from torch.nn import functional as F
 import torch
 from scipy.optimize import linear_sum_assignment
 import numpy as np
+from typing import List, Tuple
 
 
 def slot_slot_contrastive_loss(slots, temperature=0.075, batch_contrast=True, criterion=torch.nn.CrossEntropyLoss()) -> torch.Tensor:
@@ -125,102 +126,125 @@ def disentanglement_loss(z_orig, z_pert, latent_idx, magnitude, disentangle_type
         raise ValueError(f"Unknown disentanglement_type: {disentangle_type}")
     
 
+
 def _r2_score(y: torch.Tensor, y_hat: torch.Tensor) -> float:
-    """R^2 for 2D tensors (N, D). Returns Python float."""
-    # Flatten to 2D (N, D)
     y = y.reshape(-1, y.shape[-1]).to(dtype=torch.float32)
     y_hat = y_hat.reshape(-1, y_hat.shape[-1]).to(dtype=torch.float32)
+
     ss_res = torch.sum((y - y_hat) ** 2)
     y_mean = torch.mean(y, dim=0, keepdim=True)
     ss_tot = torch.sum((y - y_mean) ** 2)
+
     if ss_tot.item() == 0.0:
         return 0.0
     return float((1.0 - (ss_res / ss_tot)).item())
 
 
-def _fit_linear_regression(flat_X: torch.Tensor, flat_Y: torch.Tensor) -> torch.Tensor:
-    """
-    Closed-form least-squares solution (no intercept): W = pinv(X) @ Y
-    flat_X: (N, P), flat_Y: (N, L) -> returns W (P, L)
-    """
+def _fit_affine_regression(
+    flat_X: torch.Tensor, flat_Y: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
     X = flat_X.to(dtype=torch.float32)
     Y = flat_Y.to(dtype=torch.float32)
-    # pseudo-inverse on current device
-    W = torch.pinverse(X) @ Y
-    return W
+
+    ones = torch.ones((X.shape[0], 1), dtype=X.dtype, device=X.device)
+    X_aug = torch.cat([X, ones], dim=1)
+
+    params = torch.pinverse(X_aug) @ Y
+    W = params[:-1]
+    b = params[-1]
+    return W, b
 
 
-def linear_mcc_loss(truth: torch.Tensor, pred: torch.Tensor) -> float:
-    """
-    Args:
-        truth: (data_size, num_slots, latent_size)  -- ground-truth latents
-        pred:  (data_size, num_slots, pred_size)    -- predicted slot representations
+def _apply_affine_regression(
+    flat_X: torch.Tensor, W: torch.Tensor, b: torch.Tensor
+) -> torch.Tensor:
+    X = flat_X.to(dtype=torch.float32)
+    return X @ W + b
 
-    Returns:
-        final_score (float): the final R^2 score after iterative rematching & refitting.
-    """
-    # shapes
+
+def get_ld(truth: torch.Tensor, pred: torch.Tensor) -> float:
+    # Linear Disentanglement (LD)
     data_size, num_slots, latent_size = truth.shape
     _, _, pred_size = pred.shape
 
-    # flatten for initial regression
-    flat_truth = truth.reshape(-1, latent_size).to(dtype=torch.float32)  # (N*S, L)
-    flat_pred = pred.reshape(-1, pred_size).to(dtype=torch.float32)      # (N*S, P)
+    flat_truth = truth.reshape(-1, latent_size).to(dtype=torch.float32)
+    flat_pred = pred.reshape(-1, pred_size).to(dtype=torch.float32)
 
-    # initial fit
-    W = _fit_linear_regression(flat_pred, flat_truth)  # (P, L)
-    regressed = flat_pred @ W                          # (N*S, L)
+    W, b = _fit_affine_regression(flat_pred, flat_truth)
+    regressed = _apply_affine_regression(flat_pred, W, b)
     old_score = _r2_score(flat_truth, regressed)
-    print(f"Initial score: {old_score}")
 
-    # helper: per-sample rematch using Hungarian (operates on CPU numpy)
-    def rematch_batch(predictions: torch.Tensor, regression: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        predictions: (data_size, S, P)
-        regression:  (data_size, S, L)  -- regressed predictions in GT latent space
-        target:      (data_size, S, L)  -- ground-truth latents
-        returns: new_predictions with same shape as predictions where for each sample i:
-                 new_predictions[i] = predictions[i][perm_i]
-        """
-        N, S, P = predictions.shape
+    def rematch_batch(
+        predictions: torch.Tensor,
+        regression: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        N, S, _ = predictions.shape
         new_preds = torch.empty_like(predictions)
 
-        # loop per sample: Hungarian on CPU numpy
         for i in range(N):
-            # cost matrix: ||target[a] - regression[b]||^2 over latent dims
-            tgt = target[i].detach().cpu().numpy()        # (S, L)
-            reg = regression[i].detach().cpu().numpy()    # (S, L)
-            diff = tgt[:, None, :] - reg[None, :, :]      # (S, S, L)
-            cost = np.sum(diff * diff, axis=2)            # (S, S)
-            row_ind, col_ind = linear_sum_assignment(cost)
+            tgt = target[i].detach().cpu().numpy()
+            reg = regression[i].detach().cpu().numpy()
 
-            # build permutation perm such that perm[row] = col
+            diff = tgt[:, None, :] - reg[None, :, :]
+            cost = np.sum(diff * diff, axis=2)
+
+            row_ind, col_ind = linear_sum_assignment(cost)
             perm = np.empty(S, dtype=np.int64)
             perm[row_ind] = col_ind
 
-            # apply perm to predictions
             new_preds[i] = predictions[i][perm]
+
         return new_preds
 
-    # iterative rematch loop
-    converged = False
-    while not converged:
-        # reshape regressed to (data_size, num_slots, latent_size)
+    while True:
         regressed_per_sample = regressed.reshape(data_size, num_slots, latent_size)
-
-        # perform rematch and permute predictions accordingly
         pred = rematch_batch(pred, regressed_per_sample, truth)
 
-        # re-flatten and refit linear regression
-        flat_pred = pred.reshape(-1, pred_size)
-        W = _fit_linear_regression(flat_pred, flat_truth)
-        regressed = flat_pred @ W
+        flat_pred = pred.reshape(-1, pred_size).to(dtype=torch.float32)
+        W, b = _fit_affine_regression(flat_pred, flat_truth)
+        regressed = _apply_affine_regression(flat_pred, W, b)
         score = _r2_score(flat_truth, regressed)
-        print(f"New score: {score}")
 
         if score <= old_score:
-            converged = True
-        else:
-            old_score = score
+            break
+        old_score = score
 
     return old_score
+
+
+def get_mcc(
+    truth: torch.Tensor, pred: torch.Tensor
+) -> Tuple[float, List[float]]:
+    # Mean Correlation Coefficient (MCC)
+    flat_truth = truth.reshape(-1, truth.shape[-1]).to(dtype=torch.float32)
+    flat_pred = pred.reshape(-1, pred.shape[-1]).to(dtype=torch.float32)
+
+    if flat_truth.shape[1] != flat_pred.shape[1]:
+        raise ValueError(
+            "MCC requires truth and pred to have the same latent dimension. "
+            "Project pred first if needed."
+        )
+
+    per_latent: List[float] = []
+    eps = 1e-12
+
+    for d in range(flat_truth.shape[1]):
+        y = flat_truth[:, d]
+        y_hat = flat_pred[:, d]
+
+        y = y - y.mean()
+        y_hat = y_hat - y_hat.mean()
+
+        denom = torch.sqrt(torch.sum(y * y) * torch.sum(y_hat * y_hat))
+        if denom.item() <= eps:
+            corr = torch.tensor(0.0, dtype=torch.float32, device=flat_truth.device)
+        else:
+            corr = torch.sum(y * y_hat) / denom
+            corr = torch.clamp(corr, -1.0, 1.0)
+
+        # MCC-style Pearson: use absolute correlation so sign flips still score well.
+        per_latent.append(float(torch.abs(corr).item()))
+
+    mean_corr = float(np.mean(per_latent)) if per_latent else 0.0
+    return mean_corr, per_latent
