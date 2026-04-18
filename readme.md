@@ -1,5 +1,6 @@
+![Demo](demo.gif)
 # Object-centric hierarchical bottleneck
-
+This repository contains the reference implementation of the hierarchical bottleneck approach proposed in the thesis Disentangling Object-Centric Video Representations under Sparse Perturbations. The model separates object-centric video representation learning into three stages: a Slot Attention stage for per-frame object decomposition, an explicit bottleneck for single-frame object properties, and an implicit dynamics stage for temporally inferred information and prediction. It is designed for controlled experiments on synthetic video data with sparse object-level perturbations.
 
 ## Training
 To train a standard SlotAttention model for reconstruction on a Slipscape dataset run
