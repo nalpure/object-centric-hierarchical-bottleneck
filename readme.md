@@ -2,6 +2,43 @@
 # Object-centric hierarchical bottleneck
 This repository contains the reference implementation of the hierarchical bottleneck approach proposed in the thesis Disentangling Object-Centric Video Representations under Sparse Perturbations. The model separates object-centric video representation learning into three stages: a Slot Attention stage for per-frame object decomposition, an explicit bottleneck for single-frame object properties, and an implicit dynamics stage for temporally inferred information and prediction. It is designed for controlled experiments on synthetic video data with sparse object-level perturbations.
 
+## Setup
+
+This project was tested with Python 3.10.
+
+### Reproducible installation with uv
+
+Clone the repository and create the project environment with:
+
+```bash
+git clone https://github.com/nalpure/object-centric-hierarchical-bottleneck.git
+cd object-centric-hierarchical-bottleneck
+uv sync
+export PYTHONPATH=src
+```
+
+To verify that the environment is set up correctly, run:
+
+```bash
+uv run python scripts/smoke_test.py
+uv run python -m train --help
+uv run python -m encode_data --help
+uv run python -m eval_module --help
+uv run python -m eval_pipeline --help
+uv run python -m eval_rollout --help
+```
+
+The dependency versions used for reproducible installation are locked in `uv.lock`.
+
+### Notes
+
+- The project currently targets Python 3.10.
+- PyTorch is pinned to version `2.4.1`.
+- GPU support depends on having a compatible NVIDIA driver and CUDA setup.
+- All commands in this repository should be run via `uv run ...` after `uv sync`.
+
+After setting up the environment as described above, the experiments can be run as follows.
+
 ## Training
 To train a standard SlotAttention model for reconstruction on a Slipscape dataset run
 
