@@ -1,8 +1,11 @@
 h5py
+imageio
 matplotlib
 numpy
-scikit-image
-tensorflow
-torch
+Pillow
+scipy
+tomli; python_version < "3.11"
+tomli-w
+torch==2.4.1
 tqdm
-wandb
+einops
