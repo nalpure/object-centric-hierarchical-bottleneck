@@ -1,5 +1,10 @@
-![Demo](prediction_demo.gif)
 # Object-centric hierarchical bottleneck
+Part of my thesis, *"Disentangling Object-Centric Video Representations under Sparse
+Perturbations"* (University of Innsbruck, 2026). Full text: [PDF](https://ulb-dok.uibk.ac.at/ulbtirolhs/download/pdf/13749414).
+See also the companion repo, [object-centric-frame-stacking](https://github.com/nalpure/object-centric-frame-stacking).
+
+![Demo](prediction_demo.gif)
+
 This repository contains the reference implementation of the hierarchical bottleneck approach proposed in the thesis Disentangling Object-Centric Video Representations under Sparse Perturbations. The model separates object-centric video representation learning into three stages: a Slot Attention stage for per-frame object decomposition, an explicit bottleneck for single-frame object properties, and an implicit dynamics stage for temporally inferred information and prediction. It is designed for controlled experiments on synthetic video data with sparse object-level perturbations.
 
 ## Setup
@@ -84,6 +89,17 @@ This will create an evaluation directory, containing the evaluation losses. In t
 Once all three modules of the pipeline are trained, the whole pipeline may be evaluated by running
 ```bash
 python -m eval_pipeline --data PATH_TO_SLIPSCAPE_DATASET --ckpt PATH_TO_DYNAMICS_CHECKPOINT
+```
+
+## How to Cite
+```bibtex
+@mastersthesis{schenk2026disentangling,
+  author = {Schenk, Benedikt},
+  title  = {Disentangling Object-Centric Video Representations under Sparse Perturbations},
+  school = {University of Innsbruck},
+  year   = {2026},
+  url    = {https://ulb-dok.uibk.ac.at/ulbtirolhs/download/pdf/13749414}
+}
 ```
 
 Similarly, once all modules are trained you may create artificial rollouts where future frames are predicted recursively and the final sequence gets saved as a .gif file, by running 
