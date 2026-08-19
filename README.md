@@ -1,7 +1,11 @@
 # Object-centric hierarchical bottleneck
-Part of my thesis, *"Disentangling Object-Centric Video Representations under Sparse
-Perturbations"* (University of Innsbruck, 2026). Full text: [PDF](https://ulb-dok.uibk.ac.at/ulbtirolhs/download/pdf/13749414).
-See also the companion repo, [object-centric-frame-stacking](https://github.com/nalpure/object-centric-frame-stacking).
+
+Part of my M.Sc. thesis, *Disentangling Object-Centric Video Representations under Sparse
+Perturbations* (University of Innsbruck, 2026, supervised by David Drexel and Univ.-Prof. Justus
+Piater). Full text: [PDF](https://ulb-dok.uibk.ac.at/ulbtirolhs/download/pdf/13749414). This repo
+implements the hierarchical bottleneck approach; see also the companion
+[object-centric-frame-stacking](https://github.com/nalpure/object-centric-frame-stacking) repo,
+which implements the frame-stacking approach the thesis compares it against.
 
 ![Demo](prediction_demo.gif)
 
@@ -44,6 +48,14 @@ The dependency versions used for reproducible installation are locked in `uv.loc
 
 After setting up the environment as described above, the experiments can be run as follows.
 
+## Data
+
+Datasets are generated with the [Slipscape](https://github.com/SpiralEndlessly/slipscape)
+environment, which simulates balls moving and colliding inside a square box. Three samplers were
+used in the thesis: `Standard` (the base setting), `Leftvel` (objects constrained to move left in
+the first frame), and `Leftpos` (objects constrained to the left half of the environment in the
+first frame). See the Slipscape repo for how to generate a dataset.
+
 ## Training
 To train a standard SlotAttention model for reconstruction on a Slipscape dataset run
 
@@ -53,7 +65,7 @@ python -m train SA --name RUN_NAME --data PATH_TO_DATASET --base RUN_NAME
 
 To load the checkpoint with lowest total loss (a different checkpoint can be specified using the flag '--base-epoch NUMBER') and continue training with an additional contrastive and background attention loss, run
 ```bash
-python -m train SA_disent --name RUN_NAME_DIS --data PATH_TO_DATSET --base RUN_NAME
+python -m train SA_disent --name RUN_NAME_DIS --data PATH_TO_DATASET --base RUN_NAME
 ```
 
 To convert the original Slipscape dataset into a dataset containing per-frame slot representations using the trained SlotAttention model run
@@ -64,7 +76,7 @@ The file will be saved in the same directory of the checkpoint.
 
 To train the explicit Autoencoder for reconstruction of slots from explicit latents run
 ```bash
-python -m train explicit_latents --name RUN_NAME_DIS --data PATH_TO_SLOT_DATSET
+python -m train explicit_latents --name RUN_NAME_DIS --data PATH_TO_SLOT_DATASET
 ```
 For training with disentanglement you may use the configuration file 'explicit_latents_disent' instead.
 
@@ -75,7 +87,7 @@ python -m encode_data --data PATH_TO_SLOT_DATASET --ckpt PATH_TO_CHECKPOINT
 
 To train an image predictor using per-sequence implicit latent representations run
 ```bash
-python -m train implicit_dynamics --name RUN_NAME_DIS --data PATH_TO_EXPLICIT_DATSET
+python -m train implicit_dynamics --name RUN_NAME_DIS --data PATH_TO_EXPLICIT_DATASET
 ```
 
 ## Evaluation
@@ -83,12 +95,17 @@ python -m train implicit_dynamics --name RUN_NAME_DIS --data PATH_TO_EXPLICIT_DA
 To evaluate a single module run
 ```bash
 python -m eval_module --data PATH_TO_DATASET --ckpt PATH_TO_CHECKPOINT
-``` 
+```
 This will create an evaluation directory, containing the evaluation losses. In the case of a slot attention autoencoder checkpoint, the directory will include sample plots.
 
 Once all three modules of the pipeline are trained, the whole pipeline may be evaluated by running
 ```bash
 python -m eval_pipeline --data PATH_TO_SLIPSCAPE_DATASET --ckpt PATH_TO_DYNAMICS_CHECKPOINT
+```
+
+Similarly, once all modules are trained you may create artificial rollouts where future frames are predicted recursively and the final sequence gets saved as a .gif file, by running
+```bash
+python -m eval_rollout --data PATH_TO_SLIPSCAPE_DATASET --ckpt PATH_TO_DYNAMICS_CHECKPOINT
 ```
 
 ## How to Cite
@@ -100,9 +117,4 @@ python -m eval_pipeline --data PATH_TO_SLIPSCAPE_DATASET --ckpt PATH_TO_DYNAMICS
   year   = {2026},
   url    = {https://ulb-dok.uibk.ac.at/ulbtirolhs/download/pdf/13749414}
 }
-```
-
-Similarly, once all modules are trained you may create artificial rollouts where future frames are predicted recursively and the final sequence gets saved as a .gif file, by running 
-```bash
-python -m eval_rollout --data PATH_TO_SLIPSCAPE_DATASET --ckpt PATH_TO_DYNAMICS_CHECKPOINT
 ```
